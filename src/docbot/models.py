@@ -47,6 +47,23 @@ class RaisedError(BaseModel):
     citation: Citation
 
 
+class TourStep(BaseModel):
+    """A single step in a guided walkthrough."""
+
+    title: str
+    description: str
+    citation: Citation | None = None
+
+
+class Tour(BaseModel):
+    """A collection of steps making up a guided tour of the codebase."""
+
+    tour_id: str
+    title: str
+    description: str
+    steps: list[TourStep]
+
+
 # ---------------------------------------------------------------------------
 # Multi-language support (Phase 0 contracts)
 # ---------------------------------------------------------------------------
@@ -119,6 +136,7 @@ class DocsIndex(BaseModel):
     languages: list[str] = Field(default_factory=list)
     cross_scope_analysis: str = ""
     mermaid_graph: str = ""
+    tours: list[Tour] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

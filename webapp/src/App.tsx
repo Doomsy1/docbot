@@ -3,9 +3,10 @@ import Graph from './components/Graph';
 import Chat from './components/Chat';
 import FileViewer from './components/FileViewer';
 import Dashboard from './components/Dashboard';
+import TourViewer from './components/TourViewer';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph' | 'chat' | 'files'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph' | 'chat' | 'files' | 'tours'>('dashboard');
   const [selectedFile, setSelectedFile] = useState<string | undefined>();
 
   return (
@@ -26,6 +27,12 @@ export default function App() {
             Graph
           </button>
           <button 
+            onClick={() => setActiveTab('tours')}
+            className={`hover:underline ${activeTab === 'tours' ? 'underline decoration-2' : ''}`}
+          >
+            Tours
+          </button>
+          <button 
             onClick={() => setActiveTab('chat')}
             className={`hover:underline ${activeTab === 'chat' ? 'underline decoration-2' : ''}`}
           >
@@ -42,6 +49,12 @@ export default function App() {
       
       <main className="flex-1 overflow-hidden relative">
         {activeTab === 'dashboard' && <Dashboard />}
+        {activeTab === 'tours' && (
+          <TourViewer onSelectFile={(path) => {
+             setActiveTab('files');
+             setSelectedFile(path);
+          }} />
+        )}
         {activeTab === 'graph' && (
           <Graph onSelectFile={(path) => {
              setActiveTab('files');

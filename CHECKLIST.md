@@ -315,8 +315,8 @@
 - [x] `GET /api/source/{file_path}` — serve source code
 - [x] `GET /api/search?q=term` — search symbols
 - [x] `POST /api/chat` — AI chat endpoint
-- [ ] `GET /api/tours` — list guided tours
-- [ ] Tour generation logic integration
+- [x] `GET /api/tours` — list guided tours
+- [x] Tour generation logic integration
 
 #### CLI (`src/docbot/cli.py`)
 

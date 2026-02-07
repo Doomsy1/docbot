@@ -181,6 +181,43 @@ async def get_file(file_path: str) -> JSONResponse:
         raise HTTPException(status_code=500, detail=f"Error reading file: {e}")
 
 
+@app.get("/api/tours")
+async def get_tours() -> JSONResponse:
+    """Return the list of guided tours."""
+    index = _load_index()
+    
+    # If the index has tours, return them.
+    if index.tours:
+        return JSONResponse([t.model_dump() for t in index.tours])
+    
+    # Fallback/Demo: Generate a basic "Architecture Overview" tour
+    # if none exist. This helps verify the UI works immediately.
+    demo_tour = {
+        "tour_id": "overview",
+        "title": "Architecture Overview",
+        "description": "A quick walkthrough of the core components in this repository.",
+        "steps": []
+    }
+    
+    # Attempt to find some "interesting" files for the demo
+    # We look at entrypoints or key files from the first few scopes.
+    seen_files = set()
+    for scope in index.scopes[:3]:
+        files_to_add = scope.entrypoints or scope.key_files or scope.paths[:1]
+        for f in files_to_add:
+            if f not in seen_files:
+                demo_tour["steps"].append({
+                    "title": f.split('/')[-1],
+                    "description": f"This file is part of the **{scope.title}** scope.",
+                    "citation": {"file": f, "line_start": 1, "line_end": 10}
+                })
+                seen_files.add(f)
+                if len(demo_tour["steps"]) >= 5: break
+        if len(demo_tour["steps"]) >= 5: break
+
+    return JSONResponse([demo_tour])
+
+
 @app.get("/api/fs")
 async def get_fs() -> JSONResponse:
     """Return the repository file structure as a tree."""

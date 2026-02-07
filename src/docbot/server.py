@@ -9,12 +9,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from .models import DocsIndex
+from .search import SearchIndex, SearchResult
 
 app = FastAPI(title="docbot", version="0.1.0")
 
 # Set by start_server() before uvicorn starts.
 _run_dir: Path | None = None
 _index_cache: DocsIndex | None = None
+_search_index_cache: SearchIndex | None = None
 
 
 def _load_index() -> DocsIndex:
@@ -34,9 +36,48 @@ def _load_index() -> DocsIndex:
     return _index_cache
 
 
+def _load_search_index() -> SearchIndex:
+    """Load and cache the SearchIndex from the run directory."""
+    global _search_index_cache
+    if _search_index_cache is not None:
+        return _search_index_cache
+
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+
+    search_path = _run_dir / "search_index.json"
+    # It's optional for now (might not exist if search step failed/skipped)
+    if not search_path.exists():
+         # Return empty index if not found, to avoid crashing UI
+        return SearchIndex()
+
+    _search_index_cache = SearchIndex.load(search_path)
+    return _search_index_cache
+
+
 # ---------------------------------------------------------------------------
 # API endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/api/search", response_model=list[dict])
+async def search(q: str) -> list[dict]:
+    """Search for symbols and files."""
+    if not q:
+        return []
+    
+    idx = _load_search_index()
+    results = idx.search(q, limit=20)
+    
+    # Return as dicts for JSON serialization
+    return [
+        {
+            "citation": r.citation.model_dump(),
+            "score": r.score,
+            "match_context": r.match_context
+        }
+        for r in results
+    ]
+
 
 @app.get("/api/index")
 async def get_index() -> JSONResponse:
@@ -101,8 +142,9 @@ def start_server(run_dir: Path, host: str = "127.0.0.1", port: int = 8000) -> No
     """Start the webapp server pointing at a completed run directory."""
     import uvicorn
 
-    global _run_dir, _index_cache
+    global _run_dir, _index_cache, _search_index_cache
     _run_dir = run_dir.resolve()
     _index_cache = None
+    _search_index_cache = None
 
     uvicorn.run(app, host=host, port=port)

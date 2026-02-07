@@ -434,8 +434,8 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Save Events to Disk (`src/docbot/orchestrator.py`) -- Dev B
 
-- [ ] Call `tracker.export_events()` at end of `generate_async()` and `update_async()`
-- [ ] Write to `.docbot/history/<run_id>/pipeline_events.json`
+- [x] Call `tracker.export_events()` at end of `generate_async()` and `update_async()`
+- [x] Write to `.docbot/history/<run_id>/pipeline_events.json`
 
 #### Replay Server (`src/docbot/viz_server.py`) -- Dev C
 

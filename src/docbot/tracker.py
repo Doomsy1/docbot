@@ -36,6 +36,10 @@ class PipelineTracker:
         self._lock = threading.Lock()
         self._nodes: dict[str, AgentNode] = {}
         self._root_id: str | None = None
+        # Event recording for replay
+        self._events: list[dict] = []
+        self._start_time: float = time.time()
+        self._run_id: str = ""
 
     def add_node(self, node_id: str, name: str, parent_id: str | None = None) -> None:
         with self._lock:
@@ -45,6 +49,16 @@ class PipelineTracker:
                 self._root_id = node_id
             elif parent_id in self._nodes:
                 self._nodes[parent_id].children_ids.append(node_id)
+            # Record add event
+            self._events.append(
+                {
+                    "type": "add",
+                    "timestamp": time.time() - self._start_time,
+                    "node_id": node_id,
+                    "name": name,
+                    "parent_id": parent_id,
+                }
+            )
 
     def set_state(
         self, node_id: str, state: AgentState, detail: str = ""
@@ -60,6 +74,16 @@ class PipelineTracker:
                 node.started_at = now
             if state in (AgentState.done, AgentState.error):
                 node.finished_at = now
+            # Record state event
+            self._events.append(
+                {
+                    "type": "state",
+                    "timestamp": time.time() - self._start_time,
+                    "node_id": node_id,
+                    "state": state.value,
+                    "detail": detail,
+                }
+            )
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -85,6 +109,21 @@ class PipelineTracker:
                 )
             return {"nodes": nodes, "root": self._root_id}
 
+    def set_run_id(self, run_id: str) -> None:
+        """Set the run ID for this tracker (used in export_events)."""
+        with self._lock:
+            self._run_id = run_id
+
+    def export_events(self) -> dict:
+        """Export recorded events for replay."""
+        with self._lock:
+            total_duration = time.time() - self._start_time
+            return {
+                "run_id": self._run_id,
+                "total_duration": total_duration,
+                "events": list(self._events),  # Copy to avoid mutation
+            }
+
 
 class NoOpTracker:
     """Drop-in replacement that does nothing; used when --visualize is off."""
@@ -99,3 +138,9 @@ class NoOpTracker:
 
     def snapshot(self) -> dict[str, Any]:
         return {"nodes": [], "root": None}
+
+    def set_run_id(self, run_id: str) -> None:
+        pass
+
+    def export_events(self) -> dict:
+        return {"run_id": "", "total_duration": 0.0, "events": []}

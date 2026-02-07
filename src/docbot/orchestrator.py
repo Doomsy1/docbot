@@ -456,6 +456,7 @@ async def generate_async(
     
     # Create run metadata
     run_id = _make_run_id()
+    tracker.set_run_id(run_id)
     meta = RunMeta(
         run_id=run_id,
         repo_path=str(repo_path),
@@ -790,6 +791,7 @@ async def update_async(
     from .models import ProjectState, RunMeta
     
     run_id = _make_run_id()
+    tracker.set_run_id(run_id)
     meta = RunMeta(
         run_id=run_id,
         repo_path=str(repo_path),

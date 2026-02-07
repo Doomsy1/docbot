@@ -345,11 +345,11 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Diff Logic (`src/docbot/git/diff.py`) -- Dev B
 
-- [ ] `compute_diff(snapshot_from, snapshot_to)` -> DiffReport
-- [ ] Compare scope lists (added/removed/modified)
-- [ ] Per modified scope: compare file lists, symbol lists, doc hashes
-- [ ] Compare graph edges (added/removed)
-- [ ] Compute stats deltas
+- [x] `compute_diff(snapshot_from, snapshot_to)` -> DiffReport
+- [x] Compare scope lists (added/removed/modified)
+- [x] Per modified scope: compare file lists, symbol lists, doc hashes
+- [x] Compare graph edges (added/removed)
+- [x] Compute stats deltas
 
 #### CLI Command -- Dev A
 

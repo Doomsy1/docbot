@@ -176,6 +176,138 @@ async def get_scope_detail(scope_id: str) -> JSONResponse:
     raise HTTPException(status_code=404, detail=f"Scope '{scope_id}' not found.")
 
 
+# Known external service patterns detected from env vars and imports.
+_EXTERNAL_SERVICES: dict[str, dict] = {
+    # Databases
+    "mongodb": {"title": "MongoDB", "icon": "db",
+                "env_keywords": ["mongo", "mongodb"],
+                "import_keywords": ["pymongo", "motor", "mongoengine", "mongoclient"]},
+    "postgres": {"title": "PostgreSQL", "icon": "db",
+                 "env_keywords": ["postgres", "pghost", "pg_", "database_url"],
+                 "import_keywords": ["psycopg", "asyncpg", "sqlalchemy"]},
+    "redis": {"title": "Redis", "icon": "db",
+              "env_keywords": ["redis"],
+              "import_keywords": ["redis", "aioredis"]},
+    "mysql": {"title": "MySQL", "icon": "db",
+              "env_keywords": ["mysql"],
+              "import_keywords": ["mysql", "pymysql", "aiomysql"]},
+    "firebase": {"title": "Firebase", "icon": "cloud",
+                 "env_keywords": ["firebase"],
+                 "import_keywords": ["firebase", "firebase_admin"]},
+    "supabase": {"title": "Supabase", "icon": "cloud",
+                 "env_keywords": ["supabase"],
+                 "import_keywords": ["supabase"]},
+    # Cloud / storage
+    "aws_s3": {"title": "AWS S3", "icon": "cloud",
+               "env_keywords": ["aws_", "s3_", "s3bucket"],
+               "import_keywords": ["boto3", "botocore", "s3"]},
+    "digitalocean": {"title": "DigitalOcean", "icon": "cloud",
+                     "env_keywords": ["digitalocean", "do_space", "spaces"],
+                     "import_keywords": ["digitalocean"]},
+    "gcs": {"title": "Google Cloud Storage", "icon": "cloud",
+            "env_keywords": ["gcs_", "google_cloud", "gcloud"],
+            "import_keywords": ["google.cloud.storage"]},
+    # AI / LLM
+    "openai": {"title": "OpenAI", "icon": "ai",
+               "env_keywords": ["openai"],
+               "import_keywords": ["openai"]},
+    "gemini": {"title": "Google Gemini", "icon": "ai",
+               "env_keywords": ["gemini", "google_ai"],
+               "import_keywords": ["google.generativeai", "genai", "gemini"]},
+    "anthropic": {"title": "Anthropic", "icon": "ai",
+                  "env_keywords": ["anthropic", "claude"],
+                  "import_keywords": ["anthropic"]},
+    "openrouter": {"title": "OpenRouter", "icon": "ai",
+                   "env_keywords": ["openrouter"],
+                   "import_keywords": ["openrouter"]},
+    # Auth
+    "auth0": {"title": "Auth0", "icon": "auth",
+              "env_keywords": ["auth0"],
+              "import_keywords": ["auth0"]},
+    "clerk": {"title": "Clerk", "icon": "auth",
+              "env_keywords": ["clerk"],
+              "import_keywords": ["clerk"]},
+    # Messaging / APIs
+    "stripe": {"title": "Stripe", "icon": "api",
+               "env_keywords": ["stripe"],
+               "import_keywords": ["stripe"]},
+    "twilio": {"title": "Twilio", "icon": "api",
+               "env_keywords": ["twilio"],
+               "import_keywords": ["twilio"]},
+    "sendgrid": {"title": "SendGrid", "icon": "api",
+                 "env_keywords": ["sendgrid"],
+                 "import_keywords": ["sendgrid"]},
+    "selenium": {"title": "Selenium", "icon": "api",
+                 "env_keywords": ["selenium"],
+                 "import_keywords": ["selenium"]},
+    "playwright": {"title": "Playwright", "icon": "api",
+                   "env_keywords": ["playwright"],
+                   "import_keywords": ["playwright"]},
+    "ffmpeg": {"title": "FFmpeg", "icon": "api",
+               "env_keywords": ["ffmpeg"],
+               "import_keywords": ["ffmpeg", "ffprobe", "moviepy"]},
+    "greenhouse": {"title": "Greenhouse", "icon": "api",
+                   "env_keywords": ["greenhouse"],
+                   "import_keywords": ["greenhouse"]},
+}
+
+
+def _detect_external_services(index: "DocsIndex") -> tuple[list[dict], list[dict]]:
+    """Detect external services from env vars and imports across all scopes.
+
+    Returns (external_nodes, external_edges).
+    """
+    # Collect all env var names and imports per scope
+    scope_env: dict[str, set[str]] = {}
+    scope_imp: dict[str, set[str]] = {}
+    for s in index.scopes:
+        env_names = {e.name.lower() for e in s.env_vars}
+        imp_names = {i.lower() for i in s.imports}
+        scope_env[s.scope_id] = env_names
+        scope_imp[s.scope_id] = imp_names
+
+    # Also check global env vars
+    global_env = {e.name.lower() for e in index.env_vars}
+
+    found_services: dict[str, set[str]] = {}  # service_id -> set of scope_ids
+
+    for svc_id, svc in _EXTERNAL_SERVICES.items():
+        env_kws = svc["env_keywords"]
+        imp_kws = svc["import_keywords"]
+
+        for s in index.scopes:
+            matched = False
+            # Check only THIS scope's own env vars (not global)
+            for env_name in scope_env[s.scope_id]:
+                if any(kw in env_name for kw in env_kws):
+                    matched = True
+                    break
+            # Check this scope's imports
+            if not matched:
+                for imp in scope_imp[s.scope_id]:
+                    if any(kw in imp for kw in imp_kws):
+                        matched = True
+                        break
+            if matched:
+                found_services.setdefault(svc_id, set()).add(s.scope_id)
+
+    external_nodes = []
+    external_edges = []
+    for svc_id, scope_ids in found_services.items():
+        svc = _EXTERNAL_SERVICES[svc_id]
+        external_nodes.append({
+            "id": f"ext_{svc_id}",
+            "title": svc["title"],
+            "icon": svc["icon"],
+        })
+        for sid in scope_ids:
+            # Bidirectional: scope talks to service, service responds back
+            external_edges.append({"from": sid, "to": f"ext_{svc_id}"})
+            external_edges.append({"from": f"ext_{svc_id}", "to": sid})
+
+    return external_nodes, external_edges
+
+
 @app.get("/api/graph")
 async def get_graph() -> JSONResponse:
     """Return scope edges and scope metadata for visualization."""
@@ -206,11 +338,14 @@ async def get_graph() -> JSONResponse:
             }
         )
 
+    external_nodes, external_edges = _detect_external_services(index)
+
     return JSONResponse(
         {
             "scopes": scopes_meta,
             "scope_edges": [{"from": a, "to": b} for a, b in index.scope_edges],
-            "mermaid_graph": index.mermaid_graph or None,
+            "external_nodes": external_nodes,
+            "external_edges": external_edges,
         }
     )
 

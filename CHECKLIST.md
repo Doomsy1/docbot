@@ -235,12 +235,12 @@ full experience.
 
 #### Renderer Refactor (`src/docbot/renderer.py`) -- Dev C
 
-- [ ] Extract `render_scope_doc(scope, index, out_dir, llm_client)` -- single scope markdown
-- [ ] Extract `render_readme(index, out_dir, llm_client)` -- README.generated.md
-- [ ] Extract `render_architecture(index, out_dir, llm_client)` -- architecture.generated.md
-- [ ] Extract `render_api_reference(index, out_dir)` -- api.generated.md (template-only)
-- [ ] Extract `render_html_report(index, out_dir)` -- index.html
-- [ ] Refactor `render()` and `render_with_llm()` to call individual functions (no behavior change)
+- [x] Extract `render_scope_doc(scope, index, out_dir, llm_client)` -- single scope markdown
+- [x] Extract `render_readme(index, out_dir, llm_client)` -- README.generated.md
+- [x] Extract `render_architecture(index, out_dir, llm_client)` -- architecture.generated.md
+- [x] Extract `render_api_reference(index, out_dir)` -- api.generated.md (template-only)
+- [x] Extract `render_html_report(index, out_dir)` -- index.html
+- [x] Refactor `render()` and `render_with_llm()` to call individual functions (no behavior change)
 
 #### CLI Update -- Dev A
 
@@ -431,6 +431,7 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 - [x] Record "state" event on every `set_state()` call
 - [x] Implement `export_events()` -> `{"run_id": ..., "total_duration": ..., "events": [...]}`
 - [x] Add no-op `export_events()` to `NoOpTracker`
+- [x] Add `set_run_id()` method to both tracker classes
 
 #### Save Events to Disk (`src/docbot/orchestrator.py`) -- Dev B
 
@@ -442,14 +443,16 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 - [x] Implement `start_replay_server(events_path)`:
   - [x] `GET /` serves replay HTML
   - [x] `GET /events` serves recorded event log as JSON
+  - [x] Auto-open browser
+  - [x] Blocking server with Ctrl+C shutdown
 
 #### Replay UI (`src/docbot/_viz_html.py`) -- Dev C
 
-- [x] Create `REPLAY_HTML` constant (or replay mode in existing VIZ_HTML)
+- [x] Create `REPLAY_HTML` constant (~430 lines)
 - [x] JavaScript event player: virtual clock, applies events up to current time
 - [x] Play / Pause control
 - [x] Speed selector (1x, 2x, 4x, 8x)
-- [x] Timeline scrubber (drag to any point)
+- [x] Timeline scrubber (click to seek)
 - [x] Step forward / back (one event at a time)
 - [x] Elapsed time display (current position / total duration)
 - [x] Same D3 radial tree rendering as live mode
@@ -459,6 +462,7 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 - [x] Add `docbot replay [run_id]` command
 - [x] Default to most recent run if no run_id given
 - [x] Start replay server + open browser
+- [x] Port configuration via `--port` flag
 
 #### Verification
 
@@ -466,8 +470,9 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 - [x] `docbot replay` opens replay of most recent run
 - [x] `docbot replay <run_id>` replays a specific past run
 - [x] Playback controls (play/pause/speed/scrub/step) work correctly
-- [ ] Replay visualization matches what the live view showed during the original run
+- [x] Replay visualization matches what the live view showed during the original run
 - [x] `NoOpTracker.export_events()` returns empty data without errors
+- [x] All 99 unit tests passing
 
 ---
 

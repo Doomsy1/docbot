@@ -379,12 +379,12 @@
 
 #### Integration
 
-- [ ] Switch API client from mocks to real endpoints (Dev A's server)
-- [ ] Test end-to-end flow:
-  - [ ] Graph loads real analysis data
-  - [ ] Source viewer loads real file content
-  - [ ] Chat sends/receives real messages
-- [ ] Polish loading states and error handling
+- [x] Switch API client from mocks to real endpoints (Dev A's server)
+- [x] Test end-to-end flow:
+  - [x] Graph loads real analysis data
+  - [x] Source viewer loads real file content
+  - [x] Chat sends/receives real messages
+- [x] Polish loading states and error handling
 
 #### Self-check before merge
 

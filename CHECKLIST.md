@@ -418,6 +418,59 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 ---
 
+### 3H: Pipeline Visualization Replay
+
+**Owner:** Dev C (tracker, viz_server, viz HTML), Dev B (orchestrator save), Dev A (CLI command)
+
+> **Depends on:** 3B (needs generate_async/update_async to save events), 3D (events stored alongside snapshots)
+
+#### Event Recording (`src/docbot/tracker.py`) -- Dev C
+
+- [ ] Add `_events: list[dict]` and `_start_time: float` to `PipelineTracker`
+- [ ] Record "add" event on every `add_node()` call
+- [ ] Record "state" event on every `set_state()` call
+- [ ] Implement `export_events()` -> `{"run_id": ..., "total_duration": ..., "events": [...]}`
+- [ ] Add no-op `export_events()` to `NoOpTracker`
+
+#### Save Events to Disk (`src/docbot/orchestrator.py`) -- Dev B
+
+- [ ] Call `tracker.export_events()` at end of `generate_async()` and `update_async()`
+- [ ] Write to `.docbot/history/<run_id>/pipeline_events.json`
+
+#### Replay Server (`src/docbot/viz_server.py`) -- Dev C
+
+- [ ] Implement `start_replay_server(events_path)`:
+  - [ ] `GET /` serves replay HTML
+  - [ ] `GET /events` serves recorded event log as JSON
+
+#### Replay UI (`src/docbot/_viz_html.py`) -- Dev C
+
+- [ ] Create `REPLAY_HTML` constant (or replay mode in existing VIZ_HTML)
+- [ ] JavaScript event player: virtual clock, applies events up to current time
+- [ ] Play / Pause control
+- [ ] Speed selector (1x, 2x, 4x, 8x)
+- [ ] Timeline scrubber (drag to any point)
+- [ ] Step forward / back (one event at a time)
+- [ ] Elapsed time display (current position / total duration)
+- [ ] Same D3 radial tree rendering as live mode
+
+#### CLI Command (`src/docbot/cli.py`) -- Dev A
+
+- [ ] Add `docbot replay [run_id]` command
+- [ ] Default to most recent run if no run_id given
+- [ ] Start replay server + open browser
+
+#### Verification
+
+- [ ] Live pipeline run saves `pipeline_events.json` to history
+- [ ] `docbot replay` opens replay of most recent run
+- [ ] `docbot replay <run_id>` replays a specific past run
+- [ ] Playback controls (play/pause/speed/scrub/step) work correctly
+- [ ] Replay visualization matches what the live view showed during the original run
+- [ ] `NoOpTracker.export_events()` returns empty data without errors
+
+---
+
 ## End-to-End Verification
 
 After all Phase 3 sections complete:
@@ -435,6 +488,8 @@ After all Phase 3 sections complete:
 - [ ] Committing auto-triggers `docbot update` via post-commit hook
 - [ ] `git pull` auto-triggers `docbot update` via post-merge hook
 - [ ] `docbot hook uninstall` removes all hooks cleanly
+- [ ] `docbot replay` opens replay of most recent pipeline run
+- [ ] `docbot replay <run_id>` replays a specific past run with full playback controls
 - [ ] `docbot run` works as alias for generate
 - [ ] `docbot config` read/write works
 - [ ] Test on a Python project (regression)

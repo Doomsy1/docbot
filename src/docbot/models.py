@@ -187,7 +187,7 @@ class DocbotConfig(BaseModel):
     Precedence: CLI flag > config.toml > default.
     """
 
-    model: str = "xiaomi/mimo-v2-flash"
+    model: str = "openai/gpt-oss-20b"
     """OpenRouter model ID for LLM calls."""
 
     concurrency: int = 4

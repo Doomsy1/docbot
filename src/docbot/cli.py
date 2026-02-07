@@ -582,6 +582,102 @@ def config(
     console.print(f"[green]Updated:[/green] {key} = {coerced!r}")
 
 
+@app.command()
+def diff(
+    from_snapshot: Optional[str] = typer.Option(
+        None, "--from", help="Source snapshot (run ID). Default: previous snapshot."
+    ),
+    to_snapshot: Optional[str] = typer.Option(
+        None, "--to", help="Target snapshot (run ID). Default: latest snapshot."
+    ),
+    path: Optional[Path] = typer.Argument(
+        None, help="Repository path (default: current directory)."
+    ),
+) -> None:
+    """Compare two documentation snapshots and show what changed."""
+    from .git.diff import compute_diff
+    from .git.history import list_snapshots, load_snapshot
+
+    project_root, docbot_dir = _require_docbot(path)
+
+    # List available snapshots
+    snapshots = list_snapshots(docbot_dir)
+    if len(snapshots) < 1:
+        console.print("[yellow]No snapshots found. Run 'docbot generate' first.[/yellow]")
+        raise typer.Exit(code=1)
+
+    # Determine source snapshot
+    if from_snapshot:
+        # User specified --from
+        from_snap = load_snapshot(docbot_dir, from_snapshot)
+        if not from_snap:
+            console.print(f"[red]Snapshot not found:[/red] {from_snapshot}")
+            raise typer.Exit(code=1)
+    else:
+        # Default: use second-to-last snapshot
+        if len(snapshots) < 2:
+            console.print("[yellow]Need at least 2 snapshots to compare.[/yellow]")
+            console.print(f"  Found {len(snapshots)} snapshot(s). Run 'docbot generate' again.")
+            raise typer.Exit(code=1)
+        from_snap = snapshots[-2]  # Second to last
+
+    # Determine target snapshot
+    if to_snapshot:
+        # User specified --to
+        to_snap = load_snapshot(docbot_dir, to_snapshot)
+        if not to_snap:
+            console.print(f"[red]Snapshot not found:[/red] {to_snapshot}")
+            raise typer.Exit(code=1)
+    else:
+        # Default: use latest snapshot
+        to_snap = snapshots[-1]
+
+    # Compute diff
+    diff_report = compute_diff(from_snap, to_snap)
+
+    # Print human-readable report
+    console.print(f"\n[bold]Comparing snapshots:[/bold]")
+    console.print(f"  From: {from_snap.run_id} ({from_snap.commit_hash[:8]})")
+    console.print(f"  To:   {to_snap.run_id} ({to_snap.commit_hash[:8]})")
+    console.print()
+
+    # Added scopes
+    if diff_report.added_scopes:
+        console.print(f"[green]+ Added scopes ({len(diff_report.added_scopes)}):[/green]")
+        for scope_id in diff_report.added_scopes:
+            console.print(f"  + {scope_id}")
+        console.print()
+
+    # Removed scopes
+    if diff_report.removed_scopes:
+        console.print(f"[red]- Removed scopes ({len(diff_report.removed_scopes)}):[/red]")
+        for scope_id in diff_report.removed_scopes:
+            console.print(f"  - {scope_id}")
+        console.print()
+
+    # Modified scopes
+    if diff_report.modified_scopes:
+        console.print(f"[yellow]~ Modified scopes ({len(diff_report.modified_scopes)}):[/yellow]")
+        for mod in diff_report.modified_scopes:
+            console.print(f"  ~ {mod.scope_id}")
+            if mod.summary_changed:
+                console.print(f"    - Summary changed")
+        console.print()
+
+    # Statistics delta
+    console.print("[bold]Statistics:[/bold]")
+    stats = diff_report.stats_delta
+    console.print(f"  Files:   {stats.total_files:+d}")
+    console.print(f"  Scopes:  {stats.total_scopes:+d}")
+    console.print(f"  Symbols: {stats.total_symbols:+d}")
+    console.print()
+
+    # Graph changes
+    if diff_report.graph_changes.changed_nodes:
+        console.print("[cyan]Graph structure changed[/cyan]")
+
+
+
 # ---------------------------------------------------------------------------
 # Hook subcommands
 # ---------------------------------------------------------------------------
@@ -592,15 +688,27 @@ def hook_install(
     path: Optional[Path] = typer.Argument(
         None, help="Repository path (default: current directory)."
     ),
+    commit_only: bool = typer.Option(
+        False, "--commit-only", help="Install only post-commit hook (skip post-merge)."
+    ),
 ) -> None:
-    """Install a post-commit git hook that runs 'docbot update'."""
+    """Install git hooks that run 'docbot update' on commit/merge.
+    
+    By default, installs both post-commit and post-merge hooks.
+    Use --commit-only to install only the post-commit hook.
+    """
     from .hooks import install_hook
 
     project_root, _docbot_dir = _require_docbot(path)
 
-    if install_hook(project_root):
-        console.print("[green]Post-commit hook installed.[/green]")
-        console.print("  Docs will auto-update on each commit.")
+    if install_hook(project_root, commit_only=commit_only):
+        if commit_only:
+            console.print("[green]Post-commit hook installed.[/green]")
+            console.print("  Docs will auto-update on each commit.")
+        else:
+            console.print("[green]Git hooks installed.[/green]")
+            console.print("  Post-commit: Docs will auto-update on each commit.")
+            console.print("  Post-merge:  Docs will auto-update after merges/pulls.")
     else:
         console.print("[red]Error:[/red] Could not install hook (is this a git repo?).")
         raise typer.Exit(code=1)

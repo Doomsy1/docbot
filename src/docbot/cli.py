@@ -688,15 +688,27 @@ def hook_install(
     path: Optional[Path] = typer.Argument(
         None, help="Repository path (default: current directory)."
     ),
+    commit_only: bool = typer.Option(
+        False, "--commit-only", help="Install only post-commit hook (skip post-merge)."
+    ),
 ) -> None:
-    """Install a post-commit git hook that runs 'docbot update'."""
+    """Install git hooks that run 'docbot update' on commit/merge.
+    
+    By default, installs both post-commit and post-merge hooks.
+    Use --commit-only to install only the post-commit hook.
+    """
     from .hooks import install_hook
 
     project_root, _docbot_dir = _require_docbot(path)
 
-    if install_hook(project_root):
-        console.print("[green]Post-commit hook installed.[/green]")
-        console.print("  Docs will auto-update on each commit.")
+    if install_hook(project_root, commit_only=commit_only):
+        if commit_only:
+            console.print("[green]Post-commit hook installed.[/green]")
+            console.print("  Docs will auto-update on each commit.")
+        else:
+            console.print("[green]Git hooks installed.[/green]")
+            console.print("  Post-commit: Docs will auto-update on each commit.")
+            console.print("  Post-merge:  Docs will auto-update after merges/pulls.")
     else:
         console.print("[red]Error:[/red] Could not install hook (is this a git repo?).")
         raise typer.Exit(code=1)

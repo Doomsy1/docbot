@@ -364,7 +364,7 @@
 **Branch:** `phase2/webapp`
 **Owned files:** `server.py`, `webapp/*`, `tracker.py`, `viz_server.py`, `_viz_html.py`
 
-- [ ] Serve static files from `webapp/dist/` at `/`
+- [x] Serve static files from `webapp/dist/` at `/`
 
 #### Backend Completion (Moved to Dev A)
 

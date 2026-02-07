@@ -223,10 +223,36 @@ async def get_fs() -> JSONResponse:
 def start_server(run_dir: Path, host: str = "127.0.0.1", port: int = 8000) -> None:
     """Start the webapp server pointing at a completed run directory."""
     import uvicorn
+    from fastapi.staticfiles import StaticFiles
 
     global _run_dir, _index_cache, _search_index_cache
     _run_dir = run_dir.resolve()
     _index_cache = None
     _search_index_cache = None
+
+    # Locate webapp/dist relative to this file
+    # dev mode: src/docbot/server.py -> ../../webapp/dist
+    # package mode: site-packages/docbot/server.py -> site-packages/docbot/webapp/dist (if bundled)
+    here = Path(__file__).parent.resolve()
+    
+    # Try finding the distro
+    potential_dists = [
+        here / "web_dist",                    # Bundled package
+        here.parents[1] / "webapp" / "dist",  # Editable / source checkout
+    ]
+    
+    dist_dir = None
+    for p in potential_dists:
+        if p.exists() and (p / "index.html").exists():
+            dist_dir = p
+            break
+            
+    if dist_dir:
+        # Mount static files at root
+        # html=True means /foo will try /foo.html or /foo/index.html
+        app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="static")
+        print(f"Serving static assets from {dist_dir}")
+    else:
+        print("Warning: webapp/dist not found. Serving API only.")
 
     uvicorn.run(app, host=host, port=port)

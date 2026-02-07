@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from .explorer import enrich_scope_with_llm, explore_scope
+from .extractors import setup_extractors
 from .llm import LLMClient
 from .models import DocsIndex, RunMeta, ScopePlan, ScopeResult
 from .planner import build_plan, refine_plan_with_llm
@@ -114,6 +115,9 @@ async def run_async(
         console.print(f"[bold]LLM:[/bold] {llm_client.model} via OpenRouter (used at every step)")
     else:
         console.print("[dim]No LLM configured; using template-only mode.[/dim]")
+
+    # Register extractors (Python AST, tree-sitter, LLM fallback).
+    setup_extractors(llm_client=llm_client)
 
     # -- Build tracker tree skeleton --
     tracker.add_node("orchestrator", "Orchestrator")

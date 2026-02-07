@@ -1,28 +1,27 @@
-"""Explorer -- AST-based extraction for a single documentation scope."""
+"""Explorer -- extraction for a single documentation scope.
+
+Uses the pluggable extractor system (extractors/) to handle any language.
+Falls back to a minimal file-listing if no extractor is registered for a
+file's language.
+"""
 
 from __future__ import annotations
 
-import ast
-import re
+import os
 import traceback
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
+from .extractors import get_extractor
 from .models import (
     Citation,
     EnvVar,
+    FileExtraction,
     PublicSymbol,
     RaisedError,
     ScopePlan,
     ScopeResult,
 )
-from .scanner import ENTRYPOINT_NAMES
-
-# Regex to catch os.getenv / os.environ.get / os.environ[...] patterns.
-_ENV_RE = re.compile(
-    r"""os\.(?:getenv|environ\.get|environ\[)"""
-    r"""\s*\(?\s*['"]([A-Z_][A-Z0-9_]*)['"]"""
-    r"""(?:\s*,\s*['"]?([^'"\)]+)['"]?)?""",
-)
+from .scanner import ENTRYPOINT_NAMES, LANGUAGE_EXTENSIONS
 
 # Filenames considered "key files" when present in a scope.
 _KEY_BASENAMES = {"__init__.py", "settings.py", "config.py", "conf.py"} | ENTRYPOINT_NAMES
@@ -34,12 +33,12 @@ _LLM_SOURCE_BUDGET = 12000
 
 _EXPLORER_SYSTEM = """\
 You are a technical documentation assistant. You produce accurate, concise \
-summaries of Python code modules. Only describe what the code actually does \
+summaries of code modules. Only describe what the code actually does \
 based on the extracted signals and source snippets provided. Never invent \
 functionality that is not evidenced in the data. Use plain language."""
 
 _EXPLORER_PROMPT = """\
-Summarize this documentation scope for a Python repository.
+Summarize this documentation scope for a {languages} repository.
 
 Scope: {title}
 Files ({file_count}): {file_list}
@@ -64,144 +63,14 @@ Write a 2-4 paragraph summary covering:
 Stay factual. Reference specific symbols and files. Do not speculate."""
 
 
-def _safe_unparse(node: ast.AST) -> str:
-    try:
-        return ast.unparse(node)
-    except Exception:
-        return "<unparse-failed>"
-
-
-def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
-    """Best-effort function signature string."""
-    try:
-        args = ast.unparse(node.args)
-    except Exception:
-        args = "..."
-    ret = ""
-    if node.returns:
-        try:
-            ret = f" -> {ast.unparse(node.returns)}"
-        except Exception:
-            pass
-    prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
-    return f"{prefix} {node.name}({args}){ret}"
-
-
-def _first_line_docstring(node: ast.AST) -> str | None:
-    """Return first non-empty line of a node's docstring, or None."""
-    ds = ast.get_docstring(node)
-    if not ds:
-        return None
-    for line in ds.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    return None
-
-
-def _extract_file(
-    abs_path: Path,
-    rel_path: str,
-    symbols: list[PublicSymbol],
-    env_vars: list[EnvVar],
-    raised_errors: list[RaisedError],
-    citations: list[Citation],
-    imports: list[str],
-) -> None:
-    """Parse one Python file and populate the output lists."""
-
-    source = abs_path.read_text(encoding="utf-8", errors="replace")
-
-    # --- regex pass for env vars (works even if AST fails) ---
-    for m in _ENV_RE.finditer(source):
-        lineno = source[: m.start()].count("\n") + 1
-        env_vars.append(EnvVar(
-            name=m.group(1),
-            default=m.group(2) if m.group(2) else None,
-            citation=Citation(file=rel_path, line_start=lineno, line_end=lineno),
-        ))
-
-    # --- AST pass ---
-    try:
-        tree = ast.parse(source, filename=rel_path)
-    except SyntaxError:
-        return  # skip unparseable files
-
-    # Compute this file's package path for resolving relative imports.
-    # e.g. "src/docbot/cli.py" -> ["src", "docbot"]
-    _rel_parts = PurePosixPath(rel_path).parts
-    _pkg_parts = list(_rel_parts[:-1])  # directory parts
-
-    for node in ast.walk(tree):
-        # Import statements -- resolve to repo-relative dotted paths.
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                imports.append(alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            mod = node.module or ""
-            if node.level and node.level > 0:
-                # Relative import: go up `level` directories from this file's package.
-                base = _pkg_parts[:max(0, len(_pkg_parts) - (node.level - 1))]
-                resolved = ".".join(base + ([mod] if mod else []))
-                if resolved:
-                    imports.append(resolved)
-            elif mod:
-                imports.append(mod)
-        # Public functions / async functions at module level
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if not node.name.startswith("_"):
-                cit = Citation(
-                    file=rel_path,
-                    line_start=node.lineno,
-                    line_end=node.end_lineno or node.lineno,
-                    symbol=node.name,
-                )
-                symbols.append(PublicSymbol(
-                    name=node.name,
-                    kind="function",
-                    signature=_signature(node),
-                    docstring_first_line=_first_line_docstring(node),
-                    citation=cit,
-                ))
-                citations.append(cit)
-
-        # Public classes at module level
-        elif isinstance(node, ast.ClassDef):
-            if not node.name.startswith("_"):
-                cit = Citation(
-                    file=rel_path,
-                    line_start=node.lineno,
-                    line_end=node.end_lineno or node.lineno,
-                    symbol=node.name,
-                )
-                # Build a minimal class signature
-                bases = ", ".join(_safe_unparse(b) for b in node.bases)
-                sig = f"class {node.name}({bases})" if bases else f"class {node.name}"
-                symbols.append(PublicSymbol(
-                    name=node.name,
-                    kind="class",
-                    signature=sig,
-                    docstring_first_line=_first_line_docstring(node),
-                    citation=cit,
-                ))
-                citations.append(cit)
-
-        # Raise statements
-        elif isinstance(node, ast.Raise):
-            expr_str = _safe_unparse(node.exc) if node.exc else "<bare raise>"
-            lineno = node.lineno
-            raised_errors.append(RaisedError(
-                expression=expr_str,
-                citation=Citation(
-                    file=rel_path,
-                    line_start=lineno,
-                    line_end=node.end_lineno or lineno,
-                ),
-            ))
+def _language_for_path(rel_path: str) -> str | None:
+    """Return the language for a file based on its extension, or None."""
+    ext = os.path.splitext(rel_path)[1].lower()
+    return LANGUAGE_EXTENSIONS.get(ext)
 
 
 def explore_scope(plan: ScopePlan, repo_root: Path) -> ScopeResult:
-    """Synchronous AST extraction for a scope. Returns structured result.
+    """Extraction for a scope using registered extractors.
 
     This is the CPU-bound step that runs in a thread.
     """
@@ -212,6 +81,7 @@ def explore_scope(plan: ScopePlan, repo_root: Path) -> ScopeResult:
     imports: list[str] = []
     key_files: list[str] = []
     entrypoint_files: list[str] = []
+    seen_languages: set[str] = set()
 
     for rel_path in plan.paths:
         abs_path = repo_root / rel_path
@@ -224,13 +94,31 @@ def explore_scope(plan: ScopePlan, repo_root: Path) -> ScopeResult:
         if basename in ENTRYPOINT_NAMES:
             entrypoint_files.append(rel_path)
 
-        try:
-            _extract_file(abs_path, rel_path, symbols, env_vars, raised_errors, citations, imports)
-        except Exception:
-            # Per-file failures should not kill the scope.
+        language = _language_for_path(rel_path)
+        if language:
+            seen_languages.add(language)
+
+        extractor = get_extractor(language) if language else None
+
+        if extractor is not None:
+            try:
+                extraction: FileExtraction = extractor.extract_file(abs_path, rel_path, language)
+                symbols.extend(extraction.symbols)
+                env_vars.extend(extraction.env_vars)
+                raised_errors.extend(extraction.raised_errors)
+                citations.extend(extraction.citations)
+                imports.extend(extraction.imports)
+            except Exception:
+                citations.append(Citation(
+                    file=rel_path, line_start=0, line_end=0,
+                    snippet=f"EXTRACTION ERROR: {traceback.format_exc(limit=2)}",
+                ))
+        else:
+            # No extractor available — record file as a citation so it
+            # still appears in the output.
             citations.append(Citation(
                 file=rel_path, line_start=0, line_end=0,
-                snippet=f"EXTRACTION ERROR: {traceback.format_exc(limit=2)}",
+                snippet=f"No extractor for {language or 'unknown'} — file listed only.",
             ))
 
     # Build a basic summary from signals (used as fallback if LLM is unavailable).
@@ -257,6 +145,7 @@ def explore_scope(plan: ScopePlan, repo_root: Path) -> ScopeResult:
         env_vars=env_vars,
         raised_errors=raised_errors,
         imports=sorted(set(imports)),
+        languages=sorted(seen_languages),
     )
 
 
@@ -307,7 +196,10 @@ async def enrich_scope_with_llm(
 
     source_snippets = _build_source_snippets(result, repo_root)
 
+    languages = ", ".join(result.languages) if result.languages else "unknown"
+
     prompt = _EXPLORER_PROMPT.format(
+        languages=languages,
         title=result.title,
         file_count=len(result.paths),
         file_list=", ".join(result.paths[:30]) + ("..." if len(result.paths) > 30 else ""),

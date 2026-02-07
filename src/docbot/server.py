@@ -63,6 +63,23 @@ def _load_search_index() -> SearchIndex:
     return _search_index_cache
 
 
+def _get_docbot_dir() -> Path:
+    """Get the .docbot directory from the run directory."""
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+
+    index = _load_index()
+    repo_root = Path(index.repo_path).resolve()
+    docbot_dir = repo_root / ".docbot"
+
+    if not docbot_dir.exists():
+        raise HTTPException(
+            status_code=404, detail=".docbot directory not found in repository."
+        )
+
+    return docbot_dir
+
+
 # ---------------------------------------------------------------------------
 # API endpoints
 # ---------------------------------------------------------------------------
@@ -454,7 +471,7 @@ Cross-scope analysis:
 """
 
 
-def _build_chat_system_prompt(index: DocsIndex) -> str:
+def _build_chat_system_prompt(index: DocsIndex, diff_report: dict | None = None) -> str:
     """Build the system prompt for chat from the DocsIndex."""
     scope_lines = []
     for s in index.scopes:
@@ -486,17 +503,50 @@ def _build_chat_system_prompt(index: DocsIndex) -> str:
     edge_lines = [f"  {a} -> {b}" for a, b in index.scope_edges[:50]]
     edge_block = "\n".join(edge_lines) if edge_lines else "(none)"
 
-    return _CHAT_SYSTEM_TEMPLATE.format(
-        repo_path=index.repo_path,
-        languages=", ".join(index.languages) if index.languages else "unknown",
-        scope_count=len(index.scopes),
-        scope_summaries=scope_summaries,
-        api_count=len(index.public_api),
-        api_block=api_block,
-        env_count=len(index.env_vars),
-        env_block=env_block,
-        edge_block=edge_block,
-        cross_scope_analysis=index.cross_scope_analysis or "(none)",
+    # Add recent changes section if available
+    changes_section = ""
+    if diff_report:
+        changes_lines = []
+        if diff_report.get("added_scopes"):
+            changes_lines.append(
+                f"Added scopes: {', '.join(diff_report['added_scopes'])}"
+            )
+        if diff_report.get("removed_scopes"):
+            changes_lines.append(
+                f"Removed scopes: {', '.join(diff_report['removed_scopes'])}"
+            )
+        if diff_report.get("modified_scopes"):
+            changes_lines.append(
+                f"Modified scopes: {len(diff_report['modified_scopes'])}"
+            )
+
+        stats = diff_report.get("stats_delta", {})
+        if any(stats.values()):
+            changes_lines.append(
+                f"Stats delta: {stats.get('total_files', 0):+d} files, "
+                f"{stats.get('total_scopes', 0):+d} scopes, "
+                f"{stats.get('total_symbols', 0):+d} symbols"
+            )
+
+        if changes_lines:
+            changes_section = (
+                "\n\nRecent changes (since last snapshot):\n" + "\n".join(changes_lines)
+            )
+
+    return (
+        _CHAT_SYSTEM_TEMPLATE.format(
+            repo_path=index.repo_path,
+            languages=", ".join(index.languages) if index.languages else "unknown",
+            scope_count=len(index.scopes),
+            scope_summaries=scope_summaries,
+            api_count=len(index.public_api),
+            api_block=api_block,
+            env_count=len(index.env_vars),
+            env_block=env_block,
+            edge_block=edge_block,
+            cross_scope_analysis=index.cross_scope_analysis or "(none)",
+        )
+        + changes_section
     )
 
 
@@ -537,8 +587,33 @@ async def chat(req: ChatRequest) -> ChatResponse:
     else:
         context = "No direct code matches were found in the index."
 
+    # Try to load recent changes
+    diff_report = None
+    try:
+        from .git.diff import compute_diff
+        from .git.history import list_snapshots
+
+        docbot_dir = _get_docbot_dir()
+        snapshots = list_snapshots(docbot_dir)
+
+        if len(snapshots) >= 2:
+            diff = compute_diff(snapshots[-2], snapshots[-1])
+            diff_report = {
+                "added_scopes": diff.added_scopes,
+                "removed_scopes": diff.removed_scopes,
+                "modified_scopes": diff.modified_scopes,
+                "stats_delta": {
+                    "total_files": diff.stats_delta.total_files,
+                    "total_scopes": diff.stats_delta.total_scopes,
+                    "total_symbols": diff.stats_delta.total_symbols,
+                },
+            }
+    except Exception:
+        # If we can't load changes, just continue without them
+        pass
+
     messages = [
-        {"role": "system", "content": _build_chat_system_prompt(index)},
+        {"role": "system", "content": _build_chat_system_prompt(index, diff_report)},
         {
             "role": "user",
             "content": f"Question:\n{question}\n\nRelevant code context:\n{context}",
@@ -750,6 +825,165 @@ async def get_tour_detail(tour_id: str) -> JSONResponse:
         if t.get("tour_id") == tour_id:
             return JSONResponse(t)
     raise HTTPException(status_code=404, detail=f"Tour '{tour_id}' not found.")
+
+
+# ---------------------------------------------------------------------------
+# History & Changes
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/history")
+async def get_history() -> JSONResponse:
+    """List all available snapshots with metadata."""
+    from .git.history import list_snapshots
+
+    docbot_dir = _get_docbot_dir()
+    snapshots = list_snapshots(docbot_dir)
+
+    # Convert to JSON-serializable format
+    snapshots_data = []
+    for snap in snapshots:
+        snapshots_data.append(
+            {
+                "run_id": snap.run_id,
+                "commit_hash": snap.commit_hash,
+                "timestamp": snap.timestamp,
+                "stats": {
+                    "total_files": snap.stats.total_files,
+                    "total_scopes": snap.stats.total_scopes,
+                    "total_symbols": snap.stats.total_symbols,
+                },
+                "scope_count": len(snap.scope_summaries),
+            }
+        )
+
+    return JSONResponse({"snapshots": snapshots_data})
+
+
+@app.get("/api/history/{run_id}")
+async def get_snapshot_detail(run_id: str) -> JSONResponse:
+    """Return detailed information for a specific snapshot."""
+    from .git.history import load_snapshot
+
+    docbot_dir = _get_docbot_dir()
+    snapshot = load_snapshot(docbot_dir, run_id)
+
+    if not snapshot:
+        raise HTTPException(status_code=404, detail=f"Snapshot '{run_id}' not found.")
+
+    # Convert to JSON-serializable format
+    return JSONResponse(
+        {
+            "run_id": snapshot.run_id,
+            "commit_hash": snapshot.commit_hash,
+            "timestamp": snapshot.timestamp,
+            "graph_digest": snapshot.graph_digest,
+            "stats": {
+                "total_files": snapshot.stats.total_files,
+                "total_scopes": snapshot.stats.total_scopes,
+                "total_symbols": snapshot.stats.total_symbols,
+            },
+            "scope_summaries": {
+                scope_id: {
+                    "file_count": summary.file_count,
+                    "symbol_count": summary.symbol_count,
+                    "summary_hash": summary.summary_hash,
+                }
+                for scope_id, summary in snapshot.scope_summaries.items()
+            },
+            "doc_hashes": snapshot.doc_hashes,
+        }
+    )
+
+
+@app.get("/api/changes")
+async def get_changes(
+    from_snapshot: str | None = None,
+    to_snapshot: str | None = None,
+) -> JSONResponse:
+    """Compare two snapshots and return a diff report.
+
+    Query params:
+    - from: Source snapshot run_id (default: second-to-last)
+    - to: Target snapshot run_id (default: latest)
+    """
+    from .git.diff import compute_diff
+    from .git.history import list_snapshots, load_snapshot
+
+    docbot_dir = _get_docbot_dir()
+    snapshots = list_snapshots(docbot_dir)
+
+    if len(snapshots) < 1:
+        raise HTTPException(status_code=404, detail="No snapshots available.")
+
+    # Determine source snapshot
+    if from_snapshot:
+        from_snap = load_snapshot(docbot_dir, from_snapshot)
+        if not from_snap:
+            raise HTTPException(
+                status_code=404, detail=f"Snapshot '{from_snapshot}' not found."
+            )
+    else:
+        # Default: use second-to-last snapshot
+        if len(snapshots) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="Need at least 2 snapshots to compare. Only 1 snapshot available.",
+            )
+        from_snap = snapshots[-2]
+
+    # Determine target snapshot
+    if to_snapshot:
+        to_snap = load_snapshot(docbot_dir, to_snapshot)
+        if not to_snap:
+            raise HTTPException(
+                status_code=404, detail=f"Snapshot '{to_snapshot}' not found."
+            )
+    else:
+        # Default: use latest snapshot
+        to_snap = snapshots[-1]
+
+    # Compute diff
+    diff_report = compute_diff(from_snap, to_snap)
+
+    # Convert to JSON-serializable format
+    return JSONResponse(
+        {
+            "from_snapshot": {
+                "run_id": from_snap.run_id,
+                "commit_hash": from_snap.commit_hash,
+                "timestamp": from_snap.timestamp,
+            },
+            "to_snapshot": {
+                "run_id": to_snap.run_id,
+                "commit_hash": to_snap.commit_hash,
+                "timestamp": to_snap.timestamp,
+            },
+            "added_scopes": diff_report.added_scopes,
+            "removed_scopes": diff_report.removed_scopes,
+            "modified_scopes": [
+                {
+                    "scope_id": mod.scope_id,
+                    "added_files": mod.added_files,
+                    "removed_files": mod.removed_files,
+                    "added_symbols": mod.added_symbols,
+                    "removed_symbols": mod.removed_symbols,
+                    "summary_changed": mod.summary_changed,
+                }
+                for mod in diff_report.modified_scopes
+            ],
+            "graph_changes": {
+                "added_edges": diff_report.graph_changes.added_edges,
+                "removed_edges": diff_report.graph_changes.removed_edges,
+                "changed_nodes": diff_report.graph_changes.changed_nodes,
+            },
+            "stats_delta": {
+                "total_files": diff_report.stats_delta.total_files,
+                "total_scopes": diff_report.stats_delta.total_scopes,
+                "total_symbols": diff_report.stats_delta.total_symbols,
+            },
+        }
+    )
 
 
 # ---------------------------------------------------------------------------

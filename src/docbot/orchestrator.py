@@ -133,11 +133,22 @@ async def run_async(
     console.print(f"[bold]Scanning[/bold] {repo_path} ...")
     tracker.set_state("scanner", AgentState.running)
     scan = await asyncio.to_thread(scan_repo, repo_path)
-    tracker.set_state("scanner", AgentState.done, f"{len(scan.py_files)} files")
-    console.print(f"  Found {len(scan.py_files)} Python file(s), {len(scan.packages)} package(s), {len(scan.entrypoints)} entrypoint(s).")
+    tracker.set_state("scanner", AgentState.done, f"{len(scan.source_files)} files")
 
-    if not scan.py_files:
-        console.print("[yellow]No Python files found. Nothing to do.[/yellow]")
+    # Show per-language file counts.
+    if scan.languages:
+        from collections import Counter
+        lang_counts = Counter(sf.language for sf in scan.source_files)
+        breakdown = ", ".join(f"{count} {lang}" for lang, count in sorted(lang_counts.items()))
+        console.print(f"  Found {len(scan.source_files)} source file(s) ({breakdown}), "
+                       f"{len(scan.packages)} package(s), {len(scan.entrypoints)} entrypoint(s).")
+        console.print(f"  Languages: {', '.join(scan.languages)}")
+    else:
+        console.print(f"  Found {len(scan.source_files)} source file(s), "
+                       f"{len(scan.packages)} package(s), {len(scan.entrypoints)} entrypoint(s).")
+
+    if not scan.source_files:
+        console.print("[yellow]No source files found. Nothing to do.[/yellow]")
         tracker.set_state("orchestrator", AgentState.done)
         return run_dir
 

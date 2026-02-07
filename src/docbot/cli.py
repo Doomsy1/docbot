@@ -14,7 +14,7 @@ from .llm import DEFAULT_MODEL
 
 app = typer.Typer(
     name="docbot",
-    help="Generate thorough documentation for a Python repository.",
+    help="Generate thorough documentation for a repository.",
     add_completion=False,
 )
 console = Console()
@@ -49,13 +49,13 @@ def _load_dotenv(start_dir: Path) -> None:
 
 @app.command()
 def run(
-    repo: Path = typer.Argument(..., help="Path to the target Python repository."),
+    repo: Path = typer.Argument(..., help="Path to the target repository."),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Base directory for run output (default: ./runs)."),
     max_scopes: int = typer.Option(20, "--max-scopes", help="Maximum number of documentation scopes."),
     concurrency: int = typer.Option(4, "--concurrency", "-j", help="Maximum parallel explorer workers."),
     timeout: float = typer.Option(120.0, "--timeout", "-t", help="Per-scope timeout in seconds."),
     model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID."),
-    no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM calls; use template-only mode."),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment; AST/tree-sitter extraction still runs."),
     visualize: bool = typer.Option(False, "--visualize", "--viz", help="Open a live D3.js pipeline visualization in the browser."),
 ) -> None:
     """Scan, explore, and generate documentation for REPO."""
@@ -105,6 +105,30 @@ def run(
     if visualize:
         console.print("[dim]Visualization server still running. Press Enter to exit.[/dim]")
         input()
+
+
+@app.command()
+def serve(
+    run_dir: Path = typer.Argument(..., help="Path to a completed docbot run directory."),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
+    port: int = typer.Option(8000, "--port", "-p", help="Port number."),
+) -> None:
+    """Launch the interactive webapp to explore a completed run."""
+    run_dir = Path(run_dir).resolve()
+    if not run_dir.is_dir():
+        console.print(f"[red]Error:[/red] {run_dir} is not a directory.")
+        raise typer.Exit(code=1)
+
+    index_path = run_dir / "docs_index.json"
+    if not index_path.exists():
+        console.print(f"[red]Error:[/red] No docs_index.json found in {run_dir}.")
+        raise typer.Exit(code=1)
+
+    from .server import start_server
+
+    console.print(f"[bold cyan]Serving[/bold cyan] {run_dir}")
+    console.print(f"  http://{host}:{port}")
+    start_server(run_dir, host=host, port=port)
 
 
 if __name__ == "__main__":

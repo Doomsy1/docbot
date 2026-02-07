@@ -28,8 +28,8 @@ SKIP_DIRS: set[str] = {
     ".cache",          # generic caches
 }
 
-# Language-aware entrypoint basenames.
-ENTRYPOINT_NAMES: dict[str, str] = {
+# Language-aware entrypoint basenames (filename → language).
+ENTRYPOINT_LANG: dict[str, str] = {
     # Python
     "main.py": "python",
     "app.py": "python",
@@ -67,6 +67,9 @@ ENTRYPOINT_NAMES: dict[str, str] = {
     "main.c": "c",
     "main.cpp": "cpp",
 }
+
+# Flat set of entrypoint names (for backward compatibility with explorer.py etc.).
+ENTRYPOINT_NAMES: set[str] = set(ENTRYPOINT_LANG)
 
 # Files that signal a package / module root for each language.
 PACKAGE_MARKERS: dict[str, str] = {
@@ -175,7 +178,7 @@ def scan_repo(root: Path) -> ScanResult:
                         result.packages.append(pkg_dir)
 
             # Entrypoint detection (language-aware)
-            if fname in ENTRYPOINT_NAMES:
+            if fname in ENTRYPOINT_LANG:
                 result.entrypoints.append(rel_path)
 
     result.py_files.sort()

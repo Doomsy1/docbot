@@ -2,9 +2,10 @@ import { useState } from 'react';
 import Graph from './components/Graph';
 import Chat from './components/Chat';
 import FileViewer from './components/FileViewer';
+import Dashboard from './components/Dashboard';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'graph' | 'chat' | 'files'>('graph');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph' | 'chat' | 'files'>('dashboard');
   const [selectedFile, setSelectedFile] = useState<string | undefined>();
 
   return (
@@ -12,6 +13,12 @@ export default function App() {
       <header className="border-b border-black p-4 flex justify-between items-center">
         <h1 className="text-xl font-bold tracking-tight">docbot</h1>
         <div className="flex gap-4 text-sm font-medium">
+          <button 
+            onClick={() => setActiveTab('dashboard')}
+            className={`hover:underline ${activeTab === 'dashboard' ? 'underline decoration-2' : ''}`}
+          >
+            Dashboard
+          </button>
           <button 
             onClick={() => setActiveTab('graph')}
             className={`hover:underline ${activeTab === 'graph' ? 'underline decoration-2' : ''}`}
@@ -33,7 +40,8 @@ export default function App() {
         </div>
       </header>
       
-      <main className="flex-1 p-4 overflow-hidden relative">
+      <main className="flex-1 overflow-hidden relative">
+        {activeTab === 'dashboard' && <Dashboard />}
         {activeTab === 'graph' && (
           <Graph onSelectFile={(path) => {
              setActiveTab('files');
@@ -41,7 +49,7 @@ export default function App() {
           }} />
         )}
         {activeTab === 'chat' && (
-          <div className="max-w-2xl mx-auto h-full">
+          <div className="max-w-2xl mx-auto h-full p-4">
             <Chat onSelectFile={(path) => {
               setActiveTab('files');
               setSelectedFile(path);
@@ -49,10 +57,12 @@ export default function App() {
           </div>
         )}
         {activeTab === 'files' && (
-          <FileViewer 
-            filePath={selectedFile} 
-            onSelectFile={(path) => setSelectedFile(path)}
-          />
+          <div className="h-full p-4">
+            <FileViewer 
+              filePath={selectedFile} 
+              onSelectFile={(path) => setSelectedFile(path)}
+            />
+          </div>
         )}
       </main>
     </div>

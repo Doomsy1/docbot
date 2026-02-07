@@ -102,6 +102,10 @@ def run(
         tracker=tracker,
     ))
 
+    if visualize:
+        console.print("[dim]Visualization server still running. Press Enter to exit.[/dim]")
+        input()
+
 
 if __name__ == "__main__":
     app()

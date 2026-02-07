@@ -438,3 +438,346 @@ If a developer needs to take over another's work mid-sprint:
 | `search.py`       | Dev B           |
 | `webapp/*`        | Dev D           |
 | `tests/*`         | Dev B (Phase 2) |
+
+---
+
+## Phase 3: Git-Integrated CLI
+
+> **Goal:** Transform docbot from a standalone doc generator into a git-aware CLI tool with
+> persistent `.docbot/` project directory and incremental updates based on git diffs.
+
+> **Design decisions:** CWD default (optional path override), only config.toml git-tracked,
+> init and generate are separate commands, git hooks opt-in via `docbot hook install`.
+
+---
+
+### Phase 3.0: Interface Contracts
+
+**Owner:** Dev A (reviewed by all)
+**Branch:** `phase3/contracts`
+**Files:** `src/docbot/models.py`, `src/docbot/project.py` (stubs)
+
+- [ ] Add `ProjectState` model to `models.py`:
+  - [ ] `last_commit: str | None` -- git commit hash at last generate/update
+  - [ ] `last_run_id: str | None` -- most recent run ID
+  - [ ] `last_run_at: str | None` -- ISO timestamp of last run
+  - [ ] `scope_file_map: dict[str, list[str]]` -- scope_id -> repo-relative file paths
+- [ ] Add `DocbotConfig` model to `models.py`:
+  - [ ] `model: str` (default: current DEFAULT_MODEL from llm.py)
+  - [ ] `concurrency: int = 4`
+  - [ ] `timeout: float = 120.0`
+  - [ ] `max_scopes: int = 20`
+  - [ ] `no_llm: bool = False`
+- [ ] Create `src/docbot/project.py` with stub signatures:
+  - [ ] `init_project(path: Path) -> Path`
+  - [ ] `find_docbot_root(start: Path) -> Path | None`
+  - [ ] `load_config(docbot_dir: Path) -> DocbotConfig`
+  - [ ] `save_config(docbot_dir: Path, config: DocbotConfig) -> None`
+  - [ ] `load_state(docbot_dir: Path) -> ProjectState`
+  - [ ] `save_state(docbot_dir: Path, state: ProjectState) -> None`
+- [ ] All devs reviewed and approved the contracts
+- [ ] Merged `phase3/contracts` -> `master`
+
+---
+
+### Dev A -- CLI & Project Infrastructure
+
+**Branch:** `phase3/cli-project`
+**Owned files:** `cli.py`, `models.py`, `project.py` (new), `pyproject.toml`
+
+#### Project Module (`src/docbot/project.py`)
+
+- [ ] Implement `init_project(path)`:
+  - [ ] Validate path is a git repo (check `.git/` exists)
+  - [ ] Create `.docbot/` directory
+  - [ ] Create subdirectories: `docs/`, `docs/modules/`, `scopes/`, `history/`
+  - [ ] Write default `config.toml` with all DocbotConfig defaults
+  - [ ] Write `.gitignore` that ignores everything except `config.toml` and `.gitignore`
+  - [ ] Return the `.docbot/` path
+- [ ] Implement `find_docbot_root(start)`:
+  - [ ] Resolve `start` path
+  - [ ] Walk `start` and its parents checking for `.docbot/` directory
+  - [ ] Return the parent of `.docbot/` (the project root), or None if not found
+- [ ] Implement `load_config(docbot_dir)`:
+  - [ ] Read `config.toml` using `tomllib` (stdlib 3.11+)
+  - [ ] Parse into `DocbotConfig` via `DocbotConfig(**data)`
+  - [ ] Return default `DocbotConfig()` if file missing
+- [ ] Implement `save_config(docbot_dir, config)`:
+  - [ ] Format as TOML string (simple key = value, no nested tables needed)
+  - [ ] Write to `config.toml`
+- [ ] Implement `load_state(docbot_dir)`:
+  - [ ] Read `state.json`, parse via `ProjectState.model_validate_json()`
+  - [ ] Return empty `ProjectState()` if file missing or corrupt
+- [ ] Implement `save_state(docbot_dir, state)`:
+  - [ ] Write via `state.model_dump_json(indent=2)`
+
+#### CLI Restructure (`src/docbot/cli.py`)
+
+- [ ] Add `init` command:
+  - [ ] Accept optional `path` argument (default: `Path.cwd()`)
+  - [ ] Check if `.docbot/` already exists -- if so, print message and exit
+  - [ ] Call `init_project(path)`
+  - [ ] Print success message with next step: "Run `docbot generate` to create documentation"
+- [ ] Add `generate` command:
+  - [ ] Accept optional `path` argument (default: cwd)
+  - [ ] Call `find_docbot_root()` to locate `.docbot/`; error if not found ("Run `docbot init` first")
+  - [ ] Load config via `load_config()`
+  - [ ] Merge CLI flag overrides (--model, -j, -t, etc.) into config
+  - [ ] Load .env (reuse existing `_load_dotenv()`)
+  - [ ] Build LLM client (reuse existing logic)
+  - [ ] Set up visualization tracker (reuse existing logic)
+  - [ ] Call `generate_async()` from orchestrator (Dev B implements)
+  - [ ] Print completion summary
+- [ ] Add `update` command:
+  - [ ] Call `find_docbot_root()` to locate `.docbot/`; error if not found
+  - [ ] Load config
+  - [ ] Call `update_async()` from orchestrator (Dev B implements)
+- [ ] Add `status` command:
+  - [ ] Call `find_docbot_root()` to locate `.docbot/`
+  - [ ] Load state via `load_state()`
+  - [ ] If no state (never generated), print "No documentation generated yet"
+  - [ ] Otherwise print: last commit hash, last run timestamp, scope count
+  - [ ] Call `get_changed_files()` (Dev B) to show files changed since last doc
+  - [ ] Map to affected scopes and print count
+- [ ] Add `config` command:
+  - [ ] No args: print all config key=value pairs
+  - [ ] One arg (key): print that key's value
+  - [ ] Two args (key, value): update config.toml with new value, print confirmation
+- [ ] Add `hook` subcommand group:
+  - [ ] `hook install`: call `install_hook()` (Dev B), print confirmation
+  - [ ] `hook uninstall`: call `uninstall_hook()` (Dev B), print confirmation
+- [ ] Adapt `serve` command:
+  - [ ] If no path given, use `find_docbot_root()` to locate `.docbot/` and serve from there
+  - [ ] If `.docbot/` not found, fall back to requiring explicit path (current behavior)
+- [ ] Keep `run` as hidden alias (`@app.command(hidden=True)`) that delegates to `generate`
+
+#### Dependencies (`pyproject.toml`)
+
+- [ ] Version bump if appropriate
+- [ ] Verify no new dependencies needed (tomllib is stdlib 3.11+)
+
+#### Self-check before merge
+
+- [ ] `docbot init` creates valid `.docbot/` with config.toml and .gitignore
+- [ ] `docbot init` on non-git directory prints error
+- [ ] `docbot init` on already-initialized project prints message
+- [ ] `docbot config` prints all settings
+- [ ] `docbot config model` prints model value
+- [ ] `docbot config model some/model` updates config.toml
+- [ ] `docbot generate` fails gracefully if not initialized
+- [ ] `docbot serve` defaults to `.docbot/` if it exists
+- [ ] `docbot run` works as alias for `generate`
+- [ ] No import errors across the package
+
+---
+
+### Dev B -- Git Integration & Incremental Pipeline
+
+**Branch:** `phase3/git-pipeline`
+**Owned files:** `git_utils.py` (new), `orchestrator.py`, `hooks.py` (new), `scanner.py`
+
+#### Git Utilities (`src/docbot/git_utils.py`)
+
+- [ ] Create module with `from __future__ import annotations`
+- [ ] Implement `get_current_commit(repo_root: Path) -> str | None`:
+  - [ ] `subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True)`
+  - [ ] Return stripped stdout, or None on any error
+- [ ] Implement `get_changed_files(repo_root: Path, since_commit: str) -> list[str]`:
+  - [ ] `subprocess.run(["git", "diff", "--name-only", f"{since_commit}..HEAD"], ...)`
+  - [ ] Split stdout by newlines, filter empty strings
+  - [ ] Normalize paths to forward slashes (Windows compat)
+  - [ ] Return empty list on error
+- [ ] Implement `is_commit_reachable(repo_root: Path, commit: str) -> bool`:
+  - [ ] `subprocess.run(["git", "cat-file", "-t", commit], ...)`
+  - [ ] Return True if returncode == 0
+- [ ] Implement `get_repo_root(start: Path) -> Path | None`:
+  - [ ] `subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start, ...)`
+  - [ ] Return `Path(stdout.strip())` or None on error
+
+#### Scanner Update (`src/docbot/scanner.py`)
+
+- [ ] Add `".docbot"` to `SKIP_DIRS` set
+
+#### Orchestrator Refactor (`src/docbot/orchestrator.py`)
+
+- [ ] Extract pipeline stage helpers from `run_async()`:
+  - [ ] `_run_scan(repo_path, tracker)` -> ScanResult
+  - [ ] `_run_plan(scan, max_scopes, llm_client, tracker)` -> list[ScopePlan]
+  - [ ] `_run_explore(plans, repo_path, sem, timeout, llm_client, tracker)` -> list[ScopeResult]
+  - [ ] `_run_reduce(scope_results, repo_path, llm_client, tracker)` -> DocsIndex
+  - [ ] `_run_render(docs_index, output_dir, llm_client, tracker)` -> list[Path]
+  - [ ] Each helper encapsulates its stage's tracker state management and console output
+- [ ] Refactor `run_async()` to call the extracted helpers (verify no behavior change)
+- [ ] Implement `generate_async(docbot_root: Path, config: DocbotConfig, llm_client, tracker)`:
+  - [ ] `repo_path = docbot_root.parent`
+  - [ ] Call all 5 pipeline stage helpers
+  - [ ] Output to `docbot_root` instead of `runs/<run_id>/`
+  - [ ] Save plan.json to `docbot_root / "plan.json"`
+  - [ ] Save per-scope results to `docbot_root / "scopes" / "<scope_id>.json"`
+  - [ ] Save docs_index.json to `docbot_root / "docs_index.json"`
+  - [ ] Build scope_file_map from plan: `{plan.scope_id: plan.paths for plan in plans}`
+  - [ ] Call `save_state()` with current commit, run_id, scope_file_map
+  - [ ] Save RunMeta to `docbot_root / "history" / "<run_id>.json"`
+- [ ] Implement `update_async(docbot_root: Path, config: DocbotConfig, llm_client, tracker)`:
+  - [ ] Load state via `load_state()`
+  - [ ] If no `last_commit`, print "No previous run found. Run `docbot generate` first." and return
+  - [ ] Validate `last_commit` via `is_commit_reachable()`
+    - [ ] If unreachable, print warning and fall back to `generate_async()`
+  - [ ] Get changed files via `get_changed_files()`
+  - [ ] If no changes, print "Documentation is up to date" and return
+  - [ ] Map changed files to affected scope IDs using `state.scope_file_map`
+  - [ ] Detect new files not in any scope:
+    - [ ] Run scanner to find all current source files
+    - [ ] Compare against all files in scope_file_map
+    - [ ] If new files found, assign to closest scope by directory, or create new scope if needed
+  - [ ] If >50% of scopes affected, print suggestion to run `docbot generate` instead
+  - [ ] For affected scopes: re-run EXPLORE (load plan from plan.json, filter to affected)
+  - [ ] For unaffected scopes: load ScopeResult from `.docbot/scopes/<scope_id>.json`
+  - [ ] Merge all scope results (fresh + cached)
+  - [ ] Re-run REDUCE (cross-scope analysis + Mermaid)
+  - [ ] Call selective renderer functions (Dev C):
+    - [ ] `render_scope_doc()` for each affected scope
+    - [ ] `render_readme()` always (cross-cutting)
+    - [ ] `render_architecture()` always (cross-cutting)
+    - [ ] `render_api_reference()` always (fast, template-only)
+    - [ ] `render_html_report()` always
+  - [ ] Update state.json: new commit hash, updated scope_file_map
+  - [ ] Save run history
+
+#### Git Hooks (`src/docbot/hooks.py`)
+
+- [ ] Create module with `from __future__ import annotations`
+- [ ] Implement `install_hook(repo_root: Path) -> bool`:
+  - [ ] Locate `.git/hooks/` directory (error if not found)
+  - [ ] Define hook content with sentinel comments:
+    ```
+    # --- docbot hook start ---
+    if [ -d ".docbot" ]; then
+        docbot update 2>&1 | tail -5
+    fi
+    # --- docbot hook end ---
+    ```
+  - [ ] If `post-commit` doesn't exist: create it with `#!/bin/sh\n` + hook content
+  - [ ] If `post-commit` exists and already has docbot section: print "already installed", return
+  - [ ] If `post-commit` exists without docbot section: append hook content
+  - [ ] Set executable permission (chmod +x on non-Windows)
+  - [ ] Return True on success
+- [ ] Implement `uninstall_hook(repo_root: Path) -> bool`:
+  - [ ] Read post-commit hook file
+  - [ ] Find and remove content between sentinel comments (inclusive)
+  - [ ] If remaining content is empty or shebang-only, delete the file
+  - [ ] Return True on success, False if hook not found or no docbot section
+
+#### Self-check before merge
+
+- [ ] `get_current_commit()` returns valid hash in a git repo
+- [ ] `get_current_commit()` returns None outside a git repo
+- [ ] `get_changed_files()` returns correct file list after a commit
+- [ ] `is_commit_reachable()` returns False for nonexistent commits
+- [ ] `.docbot` in SKIP_DIRS -- scanner ignores `.docbot/` directory
+- [ ] `run_async()` still works identically after refactor (backward compat)
+- [ ] `generate_async()` produces same output as `run_async()` but in `.docbot/`
+- [ ] `generate_async()` writes state.json with correct commit hash and scope_file_map
+- [ ] `update_async()` only re-explores affected scopes (verify via console output / tracker)
+- [ ] `update_async()` falls back to generate when state is invalid
+- [ ] `install_hook()` creates working post-commit hook
+- [ ] `uninstall_hook()` cleanly removes docbot section without affecting other hooks
+- [ ] No import errors across the package
+
+---
+
+### Dev C -- Renderer & Serve Adaptation
+
+**Branch:** `phase3/renderer-serve`
+**Owned files:** `renderer.py`, `server.py`
+
+#### Renderer Refactor (`src/docbot/renderer.py`)
+
+- [ ] Extract `render_scope_doc(scope, index, out_dir, llm_client)`:
+  - [ ] Generates single scope markdown doc at `out_dir/docs/modules/<scope_id>.generated.md`
+  - [ ] If `llm_client` provided: use LLM to write narrative doc
+  - [ ] If no LLM: use template fallback
+  - [ ] Returns the written file path
+- [ ] Extract `render_readme(index, out_dir, llm_client)`:
+  - [ ] Generates `out_dir/docs/README.generated.md`
+  - [ ] LLM or template fallback
+  - [ ] Returns file path
+- [ ] Extract `render_architecture(index, out_dir, llm_client)`:
+  - [ ] Generates `out_dir/docs/architecture.generated.md`
+  - [ ] LLM or template fallback
+  - [ ] Returns file path
+- [ ] Extract `render_api_reference(index, out_dir)`:
+  - [ ] Generates `out_dir/docs/api.generated.md`
+  - [ ] Template-only (no LLM needed)
+  - [ ] Returns file path
+- [ ] Extract `render_html_report(index, out_dir)`:
+  - [ ] Generates `out_dir/index.html`
+  - [ ] Returns file path
+- [ ] Refactor existing `render()` to call all five individual functions
+- [ ] Refactor existing `render_with_llm()` to call all five individual functions in parallel
+- [ ] Verify: `render()` and `render_with_llm()` produce identical output to before refactor
+
+#### Serve Adaptation (`src/docbot/server.py`)
+
+- [ ] Import `find_docbot_root` from `project.py`
+- [ ] When no explicit `run_dir` provided:
+  - [ ] Call `find_docbot_root(Path.cwd())`
+  - [ ] If found, use `.docbot/` as run_dir
+  - [ ] If not found, fall back to current behavior (require explicit path)
+- [ ] Update help text to mention `.docbot/` default behavior
+
+#### Self-check before merge
+
+- [ ] `render()` produces identical output to before refactor (regression test)
+- [ ] `render_with_llm()` produces identical output to before refactor
+- [ ] `render_scope_doc()` works standalone for a single scope
+- [ ] `render_readme()` works standalone
+- [ ] `render_architecture()` works standalone
+- [ ] `render_api_reference()` works standalone
+- [ ] `render_html_report()` works standalone
+- [ ] `serve` defaults to `.docbot/` when present
+- [ ] `serve` with explicit path still works
+- [ ] No import errors across the package
+
+---
+
+### Phase 3 Integration
+
+**Branch:** `phase3/integration`
+**Owner:** Dev A or Dev B (whoever is available first)
+
+After all three Phase 3 branches merge to master:
+
+- [ ] Verify `docbot init` creates valid `.docbot/`
+- [ ] Verify `docbot generate` runs full pipeline into `.docbot/`
+- [ ] Verify `docbot status` shows correct state after generate
+- [ ] Make a code change, commit
+- [ ] Verify `docbot update` only re-processes affected scopes
+- [ ] Verify `docbot status` reflects the update
+- [ ] Verify `docbot serve` loads webapp from `.docbot/`
+- [ ] Verify `docbot hook install` creates working post-commit hook
+- [ ] Verify committing auto-triggers `docbot update` via hook
+- [ ] Verify `docbot hook uninstall` removes hook cleanly
+- [ ] Verify `docbot run` works as alias for `docbot generate`
+- [ ] Verify `docbot config` read/write works
+- [ ] Verify `git status` only shows `.docbot/config.toml` as trackable
+- [ ] Test on a Python project (regression)
+- [ ] Test on a TypeScript project
+- [ ] Test on a mixed-language project
+
+---
+
+### Phase 3 Quick Reference: who owns what
+
+| File                          | Owner (Phase 3) |
+| ----------------------------- | ---------------- |
+| `cli.py`                      | Dev A            |
+| `models.py`                   | Dev A            |
+| `project.py` (new)            | Dev A            |
+| `pyproject.toml`              | Dev A            |
+| `git_utils.py` (new)          | Dev B            |
+| `orchestrator.py`             | Dev B            |
+| `hooks.py` (new)              | Dev B            |
+| `scanner.py`                  | Dev B            |
+| `renderer.py`                 | Dev C            |
+| `server.py`                   | Dev C            |

@@ -347,3 +347,277 @@ Docbot Evolution Plan
  - Dynamic Mermaid diagrams render inline in chat
  - Guided tours step through the codebase correctly
  - Works on both small and large codebases without UI lag
+
+ ---
+ Phase 3: Git-Integrated CLI
+
+ Transition docbot from a standalone documentation generator (`docbot run <repo>`) into a persistent,
+ git-aware developer tool. Docs live in a `.docbot/` project directory (like `.git/`), and incremental
+ updates re-process only scopes whose files changed since the last documented commit.
+
+ Decisions made:
+ - CWD is the default target; all commands accept an optional `[path]` override
+ - Only `.docbot/config.toml` is git-tracked; everything else is git-ignored via `.docbot/.gitignore`
+ - `docbot init` creates the folder/config only; `docbot generate` runs the pipeline separately
+ - Git hooks are opt-in via `docbot hook install`
+ - Keep Typer for CLI (already a dependency, works well for subcommands)
+ - TOML config uses `tomllib` (stdlib in 3.11+) for reading; simple string formatting for writing (no new deps)
+
+ 3.1 CLI Restructure
+
+ Replace the current two-command CLI (`run`, `serve`) with a git-style subcommand interface.
+
+ New commands:
+
+ | Command                      | Description                                                              |
+ |------------------------------|--------------------------------------------------------------------------|
+ | `docbot init [path]`         | Create `.docbot/` directory with config.toml and .gitignore              |
+ | `docbot generate [path]`     | Full documentation generation, output to `.docbot/`                      |
+ | `docbot update`              | Incremental update -- only re-process scopes with files changed since    |
+ |                              | the last documented commit                                               |
+ | `docbot status`              | Show doc state: last run, last commit, changed files, affected scopes    |
+ | `docbot serve [path]`        | Launch webapp against `.docbot/` (defaults to cwd's .docbot/)            |
+ | `docbot config [key] [value]`| View all config (no args), get one value, or set a value                 |
+ | `docbot hook install`        | Install post-commit git hook that runs `docbot update`                   |
+ | `docbot hook uninstall`      | Remove the docbot post-commit hook                                       |
+
+ `docbot run` is kept as a hidden alias for `docbot generate` for backward compatibility.
+
+ All commands that need an initialized project use `find_docbot_root()` which walks up from cwd (or
+ the given path) looking for a `.docbot/` directory, similar to how git finds `.git/`.
+
+ CLI flags on `generate` (carried over from current `run` command):
+ - `--concurrency / -j` (default from config)
+ - `--timeout / -t` (default from config)
+ - `--model / -m` (default from config)
+ - `--max-scopes` (default from config)
+ - `--no-llm` (default from config)
+ - `--visualize / --viz` (open live D3.js visualization)
+
+ File: src/docbot/cli.py
+
+ 3.2 The `.docbot/` Directory
+
+ Replaces the `runs/` output model. Instead of timestamped run directories, docs live persistently
+ in `.docbot/`.
+
+ ```
+ .docbot/
+   config.toml              # User configuration (git-tracked)
+   .gitignore               # Ignores everything except config.toml
+   state.json               # Tracking state (last commit, scope-file mapping)
+   docs_index.json          # Current full DocsIndex
+   search_index.json        # BM25 search index
+   plan.json                # Current scope plan (array of ScopePlan)
+   index.html               # Interactive HTML report
+   docs/                    # Generated markdown documentation
+     README.generated.md
+     architecture.generated.md
+     api.generated.md
+     modules/
+       <scope_id>.generated.md
+   scopes/                  # Individual ScopeResult JSON (needed for incremental updates)
+     <scope_id>.json
+   history/                 # RunMeta for each run
+     <run_id>.json
+ ```
+
+ The `.docbot/.gitignore` contains:
+ ```
+ # Everything ignored except config
+ *
+ !config.toml
+ !.gitignore
+ ```
+
+ Initialization (`docbot init`):
+ - Validates target is a git repo (checks for `.git/`)
+ - Creates `.docbot/` directory
+ - Writes default `config.toml`
+ - Writes `.gitignore`
+ - Does NOT run the pipeline -- prints instruction to run `docbot generate`
+
+ New file: src/docbot/project.py -- contains `init_project()`, `find_docbot_root()`,
+ `load_config()`, `save_config()`, `load_state()`, `save_state()`
+
+ 3.3 Project State Tracking
+
+ `.docbot/state.json` tracks the relationship between git history and documentation state.
+
+ New model (`ProjectState` in models.py):
+ ```python
+ class ProjectState(BaseModel):
+     """Persistent state tracking for the .docbot/ directory."""
+     last_commit: str | None = None          # Git commit hash at last generate/update
+     last_run_id: str | None = None          # Most recent run ID
+     last_run_at: str | None = None          # ISO timestamp of last run
+     scope_file_map: dict[str, list[str]] = {}  # scope_id -> list of repo-relative file paths
+ ```
+
+ `scope_file_map` is the key data structure for incremental updates. After a full `generate`, it
+ records which files belong to which scope. On `update`, changed files are looked up in this map
+ to determine which scopes need re-processing.
+
+ `last_commit` is set to the output of `git rev-parse HEAD` at the end of each generate/update.
+
+ 3.4 Configuration Model
+
+ `.docbot/config.toml` stores user preferences that persist across runs.
+
+ New model (`DocbotConfig` in models.py):
+ ```python
+ class DocbotConfig(BaseModel):
+     """User configuration stored in .docbot/config.toml."""
+     model: str = "xiaomi/mimo-v2-flash"
+     concurrency: int = 4
+     timeout: float = 120.0
+     max_scopes: int = 20
+     no_llm: bool = False
+ ```
+
+ CLI flags override config values for that invocation (they do not persist unless `docbot config`
+ is used). Precedence: CLI flag > config.toml > default.
+
+ TOML reading uses `tomllib` (Python 3.11+ stdlib). Writing uses simple string formatting since
+ the config structure is flat -- no need for a `tomli-w` dependency.
+
+ 3.5 Incremental Updates (`docbot update`)
+
+ The core git-integration feature. Algorithm:
+
+ 1. Load `state.json` -- get `last_commit` and `scope_file_map`
+ 2. Validate `last_commit` is reachable in git history (`git merge-base --is-ancestor`)
+    - If not (rebase, force-push), print warning and fall back to full `docbot generate`
+ 3. Run `git diff --name-only <last_commit>..HEAD` to get list of changed files
+ 4. Map changed files to affected scopes using `scope_file_map`:
+    - For each changed file, find which scope(s) contain it
+    - Collect the set of affected scope IDs
+ 5. Detect new files not in any scope:
+    - If new source files exist that aren't in `scope_file_map`, they need scoping
+    - If count is small, assign to closest scope by directory; if large, suggest `docbot generate`
+ 6. For affected scopes only: re-run EXPLORE (extraction + LLM enrichment)
+ 7. For unaffected scopes: load cached ScopeResult from `.docbot/scopes/<scope_id>.json`
+ 8. Merge all scope results (fresh + cached) and re-run REDUCE (cross-scope analysis + Mermaid)
+ 9. Re-run RENDER for:
+    - Affected scope markdown docs
+    - Cross-cutting docs (README, architecture, API ref) -- always re-rendered since they
+      synthesize across scopes
+ 10. Update `state.json`: new commit hash, updated scope_file_map, run metadata
+ 11. Save run history to `.docbot/history/`
+
+ Edge cases:
+ - Deleted files: remove from scope_file_map; re-explore scope if it still has other files;
+   drop scope entirely if all its files are gone
+ - Renamed files: git reports as delete + add; handled naturally by the above
+ - If >50% of scopes affected, print suggestion to run `docbot generate` instead (but proceed
+   if user chose `update`)
+ - If `state.json` is missing or corrupted, fall back to full generate with a warning
+
+ Files: src/docbot/orchestrator.py (add `update_async()`), src/docbot/git_utils.py (new)
+
+ 3.6 Git Utilities
+
+ New file: src/docbot/git_utils.py
+
+ Thin wrappers around git CLI commands using `subprocess.run()`:
+
+ ```python
+ def get_current_commit(repo_root: Path) -> str | None:
+     """Return HEAD commit hash, or None if not a git repo / no commits."""
+     # git rev-parse HEAD
+
+ def get_changed_files(repo_root: Path, since_commit: str) -> list[str]:
+     """Return repo-relative paths of files changed between since_commit and HEAD."""
+     # git diff --name-only <since_commit>..HEAD
+
+ def is_commit_reachable(repo_root: Path, commit: str) -> bool:
+     """Check if a commit hash still exists in the repository history."""
+     # git cat-file -t <commit>
+
+ def get_repo_root(start: Path) -> Path | None:
+     """Return the git repository root, or None if not inside a git repo."""
+     # git rev-parse --show-toplevel
+ ```
+
+ All functions accept `repo_root` so they can be called with `cwd=repo_root` in subprocess.
+ All handle subprocess errors gracefully (return None/empty rather than raising).
+
+ 3.7 Orchestrator Refactor
+
+ File: src/docbot/orchestrator.py
+
+ The current `run_async()` stays intact for backward compatibility. Two new async entry points:
+
+ `generate_async(docbot_root: Path, config: DocbotConfig, ...)`:
+ - Calls the same 5-stage pipeline (scan -> plan -> explore -> reduce -> render)
+ - Outputs to `docbot_root` (the `.docbot/` directory) instead of a timestamped `runs/` subdir
+ - After rendering, saves state.json with current commit hash and scope_file_map
+ - Saves run history entry to `docbot_root / "history" / "<run_id>.json"`
+ - The repo path is inferred from `docbot_root.parent` (since `.docbot/` is at repo root)
+
+ `update_async(docbot_root: Path, config: DocbotConfig, ...)`:
+ - Implements the incremental algorithm from section 3.5
+ - Loads state, computes diff, identifies affected scopes
+ - Re-uses `_explore_one()` for affected scopes (already handles concurrency + timeout)
+ - Loads cached results for unaffected scopes
+ - Calls existing `reduce` / `reduce_with_llm` with merged results
+ - Calls renderer selectively (only affected scope docs + cross-cutting)
+
+ Renderer changes (src/docbot/renderer.py):
+ - Expose individual render functions so the update path can call them selectively:
+   - `render_scope_doc(scope_result, docs_index, output_dir, llm_client)` -- single scope
+   - `render_readme(docs_index, output_dir, llm_client)` -- README only
+   - `render_architecture(docs_index, output_dir, llm_client)` -- architecture doc only
+   - `render_api_reference(docs_index, output_dir)` -- API ref only
+   - `render_html_report(docs_index, output_dir)` -- HTML report only
+ - The existing `render()` and `render_with_llm()` continue to call all of these (no breaking change)
+
+ 3.8 Git Hooks
+
+ New file: src/docbot/hooks.py
+
+ `install_hook(repo_root: Path) -> bool`:
+ - Locates `.git/hooks/` directory
+ - If `post-commit` hook doesn't exist, creates it with docbot update call
+ - If `post-commit` exists, appends docbot section with sentinel comments:
+   ```bash
+   # --- docbot hook start ---
+   if [ -d ".docbot" ]; then
+       docbot update 2>&1 | tail -5
+   fi
+   # --- docbot hook end ---
+   ```
+ - Makes the hook executable (`chmod +x` on Unix; on Windows, git handles this)
+ - Returns True on success
+
+ `uninstall_hook(repo_root: Path) -> bool`:
+ - Reads existing post-commit hook
+ - Removes content between `# --- docbot hook start ---` and `# --- docbot hook end ---`
+ - If hook file is now empty (or only has shebang), deletes it
+ - Returns True on success
+
+ CLI commands:
+ - `docbot hook install` -- calls `install_hook()`, confirms success
+ - `docbot hook uninstall` -- calls `uninstall_hook()`, confirms removal
+
+ 3.9 Scanner Update
+
+ File: src/docbot/scanner.py
+
+ Single change: add `".docbot"` to the `SKIP_DIRS` set so docbot never tries to document its own
+ output directory.
+
+ ---
+ Phase 3 Verification
+
+ - `docbot init` in a git repo -- `.docbot/` created with config.toml and .gitignore
+ - `docbot generate` -- full pipeline outputs to `.docbot/`, state.json saved with commit hash
+ - `git status` -- only `.docbot/config.toml` appears as trackable
+ - `docbot status` -- shows last documented commit, files changed since, affected scopes
+ - Make a code change, commit, `docbot update` -- only affected scopes re-processed
+ - `docbot serve` -- webapp loads from `.docbot/` by default
+ - `docbot hook install` -- post-commit hook created; committing triggers auto-update
+ - `docbot hook uninstall` -- hook removed cleanly
+ - `docbot run` -- still works as alias for generate
+ - `docbot config model` -- prints current model
+ - `docbot config model xiaomi/mimo-v2-flash` -- updates config.toml

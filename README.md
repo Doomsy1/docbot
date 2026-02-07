@@ -57,7 +57,7 @@ Open [http://localhost:5173](http://localhost:5173) to view the app.
 | Flag                | Description                                |
 | ------------------- | ------------------------------------------ |
 | `--no-llm`          | Run local extraction only (free/fast).     |
-| `--model <id>`      | Switch LLM model (default: Google Gemini). |
+| `--model <id>`      | Switch LLM model (default: xiaomi/mimo-v2-flash). |
 | `--concurrency <N>` | Parallel workers (default: 4).             |
 | `--output <path>`   | Base directory for run output.             |
 

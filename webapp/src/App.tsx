@@ -34,7 +34,12 @@ export default function App() {
       </header>
       
       <main className="flex-1 p-4 overflow-hidden relative">
-        {activeTab === 'graph' && <Graph />}
+        {activeTab === 'graph' && (
+          <Graph onSelectFile={(path) => {
+             setActiveTab('files');
+             setSelectedFile(path);
+          }} />
+        )}
         {activeTab === 'chat' && (
           <div className="max-w-2xl mx-auto h-full">
             <Chat onSelectFile={(path) => {

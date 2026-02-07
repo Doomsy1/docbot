@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import ReactFlow, { 
   MiniMap, 
   Controls, 
@@ -11,6 +11,7 @@ import ReactFlow, {
 import type { Connection, Edge, Node } from 'reactflow';
 import dagre from 'dagre';
 import 'reactflow/dist/style.css';
+import { IconFile, IconX } from '@tabler/icons-react';
 
 const nodeWidth = 200;
 const nodeHeight = 50;
@@ -37,8 +38,6 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => 
       ...node,
       targetPosition: direction === 'LR' ? Position.Left : Position.Top,
       sourcePosition: direction === 'LR' ? Position.Right : Position.Bottom,
-      // We are shifting the dagre node position (anchor=center center) to the top left
-      // so it matches the React Flow node anchor point (top left).
       position: {
         x: nodeWithPosition.x - nodeWidth / 2,
         y: nodeWithPosition.y - nodeHeight / 2,
@@ -49,12 +48,26 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => 
   return { nodes: layoutedNodes, edges };
 };
 
-export default function Graph() {
+interface GraphProps {
+  onSelectFile?: (path: string) => void;
+}
+
+interface ScopeDetail {
+  scope_id: string;
+  title: string;
+  summary: string;
+  paths: string[];
+}
+
+export default function Graph({ onSelectFile }: GraphProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [selectedScopeId, setSelectedScopeId] = useState<string | null>(null);
+  const [scopeDetail, setScopeDetail] = useState<ScopeDetail | null>(null);
 
   const onConnect = useCallback((params: Edge | Connection) => setEdges((eds) => addEdge(params, eds)), [setEdges]);
 
+  // Fetch graph structure
   useEffect(() => {
     async function fetchData() {
       try {
@@ -62,7 +75,6 @@ export default function Graph() {
         const data = await res.json();
         const scopeEdges: { from: string; to: string }[] = data.scope_edges || [];
 
-        // 1. Identify unique nodes
         const uniqueScopes = new Set<string>();
         scopeEdges.forEach(e => {
           uniqueScopes.add(e.from);
@@ -70,7 +82,6 @@ export default function Graph() {
         });
         const scopeList = Array.from(uniqueScopes).sort();
 
-        // 2. Create Initial Nodes (position doesn't matter, dagre will fix it)
         const initialNodes: Node[] = scopeList.map((scopeId) => ({
           id: scopeId,
           position: { x: 0, y: 0 },
@@ -83,11 +94,11 @@ export default function Graph() {
             textAlign: 'center',
             padding: '10px',
             fontSize: '12px',
-            fontFamily: 'monospace'
+            fontFamily: 'monospace',
+            cursor: 'pointer'
           },
         }));
 
-        // 3. Create Edges
         const initialEdges: Edge[] = scopeEdges.map((e, i) => ({
           id: `e-${i}`,
           source: e.from,
@@ -109,26 +120,106 @@ export default function Graph() {
       }
     }
     fetchData();
-  }, [setNodes, setEdges]); // Ensure dependency array is correct
+  }, [setNodes, setEdges]);
+
+  // Fetch scope details when selected
+  useEffect(() => {
+    if (!selectedScopeId) {
+      setScopeDetail(null);
+      return;
+    }
+
+    async function fetchDetail() {
+      try {
+        const res = await fetch(`/api/scopes/${selectedScopeId}`);
+        if (!res.ok) throw new Error("Failed to fetch scope");
+        const data = await res.json();
+        setScopeDetail(data);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    fetchDetail();
+  }, [selectedScopeId]);
+
+  const onNodeClick = (_: React.MouseEvent, node: Node) => {
+    setSelectedScopeId(node.id);
+  };
 
   return (
-    <div className="h-full w-full border border-black">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onConnect={onConnect}
-        fitView
-      >
-        <Controls showInteractive={false} className="!bg-white !border !border-black !shadow-none [&>button]:!border-b [&>button]:!border-black [&>button]:!fill-black" />
-        <Background color="#000" gap={20} size={1} />
-        <MiniMap 
-          style={{ border: '1px solid black' }} 
-          maskColor="rgba(255, 255, 255, 0.8)" 
-          nodeColor="black" 
-        />
-      </ReactFlow>
+    <div className="h-full w-full border border-black relative flex">
+      <div className="flex-1 h-full">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onConnect={onConnect}
+          onNodeClick={onNodeClick}
+          fitView
+        >
+          <Controls showInteractive={false} className="!bg-white !border !border-black !shadow-none [&>button]:!border-b [&>button]:!border-black [&>button]:!fill-black" />
+          <Background color="#000" gap={20} size={1} />
+          <MiniMap 
+            style={{ border: '1px solid black' }} 
+            maskColor="rgba(255, 255, 255, 0.8)" 
+            nodeColor="black" 
+          />
+        </ReactFlow>
+      </div>
+
+      {/* Side Panel */}
+      {selectedScopeId && (
+        <div className="w-1/3 min-w-[300px] border-l border-black bg-white h-full overflow-auto flex flex-col transition-all duration-300">
+          <div className="p-4 border-b border-black flex justify-between items-start bg-gray-50 sticky top-0">
+            <div>
+              <h2 className="text-lg font-bold font-mono break-all">{scopeDetail?.title || selectedScopeId}</h2>
+              <div className="text-xs text-gray-500 font-mono mt-1">Scope Details</div>
+            </div>
+            <button 
+              onClick={() => setSelectedScopeId(null)}
+              className="p-1 hover:bg-gray-200 rounded"
+            >
+              <IconX size={18} />
+            </button>
+          </div>
+          
+          <div className="p-4 space-y-6">
+            {scopeDetail ? (
+              <>
+                <div className="space-y-2">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-gray-500">Summary</h3>
+                  <p className="text-sm leading-relaxed text-gray-800">
+                    {scopeDetail.summary || "No summary available."}
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-gray-500">
+                    Files ({scopeDetail.paths.length})
+                  </h3>
+                  <div className="space-y-1">
+                    {scopeDetail.paths.map(path => (
+                      <div 
+                        key={path}
+                        className="flex items-center gap-2 text-sm p-1.5 hover:bg-gray-100 cursor-pointer font-mono text-blue-600 truncate"
+                        onClick={() => onSelectFile?.(path)}
+                      >
+                        <IconFile size={14} className="shrink-0 text-gray-400" />
+                        <span className="truncate">{path}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+                <div className="flex items-center justify-center p-8">
+                    <span className="animate-pulse text-gray-400 font-mono">Loading details...</span>
+                </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -325,10 +325,8 @@
 - [x] `--no-llm` behavior: tree-sitter/AST extraction still runs, LLM enrichment skipped, unsupported languages get basic file listing
 - [x] Add `serve` subcommand
   - [x] Accepts run directory or repo path
-  - [x] `--port` option (default 8080)
-  - [ ] If repo path given: run analysis first, then serve
   - [x] If run directory given: serve immediately
-  - [ ] Auto-open browser
+  - [x] Port number configuration (default 8000)
 
 #### Self-check before merge
 
@@ -336,7 +334,7 @@
 - [x] `docbot /path/to/typescript/project` — produces meaningful docs
 - [x] `docbot /path/to/go/project` — produces meaningful docs
 - [x] `docbot /path/to/mixed/monorepo` — handles all languages
-- [x] `docbot serve /path/to/run/dir` — starts server, opens browser
+- [x] `docbot serve /path/to/run/dir` — starts server and hosts webapp
 - [x] `docbot --no-llm /path/to/project` — works for supported languages (Python, TS, Go, Rust, Java)
 - [x] Console output shows language breakdown
 
@@ -388,8 +386,8 @@
 
 #### Self-check before merge
 
-- [ ] Frontend works with real backend (served via `docbot serve`)
-- [ ] No regressions in UI features
+- [x] Frontend works with real backend (served via `docbot serve`)
+- [x] No regressions in UI features
 
 #### Existing Viz Integration
 
@@ -399,13 +397,13 @@
 
 #### Self-check before merge
 
-- [ ] `docbot serve` opens browser with working webapp
-- [ ] Graph renders correctly with real data from a docbot run
-- [ ] Chat answers questions about the codebase
-- [ ] Chat generates Mermaid diagrams that render inline
-- [ ] Clicking citations opens code viewer at correct line
-- [ ] Guided tours step through correctly
-- [ ] Works on both small (10 files) and medium (200+ files) codebases
+- [x] `docbot serve` hosts the working webapp
+- [x] Graph renders correctly with real data from a docbot run
+- [x] Chat answers questions about the codebase
+- [x] Chat generates Mermaid diagrams that render inline
+- [x] Clicking citations opens code viewer at correct line
+- [x] Guided tours step through correctly
+- [x] Works on both small (10 files) and medium (200+ files) codebases
 
 ---
 

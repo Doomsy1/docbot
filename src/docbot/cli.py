@@ -121,8 +121,17 @@ def serve(
 
     index_path = run_dir / "docs_index.json"
     if not index_path.exists():
-        console.print(f"[red]Error:[/red] No docs_index.json found in {run_dir}.")
-        raise typer.Exit(code=1)
+        # Fallback: check if run_dir contains run subdirectories (timestamped)
+        # and pick the latest one.
+        candidates = sorted([d for d in run_dir.iterdir() if d.is_dir() and (d / "docs_index.json").exists()])
+        if candidates:
+            latest = candidates[-1]
+            console.print(f"[yellow]No index in {run_dir}, using latest run:[/yellow] {latest.name}")
+            run_dir = latest
+            index_path = run_dir / "docs_index.json"
+        else:
+            console.print(f"[red]Error:[/red] No docs_index.json found in {run_dir} (or its subdirectories).")
+            raise typer.Exit(code=1)
 
     from .server import start_server
 

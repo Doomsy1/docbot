@@ -134,6 +134,44 @@ async def get_graph() -> JSONResponse:
     })
 
 
+@app.get("/api/files/{file_path:path}")
+async def get_file(file_path: str) -> JSONResponse:
+    """Read a source file from the repository."""
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+
+    index = _load_index()
+    
+    # We attempt to resolve the repo root. 
+    # In a real scenario, we might want to store the resolved root in the index metadata
+    # or pass it as a flag to `docbot serve`.
+    # For now, we assume the index.repo_path is correct (it's absolute from the scanner).
+    repo_root = Path(index.repo_path).resolve()
+    
+    if not repo_root.exists():
+         raise HTTPException(status_code=500, detail=f"Repository root not found at {repo_root}")
+
+    # Build absolute target path
+    # file_path comes from the URL, e.g. "src/docbot/server.py"
+    target_path = (repo_root / file_path).resolve()
+    
+    # Security check: ensure target is within repo_root
+    try:
+        target_path.relative_to(repo_root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="File path must be within repository root.")
+
+    if not target_path.exists() or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    try:
+        content = target_path.read_text(encoding="utf-8", errors="replace")
+        return JSONResponse({"content": content, "path": file_path})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading file: {e}")
+
+
+
 # ---------------------------------------------------------------------------
 # Server launcher
 # ---------------------------------------------------------------------------

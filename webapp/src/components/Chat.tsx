@@ -17,7 +17,11 @@ interface SearchResult {
   match_context: string;
 }
 
-export default function Chat() {
+interface ChatProps {
+  onSelectFile?: (path: string) => void;
+}
+
+export default function Chat({ onSelectFile }: ChatProps) {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([
     { id: '1', sender: 'bot', text: 'Hello. I am docbot. Ask me about your codebase.' }
@@ -63,7 +67,12 @@ export default function Chat() {
                   {m.results.map((r, i) => (
                     <div key={i} className="text-sm">
                       <div className="font-bold">{r.match_context}</div>
-                      <div className="text-xs opacity-75">{r.citation.file}:{r.citation.line_start}</div>
+                      <div 
+                        className="text-xs opacity-75 cursor-pointer hover:underline"
+                        onClick={() => onSelectFile?.(r.citation.file)}
+                      >
+                        {r.citation.file}:{r.citation.line_start}
+                      </div>
                     </div>
                   ))}
                 </div>

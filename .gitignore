@@ -17,6 +17,7 @@ ENV/
 
 # docbot run outputs
 runs/
+docbot_data/
 
 # Environment / secrets
 .env

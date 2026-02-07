@@ -37,10 +37,10 @@ uv venv && source .venv/bin/activate
 uv pip install -e .
 
 # 2. Scan the repo to generate data
-docbot .
+docbot run . --output docbot_data
 
 # 3. Start the API server
-docbot serve .
+docbot serve docbot_data
 ```
 
 **Terminal 2 (Frontend):**

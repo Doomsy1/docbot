@@ -5,6 +5,7 @@ import FileViewer from './components/FileViewer';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'graph' | 'chat' | 'files'>('graph');
+  const [selectedFile, setSelectedFile] = useState<string | undefined>();
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-white text-black font-sans">
@@ -36,10 +37,13 @@ export default function App() {
         {activeTab === 'graph' && <Graph />}
         {activeTab === 'chat' && (
           <div className="max-w-2xl mx-auto h-full">
-            <Chat />
+            <Chat onSelectFile={(path) => {
+              setActiveTab('files');
+              setSelectedFile(path);
+            }} />
           </div>
         )}
-        {activeTab === 'files' && <FileViewer />}
+        {activeTab === 'files' && <FileViewer filePath={selectedFile} />}
       </main>
     </div>
   )

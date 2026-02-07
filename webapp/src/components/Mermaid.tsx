@@ -18,6 +18,15 @@ interface MermaidProps {
   chart: string;
 }
 
+// Fix common LLM-generated Mermaid syntax issues
+function sanitizeMermaid(src: string): string {
+  return src
+    // Strip inline %% comments (Mermaid only supports whole-line comments)
+    .replace(/^(.+?)\s+%%.*$/gm, '$1')
+    // Fix node labels with unquoted parentheses: A[Compose Video (and audio)] -> A["Compose Video (and audio)"]
+    .replace(/(\[)([^\]"]*\([^\]]*\))(\])/g, '$1"$2"$3');
+}
+
 export default function Mermaid({ chart }: MermaidProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -25,12 +34,13 @@ export default function Mermaid({ chart }: MermaidProps) {
   useEffect(() => {
     async function renderChart() {
         if (!ref.current || !chart) return;
-        
+
         setError(null);
+        const sanitized = sanitizeMermaid(chart);
         try {
             // Uniq ID for each render to avoid collisions
             const id = 'mermaid-' + Math.random().toString(36).substring(2, 9);
-            const { svg } = await mermaid.render(id, chart);
+            const { svg } = await mermaid.render(id, sanitized);
             ref.current.innerHTML = svg;
         } catch (err: any) {
             console.error("Mermaid Render Error:", err);

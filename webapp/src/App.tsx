@@ -75,7 +75,7 @@ export default function App() {
         </main>
 
         {/* Chat sidebar - always visible */}
-        <div className="w-[380px] shrink-0 border-l border-black h-full">
+        <div className="w-[570px] shrink-0 border-l border-black h-full">
           <Chat onSelectFile={selectFile} />
         </div>
       </div>

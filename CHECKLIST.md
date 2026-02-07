@@ -309,17 +309,17 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Snapshot Management (`src/docbot/git/history.py`) -- Dev B
 
-- [ ] `save_snapshot(docbot_dir, docs_index, scope_results, run_id, commit)` -- create DocSnapshot + save scope results
-- [ ] `load_snapshot(docbot_dir, run_id)` -- load a specific snapshot
-- [ ] `list_snapshots(docbot_dir)` -- list available snapshots with metadata
-- [ ] `prune_snapshots(docbot_dir, max_count)` -- remove oldest beyond limit
-- [ ] Snapshot storage: `.docbot/history/<run_id>.json` (metadata) + `.docbot/history/<run_id>/` (scope results)
+- [x] `save_snapshot(docbot_dir, docs_index, scope_results, run_id, commit)` -- create DocSnapshot + save scope results
+- [x] `load_snapshot(docbot_dir, run_id)` -- load a specific snapshot
+- [x] `list_snapshots(docbot_dir)` -- list available snapshots with metadata
+- [x] `prune_snapshots(docbot_dir, max_count)` -- remove oldest beyond limit
+- [x] Snapshot storage: `.docbot/history/<run_id>.json` (metadata) + `.docbot/history/<run_id>/` (scope results)
 
 #### Pipeline Integration -- Dev B
 
-- [ ] Hook `save_snapshot()` into `generate_async()` after state save
-- [ ] Hook `save_snapshot()` into `update_async()` after state save
-- [ ] Call `prune_snapshots()` after each save
+- [x] Hook `save_snapshot()` into `generate_async()` after state save
+- [x] Hook `save_snapshot()` into `update_async()` after state save
+- [x] Call `prune_snapshots()` after each save
 
 ---
 

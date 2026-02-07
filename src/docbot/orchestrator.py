@@ -524,6 +524,16 @@ async def generate_async(
         meta.model_dump_json(indent=2), encoding="utf-8"
     )
     
+    # Save snapshot for version history
+    from .git.history import save_snapshot, prune_snapshots
+    
+    if current_commit:
+        save_snapshot(docbot_root, docs_index, scope_results, run_id, current_commit)
+        # Prune old snapshots based on config
+        removed = prune_snapshots(docbot_root, config.max_snapshots)
+        if removed > 0:
+            console.print(f"[dim]Pruned {removed} old snapshot(s)[/dim]")
+    
     tracker.set_state("orchestrator", AgentState.done)
     console.print(f"\n[bold green]Done![/bold green] Documentation in: {docs_dir}")
     return docbot_root
@@ -764,6 +774,16 @@ async def update_async(
     (history_dir / f"{run_id}.json").write_text(
         meta.model_dump_json(indent=2), encoding="utf-8"
     )
+    
+    # Save snapshot for version history
+    from .git.history import save_snapshot, prune_snapshots
+    
+    if current_commit:
+        save_snapshot(docbot_root, docs_index, all_scope_results, run_id, current_commit)
+        # Prune old snapshots based on config
+        removed = prune_snapshots(docbot_root, config.max_snapshots)
+        if removed > 0:
+            console.print(f"[dim]Pruned {removed} old snapshot(s)[/dim]")
     
     tracker.set_state("orchestrator", AgentState.done)
     console.print(f"\n[bold green]Incremental update complete![/bold green] Documentation in: {docs_dir}")

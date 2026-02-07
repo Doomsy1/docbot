@@ -367,10 +367,10 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Expand Hook Support (`src/docbot/hooks.py`) -- Dev B
 
-- [ ] Add `install_post_merge_hook(repo_root)` -- same pattern as post-commit
-- [ ] Update `install_hook()` to install both post-commit and post-merge by default
-- [ ] Add `--commit-only` flag to install only post-commit
-- [ ] Update `uninstall_hook()` to remove from both hook files
+- [x] Add `install_post_merge_hook(repo_root)` -- same pattern as post-commit
+- [x] Update `install_hook()` to install both post-commit and post-merge by default
+- [x] Add `--commit-only` flag to install only post-commit
+- [x] Update `uninstall_hook()` to remove from both hook files
 
 #### CLI Updates -- Dev A
 

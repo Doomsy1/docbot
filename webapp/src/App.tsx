@@ -4,9 +4,10 @@ import Chat from './components/Chat';
 import FileViewer from './components/FileViewer';
 import Dashboard from './components/Dashboard';
 import TourViewer from './components/TourViewer';
+import ArchitectureDev from './components/ArchitectureDev';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph' | 'chat' | 'files' | 'tours'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph' | 'chat' | 'files' | 'tours' | 'dev-arch'>('dashboard');
   const [selectedFile, setSelectedFile] = useState<string | undefined>();
 
   return (
@@ -44,6 +45,12 @@ export default function App() {
           >
             Files
           </button>
+          <button
+            onClick={() => setActiveTab('dev-arch')}
+            className={`hover:underline ${activeTab === 'dev-arch' ? 'underline decoration-2' : ''}`}
+          >
+            Dev Arch
+          </button>
         </div>
       </header>
       
@@ -77,6 +84,7 @@ export default function App() {
             />
           </div>
         )}
+        {activeTab === 'dev-arch' && <ArchitectureDev />}
       </main>
     </div>
   )

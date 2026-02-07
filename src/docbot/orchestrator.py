@@ -534,6 +534,16 @@ async def generate_async(
         if removed > 0:
             console.print(f"[dim]Pruned {removed} old snapshot(s)[/dim]")
     
+    # Save pipeline events for visualization replay
+    run_history_dir = docbot_root / "history" / run_id
+    run_history_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Save tracker snapshot (will be replaced with export_events() once Dev C implements it)
+    pipeline_events = tracker.snapshot()
+    (run_history_dir / "pipeline_events.json").write_text(
+        json.dumps(pipeline_events, indent=2), encoding="utf-8"
+    )
+    
     tracker.set_state("orchestrator", AgentState.done)
     console.print(f"\n[bold green]Done![/bold green] Documentation in: {docs_dir}")
     return docbot_root
@@ -784,6 +794,16 @@ async def update_async(
         removed = prune_snapshots(docbot_root, config.max_snapshots)
         if removed > 0:
             console.print(f"[dim]Pruned {removed} old snapshot(s)[/dim]")
+    
+    # Save pipeline events for visualization replay
+    run_history_dir = docbot_root / "history" / run_id
+    run_history_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Save tracker snapshot (will be replaced with export_events() once Dev C implements it)
+    pipeline_events = tracker.snapshot()
+    (run_history_dir / "pipeline_events.json").write_text(
+        json.dumps(pipeline_events, indent=2), encoding="utf-8"
+    )
     
     tracker.set_state("orchestrator", AgentState.done)
     console.print(f"\n[bold green]Incremental update complete![/bold green] Documentation in: {docs_dir}")

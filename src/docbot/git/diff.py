@@ -6,7 +6,7 @@ detailed reports of what changed between them.
 
 from __future__ import annotations
 
-from .models import (
+from ..models import (
     DiffReport,
     DocSnapshot,
     GraphDelta,

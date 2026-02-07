@@ -97,7 +97,7 @@ export default function Graph({ onSelectFile }: GraphProps) {
             >
               <div className="font-semibold text-sm">{scope.title}</div>
               <div className="text-xs text-gray-600">
-                {scope.file_count} files · {scope.symbol_count} symbols · {scope.languages.join(', ') || 'unknown'}
+                {scope.file_count} files · {scope.symbol_count} entities · {scope.languages.join(', ') || 'unknown'}
               </div>
             </button>
           ))}

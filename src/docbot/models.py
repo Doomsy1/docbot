@@ -115,6 +115,10 @@ class ScopeResult(BaseModel):
     open_questions: list[str] = Field(default_factory=list)
     languages: list[str] = Field(default_factory=list)
 
+    # Per-file extraction data (repo-relative path -> FileExtraction).
+    # Preserves file-level detail alongside the merged flat lists above.
+    file_extractions: dict[str, FileExtraction] = Field(default_factory=dict)
+
     # If exploration failed, store the reason here.
     error: str | None = None
 

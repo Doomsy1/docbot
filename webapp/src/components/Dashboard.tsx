@@ -137,7 +137,7 @@ export default function Dashboard() {
                           <div className="text-xs text-gray-500">
                             {scope.file_count} file{scope.file_count !== 1 ? 's' : ''}
                             {' · '}
-                            {scope.symbol_count} symbol{scope.symbol_count !== 1 ? 's' : ''}
+                            {scope.symbol_count} entit{scope.symbol_count !== 1 ? 'ies' : 'y'}
                             {scope.languages.length > 0 && (
                               <> · {scope.languages.join(', ')}</>
                             )}
@@ -148,11 +148,11 @@ export default function Dashboard() {
                   </div>
                 </ExpandableCard>
 
-                {/* Public Symbols */}
+                {/* Public API */}
                 <ExpandableCard
                   icon={<IconCode size={24} className="text-green-600" />}
                   count={data.public_api_count}
-                  label="Public Symbols"
+                  label="Public API"
                   expanded={expandedCards.has('symbols')}
                   onToggle={() => toggleCard('symbols')}
                 >

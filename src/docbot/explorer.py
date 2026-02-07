@@ -82,6 +82,7 @@ def explore_scope(plan: ScopePlan, repo_root: Path) -> ScopeResult:
     key_files: list[str] = []
     entrypoint_files: list[str] = []
     seen_languages: set[str] = set()
+    file_extractions: dict[str, FileExtraction] = {}
 
     for rel_path in plan.paths:
         abs_path = repo_root / rel_path
@@ -108,6 +109,7 @@ def explore_scope(plan: ScopePlan, repo_root: Path) -> ScopeResult:
                 raised_errors.extend(extraction.raised_errors)
                 citations.extend(extraction.citations)
                 imports.extend(extraction.imports)
+                file_extractions[rel_path] = extraction
             except Exception:
                 citations.append(Citation(
                     file=rel_path, line_start=0, line_end=0,
@@ -146,6 +148,7 @@ def explore_scope(plan: ScopePlan, repo_root: Path) -> ScopeResult:
         raised_errors=raised_errors,
         imports=sorted(set(imports)),
         languages=sorted(seen_languages),
+        file_extractions=file_extractions,
     )
 
 

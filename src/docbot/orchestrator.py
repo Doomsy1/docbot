@@ -632,8 +632,132 @@ async def update_async(
     
     console.print(f"[bold]Affected scopes:[/bold] {', '.join(sorted(affected_scope_ids))}")
     
-    # For now (Steps 6-7), we still call generate_async
-    # Steps 8-10 will add selective re-exploration
-    console.print("[yellow]Selective update not yet implemented. Running full generate...[/yellow]")
-    return await generate_async(docbot_root, config, llm_client, tracker)
+    # Step 8: Selective re-exploration
+    # Load cached scope results for unaffected scopes
+    scopes_dir = docbot_root / "scopes"
+    if not scopes_dir.exists():
+        console.print("[yellow]No cached scope results found. Running full generate...[/yellow]")
+        return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    # Load plan.json to get all scope plans
+    plan_path = docbot_root / "plan.json"
+    if not plan_path.exists():
+        console.print("[yellow]No plan.json found. Running full generate...[/yellow]")
+        return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    from .models import ScopePlan
+    plans_data = json.loads(plan_path.read_text(encoding="utf-8"))
+    all_plans = [ScopePlan(**p) for p in plans_data]
+    
+    # Separate affected and unaffected plans
+    affected_plans = [p for p in all_plans if p.scope_id in affected_scope_ids]
+    unaffected_plans = [p for p in all_plans if p.scope_id not in affected_scope_ids]
+    
+    console.print(f"[bold]Re-exploring {len(affected_plans)} affected scope(s), "
+                  f"loading {len(unaffected_plans)} cached scope(s)[/bold]")
+    
+    # Load cached results for unaffected scopes
+    from .models import ScopeResult
+    cached_results: list[ScopeResult] = []
+    for plan in unaffected_plans:
+        cached_file = scopes_dir / f"{plan.scope_id}.json"
+        if cached_file.exists():
+            cached_results.append(
+                ScopeResult.model_validate_json(cached_file.read_text(encoding="utf-8"))
+            )
+        else:
+            console.print(f"  [yellow]Warning: cached result for '{plan.scope_id}' not found[/yellow]")
+    
+    # Re-explore affected scopes
+    if tracker is None:
+        tracker = NoOpTracker()
+    
+    # Setup extractors
+    from .extractors import setup_extractors
+    setup_extractors(llm_client=llm_client)
+    
+    # Build tracker tree for incremental update
+    tracker.add_node("orchestrator", "Orchestrator (Incremental)")
+    tracker.add_node("explorer_hub", "Explorer Hub", "orchestrator")
+    tracker.add_node("reducer", "Reducer", "orchestrator")
+    tracker.add_node("renderer", "Renderer", "orchestrator")
+    tracker.set_state("orchestrator", AgentState.running)
+    
+    # Re-explore affected scopes
+    affected_results = await _run_explore(
+        affected_plans, repo_path, config.concurrency, config.timeout, llm_client, tracker, mock=False
+    )
+    
+    # Save updated scope results
+    for sr in affected_results:
+        (scopes_dir / f"{sr.scope_id}.json").write_text(
+            sr.model_dump_json(indent=2), encoding="utf-8",
+        )
+    
+    # Merge affected + cached results
+    all_scope_results = affected_results + cached_results
+    
+    succeeded = sum(1 for r in all_scope_results if r.error is None)
+    failed = len(all_scope_results) - succeeded
+    
+    if failed:
+        console.print(f"  [yellow]{failed} scope(s) failed.[/yellow]")
+    console.print(f"  [green]{succeeded}/{len(all_scope_results)} scope(s) succeeded.[/green]")
+    
+    # Re-run reduce with merged results
+    docs_index = await _run_reduce(all_scope_results, str(repo_path), llm_client, tracker, mock=False)
+    
+    # Save updated docs_index.json
+    index_path = docbot_root / "docs_index.json"
+    index_path.write_text(docs_index.model_dump_json(indent=2), encoding="utf-8")
+    
+    # Re-render documentation
+    docs_dir = docbot_root / "docs"
+    docs_dir.mkdir(exist_ok=True)
+    written = await _run_render(docs_index, all_scope_results, docs_dir, llm_client, tracker, mock=False)
+    
+    # Update state
+    from .project import save_state
+    from .git_utils import get_current_commit
+    from .models import ProjectState, RunMeta
+    
+    run_id = _make_run_id()
+    meta = RunMeta(
+        run_id=run_id,
+        repo_path=str(repo_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        finished_at=datetime.now(timezone.utc).isoformat(),
+        scope_count=len(all_scope_results),
+        succeeded=succeeded,
+        failed=failed,
+    )
+    
+    # Build updated scope_file_map
+    scope_file_map: dict[str, list[str]] = {}
+    for sr in all_scope_results:
+        scope_file_map[sr.scope_id] = [p.replace("\\", "/") for p in sr.paths]
+    
+    # Get current commit hash
+    current_commit = get_current_commit(repo_path)
+    
+    # Save state.json
+    state = ProjectState(
+        last_commit=current_commit,
+        last_run_id=run_id,
+        last_run_at=meta.finished_at,
+        scope_file_map=scope_file_map,
+    )
+    save_state(docbot_root, state)
+    
+    # Save RunMeta to history/
+    history_dir = docbot_root / "history"
+    history_dir.mkdir(exist_ok=True)
+    (history_dir / f"{run_id}.json").write_text(
+        meta.model_dump_json(indent=2), encoding="utf-8"
+    )
+    
+    tracker.set_state("orchestrator", AgentState.done)
+    console.print(f"\n[bold green]Incremental update complete![/bold green] Documentation in: {docs_dir}")
+    return docbot_root
+
 

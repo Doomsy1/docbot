@@ -56,6 +56,7 @@ def run(
     timeout: float = typer.Option(120.0, "--timeout", "-t", help="Per-scope timeout in seconds."),
     model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID."),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM calls; use template-only mode."),
+    visualize: bool = typer.Option(False, "--visualize", "--viz", help="Open a live D3.js pipeline visualization in the browser."),
 ) -> None:
     """Scan, explore, and generate documentation for REPO."""
     repo = Path(repo).resolve()
@@ -68,6 +69,7 @@ def run(
 
     from .llm import LLMClient
     from .orchestrator import run_async
+    from .tracker import NoOpTracker, PipelineTracker
 
     # Build LLM client if key is available and not disabled.
     llm_client = None
@@ -79,6 +81,17 @@ def run(
             console.print("[yellow]OPENROUTER_KEY not set. Running in template-only mode.[/yellow]")
             console.print("[dim]Set OPENROUTER_KEY or pass --no-llm to suppress this warning.[/dim]")
 
+    # Set up visualization tracker.
+    tracker: PipelineTracker | NoOpTracker
+    if visualize:
+        from .viz_server import start_viz_server
+
+        tracker = PipelineTracker()
+        _server, url = start_viz_server(tracker)
+        console.print(f"[bold cyan]Visualization:[/bold cyan] {url}")
+    else:
+        tracker = NoOpTracker()
+
     asyncio.run(run_async(
         repo_path=repo,
         output_base=output,
@@ -86,6 +99,7 @@ def run(
         concurrency=concurrency,
         timeout=timeout,
         llm_client=llm_client,
+        tracker=tracker,
     ))
 
 

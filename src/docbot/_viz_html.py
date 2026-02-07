@@ -1,4 +1,4 @@
-"""Self-contained HTML/CSS/JS for the D3.js agent visualization."""
+"""Legacy D3/HTML template for pipeline visualization. DEPRECATED in favor of React/ReactFlow."""
 
 VIZ_HTML = r"""<!DOCTYPE html>
 <html lang="en">

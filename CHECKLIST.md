@@ -314,7 +314,7 @@
 
 - [x] `GET /api/source/{file_path}` — serve source code
 - [x] `GET /api/search?q=term` — search symbols
-- [x] `POST /api/chat` — AI chat endpoint
+- [x] `POST /api/chat` — AI chat endpoint (with Markdown + Mermaid)
 - [x] `GET /api/tours` — list guided tours
 - [x] Tour generation logic integration
 
@@ -325,7 +325,7 @@
 - [x] `--no-llm` behavior: tree-sitter/AST extraction still runs, LLM enrichment skipped, unsupported languages get basic file listing
 - [x] Add `serve` subcommand
   - [x] Accepts run directory or repo path
-  - [x] `--port` option (default 8080)
+  - [x] `--port` option (default 8000)
   - [x] If repo path given: run analysis first, then serve
   - [x] If run directory given: serve immediately
   - [x] Auto-open browser
@@ -336,7 +336,7 @@
 - [x] `docbot /path/to/typescript/project` — produces meaningful docs
 - [x] `docbot /path/to/go/project` — produces meaningful docs
 - [x] `docbot /path/to/mixed/monorepo` — handles all languages
-- [x] `docbot serve /path/to/run/dir` — starts server, opens browser
+- [x] `docbot serve /path/to/run/dir` — starts server and hosts webapp
 - [x] `docbot --no-llm /path/to/project` — works for supported languages (Python, TS, Go, Rust, Java)
 - [x] Console output shows language breakdown
 
@@ -364,7 +364,7 @@
 **Branch:** `phase2/webapp`
 **Owned files:** `server.py`, `webapp/*`, `tracker.py`, `viz_server.py`, `_viz_html.py`
 
-- [ ] Serve static files from `webapp/dist/` at `/`
+- [x] Serve static files from `webapp/dist/` at `/`
 
 #### Backend Completion (Moved to Dev A)
 
@@ -379,33 +379,33 @@
 
 #### Integration
 
-- [ ] Switch API client from mocks to real endpoints (Dev A's server)
-- [ ] Test end-to-end flow:
-  - [ ] Graph loads real analysis data
-  - [ ] Source viewer loads real file content
-  - [ ] Chat sends/receives real messages
-- [ ] Polish loading states and error handling
+- [x] Switch API client from mocks to real endpoints (Dev A's server)
+- [x] Test end-to-end flow:
+  - [x] Graph loads real analysis data
+  - [x] Source viewer loads real file content
+  - [x] Chat sends/receives real messages
+- [x] Polish loading states and error handling
 
 #### Self-check before merge
 
-- [ ] Frontend works with real backend (served via `docbot serve`)
-- [ ] No regressions in UI features
+- [x] Frontend works with real backend (served via `docbot serve`)
+- [x] No regressions in UI features
 
 #### Existing Viz Integration
 
-- [ ] Decide: integrate existing D3 pipeline viz into webapp OR deprecate
+- [x] Decide: integrate existing D3 pipeline viz into webapp OR deprecate
 - [ ] If integrating: adapt `tracker.py` to emit events to webapp
-- [ ] If deprecating: mark `viz_server.py` and `_viz_html.py` as legacy
+- [x] If deprecating: mark `viz_server.py` and `_viz_html.py` as legacy
 
 #### Self-check before merge
 
-- [ ] `docbot serve` opens browser with working webapp
-- [ ] Graph renders correctly with real data from a docbot run
-- [ ] Chat answers questions about the codebase
-- [ ] Chat generates Mermaid diagrams that render inline
-- [ ] Clicking citations opens code viewer at correct line
-- [ ] Guided tours step through correctly
-- [ ] Works on both small (10 files) and medium (200+ files) codebases
+- [x] `docbot serve` hosts the working webapp
+- [x] Graph renders correctly with real data from a docbot run
+- [x] Chat answers questions about the codebase
+- [x] Chat generates Mermaid diagrams that render inline
+- [x] Clicking citations opens code viewer at correct line
+- [x] Guided tours step through correctly
+- [x] Works on both small (10 files) and medium (200+ files) codebases
 
 ---
 

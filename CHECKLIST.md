@@ -17,7 +17,7 @@
 - [ ] Update `DocsIndex`: add `languages: list[str]` field
 - [ ] Update `PublicSymbol.kind` docstring to include non-Python kinds
 - [ ] Write the `Extractor` protocol signature in a doc comment (so Dev B knows the exact interface)
-- [ ] All 3 devs reviewed and approved the contracts
+- [ ] All 4 devs reviewed and approved the contracts
 - [ ] Merged `phase0/contracts` → `master`
 
 ---
@@ -27,7 +27,7 @@
 ### Dev A — Core Infrastructure
 
 **Branch:** `phase1/core-infra`
-**Owned files:** `scanner.py`, `llm.py`, `__init__.py`, `pyproject.toml`
+**Owned files:** `scanner.py`, `llm.py`, `__init__.py`, `pyproject.toml`, `server.py`
 
 #### Scanner Generalization (`src/docbot/scanner.py`)
 
@@ -79,6 +79,14 @@
 
 - [ ] Update exports if any public names changed
 
+#### Webapp Server Skeleton (`src/docbot/server.py` — new file)
+
+- [ ] Create FastAPI app
+- [ ] `GET /api/index` — return DocsIndex JSON
+- [ ] `GET /api/scopes` — list scopes with metadata
+- [ ] `GET /api/graph` — dependency graph
+- [ ] Basic CORS configuration
+
 #### Self-check before merge
 
 - [ ] `scan_repo()` returns valid `ScanResult` with `source_files` and `languages` on a Python project
@@ -91,7 +99,7 @@
 ### Dev B — Extraction Engine
 
 **Branch:** `phase1/extraction-engine`
-**Owned files:** `extractors/*` (all new), `explorer.py`
+**Owned files:** `extractors/*` (all new), `explorer.py`, `search.py`
 
 #### Extractors Package Setup
 
@@ -164,6 +172,12 @@
 - [ ] `enrich_scope_with_llm()`: update `_EXPLORER_PROMPT` — replace "Python" with dynamic language
 - [ ] Keep `_build_source_snippets()` unchanged
 
+#### Semantic Search (`src/docbot/search.py`)
+
+- [ ] `SearchIndex` class
+- [ ] Index extracted symbols
+- [ ] `search(query) -> list[Citation]` implementation
+
 #### Self-check before merge
 
 - [ ] `PythonExtractor` produces identical results to old `_extract_file()` on docbot's own source
@@ -220,15 +234,9 @@
 - [ ] `_render_architecture_template()`: reference languages instead of "Python"
 - [ ] All `_generate_*_llm()` functions: accept and use `languages` parameter
 
-#### Webapp Server Skeleton (`src/docbot/server.py` — new file)
+#### Webapp Server Skeleton (Moved to Dev A)
 
-- [ ] Create FastAPI app
-- [ ] `GET /api/index` — return DocsIndex JSON
-- [ ] `GET /api/scopes` — list scopes with metadata
-- [ ] `GET /api/scopes/{scope_id}` — scope detail
-- [ ] `GET /api/graph` — dependency graph as nodes + edges
-- [ ] Load DocsIndex from a run directory on startup
-- [ ] Basic CORS configuration for local dev
+- (Dev A now owns `server.py`)
 
 #### Self-check before merge
 
@@ -240,14 +248,53 @@
 
 ---
 
+### Dev D — Frontend Experience
+
+**Branch:** `phase1/webapp-frontend`
+**Owned files:** `webapp/*`
+
+#### Frontend Scaffold (`webapp/`)
+
+- [ ] Scaffold: Vite + React + TypeScript + Tailwind
+- [ ] Build config: output to `webapp/dist/`
+- [ ] Mock Data Layer: create `src/mocks.ts` with explicit types matching `models.py` contracts
+  - [ ] Mock `DocsIndex`
+  - [ ] Mock `ScopeResult` list
+  - [ ] Mock `ScopeResult` detail (symbols, citations)
+  - [ ] Mock Dependency Graph (nodes/edges)
+
+#### UI Components
+
+- [ ] **Interactive System Graph**
+  - [ ] ReactFlow setup (read from mocks)
+  - [ ] Nodes colored by type, Edges for dependencies
+  - [ ] Zoom/Pan/Click-to-detail
+- [ ] **Chat Panel**
+  - [ ] Message feed with mock messages
+  - [ ] Markdown rendering
+  - [ ] Mermaid support
+- [ ] **Code Viewer**
+  - [ ] Implementation with Shiki/Prism
+  - [ ] Line highlighting
+- [ ] **Documentation Browser**
+  - [ ] Render markdown docs (mocks)
+
+#### Self-check before merge
+
+- [ ] `npm run dev` launches the UI
+- [ ] UI is fully navigable using mock data
+- [ ] `npm run build` creates valid static assets in `dist/`
+
+---
+
 ## Phase 2: Integration & Webapp
 
-> Phase 2 begins after all three Phase 1 branches merge to master.
+> Phase 2 begins after all four Phase 1 branches merge to master.
 
 ### Dev A — Integration Wiring
 
 **Branch:** `phase2/integration`
-**Owned files:** `orchestrator.py`, `cli.py`
+**Owned files:** `orchestrator.py`, `cli.py`, `server.py`
 
 #### Orchestrator (`src/docbot/orchestrator.py`)
 
@@ -259,6 +306,14 @@
 - [ ] Update "No Python files found" → "No source files found"
 - [ ] Verify: `_explore_one()` works with new `explore_scope()` signature
 - [ ] Verify: LLM extractor receives `llm_client` correctly for fallback languages
+
+#### Server Completion (`src/docbot/server.py`)
+
+- [ ] `GET /api/source/{file_path}` — serve source code
+- [ ] `GET /api/search?q=term` — search symbols
+- [ ] `POST /api/chat` — AI chat endpoint
+- [ ] `GET /api/tours` — list guided tours
+- [ ] Tour generation logic integration
 
 #### CLI (`src/docbot/cli.py`)
 
@@ -306,58 +361,32 @@
 **Branch:** `phase2/webapp`
 **Owned files:** `server.py`, `webapp/*`, `tracker.py`, `viz_server.py`, `_viz_html.py`
 
-#### Backend Completion (`src/docbot/server.py`)
-
-- [ ] `GET /api/source/{file_path}` — serve source code from analyzed repo
-- [ ] `GET /api/search?q=term` — search symbols, files, docs
-- [ ] `POST /api/chat` — AI chat endpoint
-  - [ ] System prompt with serialized DocsIndex context
-  - [ ] Multi-turn conversation (session-based history)
-  - [ ] SSE streaming responses
-- [ ] `GET /api/tours` — list guided tours
-- [ ] `GET /api/tours/{tour_id}` — specific tour
-- [ ] Tour generation via LLM
-  - [ ] "Project Overview" tour
-  - [ ] "Getting Started" tour
-  - [ ] Per-scope deep dive tours
-  - [ ] Cache tours to disk
 - [ ] Serve static files from `webapp/dist/` at `/`
 
-#### Frontend (`webapp/`)
+#### Backend Completion (Moved to Dev A)
 
-- [ ] Scaffold: Vite + React + TypeScript + Tailwind
-- [ ] Layout shell: left sidebar, center panel, right chat panel
-- [ ] **Interactive System Graph**
-  - [ ] ReactFlow setup with nodes and edges from `/api/graph`
-  - [ ] Scope nodes colored by type (entrypoint, cross-cutting, regular)
-  - [ ] Click node → sidebar shows scope detail
-  - [ ] Zoom, pan, auto-layout
-  - [ ] Search bar: highlight matching nodes
-  - [ ] Filter controls (by language, by type)
-  - [ ] Drill-down: click scope → expand to show internal files
-- [ ] **Chat Panel**
-  - [ ] Message input + send button
-  - [ ] Streaming response display
-  - [ ] Mermaid diagram rendering in messages
-  - [ ] Citation links (file:line) clickable → opens code viewer
-  - [ ] Suggested starter questions
-  - [ ] Conversation history within session
-- [ ] **Code Viewer**
-  - [ ] Syntax highlighting (Shiki or Prism.js)
-  - [ ] Line numbers
-  - [ ] Scroll-to-line from citation links
-  - [ ] File path breadcrumb
-- [ ] **Guided Tours**
-  - [ ] Tours list view
-  - [ ] Step-by-step navigation (previous/next)
-  - [ ] Each step: explanation + highlighted code region + optional diagram
-  - [ ] Progress indicator
-- [ ] **Documentation Browser**
-  - [ ] Render existing generated markdown docs
-  - [ ] Per-scope docs, architecture overview, API reference
-  - [ ] Search within docs
-- [ ] Build config: output to `webapp/dist/`
-- [ ] Dev proxy config: Vite proxy API calls to FastAPI during development
+- (Dev A now owns `server.py`)
+
+---
+
+### Dev D — Webapp Integration
+
+**Branch:** `phase2/webapp-bind`
+**Owned files:** `webapp/*`
+
+#### Integration
+
+- [ ] Switch API client from mocks to real endpoints (Dev A's server)
+- [ ] Test end-to-end flow:
+  - [ ] Graph loads real analysis data
+  - [ ] Source viewer loads real file content
+  - [ ] Chat sends/receives real messages
+- [ ] Polish loading states and error handling
+
+#### Self-check before merge
+
+- [ ] Frontend works with real backend (served via `docbot serve`)
+- [ ] No regressions in UI features
 
 #### Existing Viz Integration
 
@@ -388,23 +417,24 @@ If a developer needs to take over another's work mid-sprint:
 
 ### Quick reference: who owns what
 
-| File | Owner |
-|------|-------|
-| `models.py` | Dev A |
-| `scanner.py` | Dev A |
-| `llm.py` | Dev A |
-| `__init__.py` | Dev A |
-| `orchestrator.py` | Dev A |
-| `cli.py` | Dev A |
-| `pyproject.toml` | Dev A |
-| `extractors/*` | Dev B |
-| `explorer.py` | Dev B |
-| `planner.py` | Dev C |
-| `reducer.py` | Dev C |
-| `renderer.py` | Dev C |
-| `tracker.py` | Dev C |
-| `viz_server.py` | Dev C |
-| `_viz_html.py` | Dev C |
-| `server.py` | Dev C |
-| `webapp/*` | Dev C |
-| `tests/*` | Dev B (Phase 2) |
+| File              | Owner           |
+| ----------------- | --------------- |
+| `models.py`       | Dev A           |
+| `scanner.py`      | Dev A           |
+| `llm.py`          | Dev A           |
+| `__init__.py`     | Dev A           |
+| `orchestrator.py` | Dev A           |
+| `cli.py`          | Dev A           |
+| `pyproject.toml`  | Dev A           |
+| `extractors/*`    | Dev B           |
+| `explorer.py`     | Dev B           |
+| `planner.py`      | Dev C           |
+| `reducer.py`      | Dev C           |
+| `renderer.py`     | Dev C           |
+| `tracker.py`      | Dev C           |
+| `viz_server.py`   | Dev C           |
+| `_viz_html.py`    | Dev C           |
+| `server.py`       | Dev A           |
+| `search.py`       | Dev B           |
+| `webapp/*`        | Dev D           |
+| `tests/*`         | Dev B (Phase 2) |

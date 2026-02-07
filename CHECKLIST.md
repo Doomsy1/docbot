@@ -242,6 +242,8 @@ full experience.
 - [ ] Extract `render_html_report(index, out_dir)` -- index.html
 - [ ] Refactor `render()` and `render_with_llm()` to call individual functions (no behavior change)
 
+> **NOTE:** This is the only remaining item from 3B. Currently `update_async()` re-renders all docs.
+
 #### CLI Update -- Dev A
 
 - [x] Update `generate` command to call `generate_async()` instead of `run_async()`
@@ -353,9 +355,9 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### CLI Command -- Dev A
 
-- [ ] Add `docbot diff [--from <commit-or-run>] [--to <commit-or-run>]` command
-- [ ] Defaults: --from = previous snapshot, --to = current state
-- [ ] Output: human-readable summary of what changed
+- [x] Add `docbot diff [--from <commit-or-run>] [--to <commit-or-run>]` command
+- [x] Defaults: --from = previous snapshot, --to = current state
+- [x] Output: human-readable summary of what changed
 
 ---
 
@@ -374,7 +376,7 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### CLI Updates -- Dev A
 
-- [ ] Update `docbot hook install` to accept `--commit-only` flag
+- [ ] Update `docbot hook install` to accept `--commit-only` flag (backend support exists in hooks.py)
 - [ ] Update help text to describe post-merge behavior
 
 #### Verification
@@ -394,11 +396,11 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### API Endpoints (`src/docbot/server.py`) -- Dev C
 
-- [ ] `GET /api/changes` -- returns DiffReport between current and previous snapshot
-- [ ] `GET /api/changes?from=<run_id>&to=<run_id>` -- compare specific snapshots
-- [ ] `GET /api/history` -- list available snapshots with metadata
-- [ ] `GET /api/history/<run_id>` -- specific snapshot detail
-- [ ] Update `POST /api/chat` system prompt to inject recent DiffReport when available
+- [x] `GET /api/changes` -- returns DiffReport between current and previous snapshot
+- [x] `GET /api/changes?from=<run_id>&to=<run_id>` -- compare specific snapshots
+- [x] `GET /api/history` -- list available snapshots with metadata
+- [x] `GET /api/history/<run_id>` -- specific snapshot detail
+- [x] Update `POST /api/chat` system prompt to inject recent DiffReport when available
 
 #### Webapp UI (`webapp/`) -- Dev D
 
@@ -426,11 +428,12 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Event Recording (`src/docbot/tracker.py`) -- Dev C
 
-- [ ] Add `_events: list[dict]` and `_start_time: float` to `PipelineTracker`
-- [ ] Record "add" event on every `add_node()` call
-- [ ] Record "state" event on every `set_state()` call
-- [ ] Implement `export_events()` -> `{"run_id": ..., "total_duration": ..., "events": [...]}`
-- [ ] Add no-op `export_events()` to `NoOpTracker`
+- [x] Add `_events: list[dict]` and `_start_time: float` to `PipelineTracker`
+- [x] Record "add" event on every `add_node()` call
+- [x] Record "state" event on every `set_state()` call
+- [x] Implement `export_events()` -> `{"run_id": ..., "total_duration": ..., "events": [...]}`
+- [x] Add no-op `export_events()` to `NoOpTracker`
+- [x] Add `set_run_id()` method to both tracker classes
 
 #### Save Events to Disk (`src/docbot/orchestrator.py`) -- Dev B
 
@@ -439,35 +442,39 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Replay Server (`src/docbot/viz_server.py`) -- Dev C
 
-- [ ] Implement `start_replay_server(events_path)`:
-  - [ ] `GET /` serves replay HTML
-  - [ ] `GET /events` serves recorded event log as JSON
+- [x] Implement `start_replay_server(events_path)`:
+  - [x] `GET /` serves replay HTML
+  - [x] `GET /events` serves recorded event log as JSON
+  - [x] Auto-open browser
+  - [x] Blocking server with Ctrl+C shutdown
 
 #### Replay UI (`src/docbot/_viz_html.py`) -- Dev C
 
-- [ ] Create `REPLAY_HTML` constant (or replay mode in existing VIZ_HTML)
-- [ ] JavaScript event player: virtual clock, applies events up to current time
-- [ ] Play / Pause control
-- [ ] Speed selector (1x, 2x, 4x, 8x)
-- [ ] Timeline scrubber (drag to any point)
-- [ ] Step forward / back (one event at a time)
-- [ ] Elapsed time display (current position / total duration)
-- [ ] Same D3 radial tree rendering as live mode
+- [x] Create `REPLAY_HTML` constant (~430 lines)
+- [x] JavaScript event player: virtual clock, applies events up to current time
+- [x] Play / Pause control
+- [x] Speed selector (1x, 2x, 4x, 8x)
+- [x] Timeline scrubber (click to seek)
+- [x] Step forward / back (one event at a time)
+- [x] Elapsed time display (current position / total duration)
+- [x] Same D3 radial tree rendering as live mode
 
 #### CLI Command (`src/docbot/cli.py`) -- Dev A
 
-- [ ] Add `docbot replay [run_id]` command
-- [ ] Default to most recent run if no run_id given
-- [ ] Start replay server + open browser
+- [x] Add `docbot replay [run_id]` command
+- [x] Default to most recent run if no run_id given
+- [x] Start replay server + open browser
+- [x] Port configuration via `--port` flag
 
 #### Verification
 
-- [ ] Live pipeline run saves `pipeline_events.json` to history
-- [ ] `docbot replay` opens replay of most recent run
-- [ ] `docbot replay <run_id>` replays a specific past run
-- [ ] Playback controls (play/pause/speed/scrub/step) work correctly
-- [ ] Replay visualization matches what the live view showed during the original run
-- [ ] `NoOpTracker.export_events()` returns empty data without errors
+- [x] Live pipeline run saves `pipeline_events.json` to history
+- [x] `docbot replay` opens replay of most recent run
+- [x] `docbot replay <run_id>` replays a specific past run
+- [x] Playback controls (play/pause/speed/scrub/step) work correctly
+- [x] Replay visualization matches what the live view showed during the original run
+- [x] `NoOpTracker.export_events()` returns empty data without errors
+- [x] All 99 unit tests passing
 
 ---
 

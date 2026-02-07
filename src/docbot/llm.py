@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "xiaomi/mimo-v2-flash"
+DEFAULT_MODEL = "openai/gpt-oss-20b"
 
 
 @dataclass

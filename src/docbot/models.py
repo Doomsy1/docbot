@@ -153,3 +153,51 @@ class RunMeta(BaseModel):
     scope_count: int = 0
     succeeded: int = 0
     failed: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Project state & configuration (Phase 3 -- git-integrated CLI)
+# ---------------------------------------------------------------------------
+
+class ProjectState(BaseModel):
+    """Persistent state tracking for the .docbot/ directory.
+
+    Written to ``.docbot/state.json`` after every ``generate`` or ``update``.
+    The ``scope_file_map`` is the key structure for incremental updates --
+    it records which repo-relative files belong to which documentation scope.
+    """
+
+    last_commit: str | None = None
+    """Git commit hash (HEAD) at the time of the last generate/update."""
+
+    last_run_id: str | None = None
+    """Identifier of the most recent pipeline run."""
+
+    last_run_at: str | None = None
+    """ISO-8601 timestamp of the most recent pipeline run."""
+
+    scope_file_map: dict[str, list[str]] = Field(default_factory=dict)
+    """Mapping of scope_id to the list of repo-relative file paths it covers."""
+
+
+class DocbotConfig(BaseModel):
+    """User configuration stored in ``.docbot/config.toml``.
+
+    CLI flags override these values for a single invocation.
+    Precedence: CLI flag > config.toml > default.
+    """
+
+    model: str = "xiaomi/mimo-v2-flash"
+    """OpenRouter model ID for LLM calls."""
+
+    concurrency: int = 4
+    """Maximum parallel explorer workers."""
+
+    timeout: float = 120.0
+    """Per-scope timeout in seconds."""
+
+    max_scopes: int = 20
+    """Maximum number of documentation scopes."""
+
+    no_llm: bool = False
+    """Skip LLM enrichment; extraction still runs."""

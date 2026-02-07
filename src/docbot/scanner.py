@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 # Directories to skip unconditionally.
 SKIP_DIRS: set[str] = {
     ".git", ".venv", "venv", "__pycache__", "dist", "build", ".tox", ".eggs",
-    "node_modules", ".mypy_cache", ".pytest_cache",
+    "node_modules", ".mypy_cache", ".pytest_cache", ".docbot",
     # Additional build / cache directories for other languages
     "target",          # Rust / Java (Maven)
     "bin", "obj",      # C# / Go binaries

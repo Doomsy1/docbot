@@ -265,6 +265,12 @@ def generate(
         None, "--model", "-m", help="OpenRouter model ID."
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
+    use_agents: bool = typer.Option(
+        False, "--agents", help="Enable recursive agent exploration (more thorough but slower)."
+    ),
+    agent_depth: Optional[int] = typer.Option(
+        None, "--agent-depth", help="Agent recursion depth (1=file, 2=symbol). Default: 2."
+    ),
     visualize: bool = typer.Option(
         False, "--visualize", "--viz", help="Open live pipeline visualization."
     ),
@@ -289,6 +295,8 @@ def generate(
         timeout=timeout if timeout is not None else cfg.timeout,
         max_scopes=max_scopes if max_scopes is not None else cfg.max_scopes,
         no_llm=no_llm or cfg.no_llm,
+        use_agents=use_agents or cfg.use_agents,
+        agent_depth=agent_depth if agent_depth is not None else cfg.agent_depth,
     )
 
     # --mock-viz: simulated pipeline for visualization development.
@@ -639,6 +647,12 @@ def run(
         DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID."
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
+    use_agents: bool = typer.Option(
+        False, "--agents", help="Enable recursive agent exploration (more thorough but slower)."
+    ),
+    agent_depth: int = typer.Option(
+        2, "--agent-depth", help="Agent recursion depth (1=file, 2=symbol)."
+    ),
     visualize: bool = typer.Option(
         False, "--visualize", "--viz", help="Open live pipeline visualization."
     ),
@@ -698,6 +712,8 @@ def run(
             timeout=timeout,
             llm_client=llm_client,
             tracker=tracker,
+            use_agents=use_agents,
+            agent_depth=agent_depth,
         )
     )
 

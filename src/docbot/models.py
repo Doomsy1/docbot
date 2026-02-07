@@ -205,6 +205,12 @@ class DocbotConfig(BaseModel):
     no_llm: bool = False
     """Skip LLM enrichment; extraction still runs."""
 
+    use_agents: bool = False
+    """Enable recursive agent exploration (more thorough but slower/costlier)."""
+
+    agent_depth: int = 2
+    """Maximum subagent recursion depth (1=file agents only, 2=file+symbol agents)."""
+
 
 # ---------------------------------------------------------------------------
 # Snapshot history models (Phase 3D)

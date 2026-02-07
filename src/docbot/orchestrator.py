@@ -40,12 +40,17 @@ async def _explore_one(
     tracker: NoOpTracker | None = None,
     node_id: str = "",
     _work_fn=None,
+    use_agents: bool = False,
+    agent_depth: int = 2,
 ) -> ScopeResult:
     """Run a single scope exploration under concurrency + timeout control.
 
     When *_work_fn* is provided (an async callable accepting a ScopePlan and
     returning a ScopeResult), it replaces the real explore_scope + LLM call.
     This lets ``--mock-viz`` reuse the semaphore/timeout/tracker logic.
+    
+    When *use_agents* is True, uses recursive agent exploration instead of
+    the simpler enrich_scope_with_llm.
     """
     if tracker and node_id:
         tracker.set_state(node_id, AgentState.waiting, "awaiting semaphore")
@@ -61,7 +66,14 @@ async def _explore_one(
                     timeout=timeout,
                 )
                 if llm_client and result.error is None:
-                    result = await enrich_scope_with_llm(result, repo_root, llm_client)
+                    if use_agents:
+                        from .explorer import explore_scope_with_agents
+                        # Re-run with agents (includes extraction + agent loop)
+                        result = await explore_scope_with_agents(
+                            plan, repo_root, llm_client, agent_depth
+                        )
+                    else:
+                        result = await enrich_scope_with_llm(result, repo_root, llm_client)
             if tracker and node_id:
                 tracker.set_state(node_id, AgentState.done)
             return result
@@ -152,6 +164,8 @@ async def _run_explore(
     llm_client: LLMClient | None,
     tracker: NoOpTracker,
     mock: bool = False,
+    use_agents: bool = False,
+    agent_depth: int = 2,
 ) -> list[ScopeResult]:
     """Stage 3: Explore scopes in parallel."""
     using_llm = llm_client is not None
@@ -170,7 +184,11 @@ async def _run_explore(
         TaskProgressColumn(),
         console=console,
     ) as progress:
-        label = "Exploring scopes" + (" (+ LLM summaries)" if using_llm else "")
+        label = "Exploring scopes"
+        if use_agents:
+            label += " (agent mode)"
+        elif using_llm:
+            label += " (+ LLM summaries)"
         task = progress.add_task(label, total=len(plans))
 
         async def _run_and_track(plan: ScopePlan) -> ScopeResult:
@@ -180,6 +198,8 @@ async def _run_explore(
                 plan, repo_path, sem, timeout, llm_client,
                 tracker=tracker, node_id=nid,
                 _work_fn=mock_viz.mock_explore_work if mock else None,
+                use_agents=use_agents,
+                agent_depth=agent_depth,
             )
             progress.advance(task)
             return result
@@ -251,14 +271,17 @@ async def _run_render(
         if mock:
             await asyncio.sleep(2.0)
             written = []
+            for sr in scope_results:
+                tracker.set_state(f"renderer.{sr.scope_id}", AgentState.done)
+            tracker.set_state("renderer.readme", AgentState.done)
+            tracker.set_state("renderer.arch", AgentState.done)
         else:
             console.print("  Writing all docs with LLM ...")
-            written = await render_with_llm(docs_index, output_dir, llm_client)
-
-        for sr in scope_results:
-            tracker.set_state(f"renderer.{sr.scope_id}", AgentState.done)
-        tracker.set_state("renderer.readme", AgentState.done)
-        tracker.set_state("renderer.arch", AgentState.done)
+            # Callback to track individual task completion
+            def on_task_complete(task_id: str) -> None:
+                tracker.set_state(task_id, AgentState.done)
+            
+            written = await render_with_llm(docs_index, output_dir, llm_client, on_task_complete)
     else:
         written = await asyncio.to_thread(render, docs_index, output_dir)
     tracker.set_state("renderer", AgentState.done)
@@ -278,6 +301,8 @@ async def run_async(
     llm_client: LLMClient | None = None,
     tracker: NoOpTracker | None = None,
     mock: bool = False,
+    use_agents: bool = False,
+    agent_depth: int = 2,
 ) -> Path:
     """Full pipeline: scan -> plan -> explore -> reduce -> render.
 
@@ -352,8 +377,14 @@ async def run_async(
             encoding="utf-8",
         )
 
-    # 3. Explore in parallel (+ LLM summaries)
-    scope_results = await _run_explore(plans, repo_path, concurrency, timeout, llm_client, tracker, mock)
+    # 3. Explore in parallel (+ LLM summaries or agent mode)
+    if use_agents and llm_client and not mock:
+        console.print(f"  [bold cyan]Agent mode enabled[/bold cyan] (depth={agent_depth})")
+    scope_results = await _run_explore(
+        plans, repo_path, concurrency, timeout, llm_client, tracker, mock,
+        use_agents=use_agents,
+        agent_depth=agent_depth,
+    )
 
     if not mock:
         scopes_dir = run_dir / "scopes"
@@ -459,9 +490,14 @@ async def generate_async(
         encoding="utf-8",
     )
     
-    # 3. Explore in parallel (+ LLM summaries)
+    # 3. Explore in parallel (+ LLM summaries or agent mode)
+    if config.use_agents and llm_client:
+        console.print(f"  [bold cyan]Agent mode enabled[/bold cyan] (depth={config.agent_depth})")
     scope_results = await _run_explore(
-        plans, repo_path, config.concurrency, config.timeout, llm_client, tracker, mock=False
+        plans, repo_path, config.concurrency, config.timeout, llm_client, tracker,
+        mock=False,
+        use_agents=config.use_agents,
+        agent_depth=config.agent_depth,
     )
     
     # Save per-scope results to scopes/
@@ -714,7 +750,10 @@ async def update_async(
     
     # Re-explore affected scopes
     affected_results = await _run_explore(
-        affected_plans, repo_path, config.concurrency, config.timeout, llm_client, tracker, mock=False
+        affected_plans, repo_path, config.concurrency, config.timeout, llm_client, tracker,
+        mock=False,
+        use_agents=config.use_agents,
+        agent_depth=config.agent_depth,
     )
     
     # Save updated scope results

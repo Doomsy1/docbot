@@ -25,6 +25,33 @@ Scans your repo, extracts the AST, and generates a full documentation site: arch
    docbot ./my-project
    ```
 
+## Development
+
+Run the backend and frontend in separate terminals:
+
+**Terminal 1 (Backend):**
+
+```bash
+# 1. Activate venv & install
+uv venv && source .venv/bin/activate
+uv pip install -e .
+
+# 2. Scan the repo to generate data
+docbot .
+
+# 3. Start the API server
+docbot serve .
+```
+
+**Terminal 2 (Frontend):**
+
+```bash
+cd webapp
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173) to view the app.
+
 ## Options
 
 | Flag                | Description                                |

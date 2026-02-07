@@ -106,7 +106,7 @@ async def _run_scan(
     console.print(f"[bold]Scanning[/bold] {repo_path} ...")
     tracker.set_state("scanner", AgentState.running)
     if mock:
-        from . import mock_viz
+        from ..viz import mock_viz
         await asyncio.sleep(1.5)
         scan = mock_viz.mock_scan(repo_path)
     else:
@@ -141,7 +141,7 @@ async def _run_plan(
     console.print("[bold]Planning[/bold] scopes ...")
     tracker.set_state("planner", AgentState.running)
     if mock:
-        from . import mock_viz
+        from ..viz import mock_viz
         await asyncio.sleep(2.0)
         plans = mock_viz.mock_plans()
     else:
@@ -192,7 +192,7 @@ async def _run_explore(
         task = progress.add_task(label, total=len(plans))
 
         async def _run_and_track(plan: ScopePlan) -> ScopeResult:
-            from . import mock_viz
+            from ..viz import mock_viz
             nid = f"explorer.{plan.scope_id}"
             result = await _explore_one(
                 plan, repo_path, sem, timeout, llm_client,
@@ -229,7 +229,7 @@ async def _run_reduce(
         tracker.set_state("reducer.analysis", AgentState.running)
         tracker.set_state("reducer.mermaid", AgentState.running)
         if mock:
-            from . import mock_viz
+            from ..viz import mock_viz
             await asyncio.sleep(2.5)
             docs_index = mock_viz.mock_docs_index(scope_results, repo_path)
         else:
@@ -317,7 +317,7 @@ async def run_async(
     state transitions are driven by the same code paths used for real runs.
     """
     if mock:
-        from . import mock_viz
+        from ..viz import mock_viz
         import tempfile
         await asyncio.sleep(3.0)  # let the browser load D3 from CDN
         using_llm = True  # so we exercise the full tracker tree
@@ -526,9 +526,7 @@ async def generate_async(
     index_path.write_text(docs_index.model_dump_json(indent=2), encoding="utf-8")
     
     # 5. Render (+ LLM for all narrative docs)
-    docs_dir = docbot_root / "docs"
-    docs_dir.mkdir(exist_ok=True)
-    written = await _run_render(docs_index, scope_results, docs_dir, llm_client, tracker, mock=False)
+    written = await _run_render(docs_index, scope_results, docbot_root, llm_client, tracker, mock=False)
     
     meta.finished_at = datetime.now(timezone.utc).isoformat()
     
@@ -562,7 +560,7 @@ async def generate_async(
     )
     
     # Save snapshot for version history
-    from .git.history import save_snapshot, prune_snapshots
+    from ..git.history import save_snapshot, prune_snapshots
     
     if current_commit:
         save_snapshot(docbot_root, docs_index, scope_results, run_id, current_commit)
@@ -582,7 +580,7 @@ async def generate_async(
     )
     
     tracker.set_state("orchestrator", AgentState.done)
-    console.print(f"\n[bold green]Done![/bold green] Documentation in: {docs_dir}")
+    console.print(f"\n[bold green]Done![/bold green] Documentation in: {docbot_root / 'docs'}")
     return docbot_root
 
 
@@ -780,10 +778,8 @@ async def update_async(
     index_path = docbot_root / "docs_index.json"
     index_path.write_text(docs_index.model_dump_json(indent=2), encoding="utf-8")
     
-    # Re-render documentation
-    docs_dir = docbot_root / "docs"
-    docs_dir.mkdir(exist_ok=True)
-    written = await _run_render(docs_index, all_scope_results, docs_dir, llm_client, tracker, mock=False)
+    # 4. Render affected docs
+    written = await _run_render(docs_index, all_scope_results, docbot_root, llm_client, tracker, mock=False)
     
     # Update state
     from ..git.project import save_state
@@ -827,7 +823,7 @@ async def update_async(
     )
     
     # Save snapshot for version history
-    from .git.history import save_snapshot, prune_snapshots
+    from ..git.history import save_snapshot, prune_snapshots
     
     if current_commit:
         save_snapshot(docbot_root, docs_index, all_scope_results, run_id, current_commit)
@@ -847,7 +843,7 @@ async def update_async(
     )
     
     tracker.set_state("orchestrator", AgentState.done)
-    console.print(f"\n[bold green]Incremental update complete![/bold green] Documentation in: {docs_dir}")
+    console.print(f"\n[bold green]Incremental update complete![/bold green] Documentation in: {docbot_root / 'docs'}")
     return docbot_root
 
 

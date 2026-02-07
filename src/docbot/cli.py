@@ -720,13 +720,13 @@ def hook_uninstall(
         None, help="Repository path (default: current directory)."
     ),
 ) -> None:
-    """Remove the docbot post-commit hook."""
+    """Remove docbot git hooks (post-commit and post-merge)."""
     from .git.hooks import uninstall_hook
 
     project_root, _docbot_dir = _require_docbot(path)
 
     if uninstall_hook(project_root):
-        console.print("[green]Post-commit hook removed.[/green]")
+        console.print("[green]Git hooks removed.[/green]")
     else:
         console.print("[yellow]No docbot hook found to remove.[/yellow]")
 

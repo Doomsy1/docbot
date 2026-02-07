@@ -86,6 +86,41 @@ async def search(q: str) -> list[dict]:
 async def get_index() -> JSONResponse:
     """Return the full DocsIndex (top-level summary)."""
     index = _load_index()
+    # Build scope summaries for the dashboard
+    scopes_summary = []
+    for s in index.scopes:
+        scopes_summary.append({
+            "scope_id": s.scope_id,
+            "title": s.title,
+            "file_count": len(s.paths),
+            "symbol_count": len(s.public_api),
+            "languages": s.languages,
+        })
+
+    # Build public API grouped by scope
+    public_api_by_scope: dict[str, list[dict]] = {}
+    for s in index.scopes:
+        if s.public_api:
+            items = []
+            for sym in s.public_api:
+                items.append({
+                    "name": sym.name,
+                    "kind": sym.kind,
+                    "signature": sym.signature,
+                    "docstring": sym.docstring_first_line,
+                    "file": sym.citation.file,
+                    "line": sym.citation.line_start,
+                })
+            public_api_by_scope[s.title] = items
+
+    # Build entrypoints grouped by language/directory
+    entrypoint_groups: dict[str, list[str]] = {}
+    for ep in index.entrypoints:
+        # Group by top-level directory or root
+        parts = ep.replace("\\", "/").split("/")
+        group = parts[0] if len(parts) > 1 else "root"
+        entrypoint_groups.setdefault(group, []).append(ep)
+
     return JSONResponse(
         {
             "repo_path": index.repo_path,
@@ -96,6 +131,9 @@ async def get_index() -> JSONResponse:
             "env_var_count": len(index.env_vars),
             "public_api_count": len(index.public_api),
             "cross_scope_analysis": index.cross_scope_analysis or None,
+            "scopes": scopes_summary,
+            "public_api_by_scope": public_api_by_scope,
+            "entrypoint_groups": entrypoint_groups,
         }
     )
 
@@ -133,12 +171,35 @@ async def get_scope_detail(scope_id: str) -> JSONResponse:
 
 @app.get("/api/graph")
 async def get_graph() -> JSONResponse:
-    """Return scope edges and optional Mermaid graph for visualization."""
+    """Return scope edges and scope metadata for visualization."""
     index = _load_index()
+
+    scopes_meta = []
+    for s in index.scopes:
+        # Determine a logical group from the first file path
+        group = "core"
+        if s.paths:
+            first = s.paths[0].replace("\\", "/")
+            if first.startswith("webapp/") or first.startswith("frontend/"):
+                group = "frontend"
+            elif first.startswith("services/") or first.startswith("backend/"):
+                group = "backend"
+            elif first.startswith("tests/") or "test" in s.scope_id:
+                group = "testing"
+            elif first.startswith("scripts/"):
+                group = "scripts"
+        scopes_meta.append({
+            "scope_id": s.scope_id,
+            "title": s.title,
+            "file_count": len(s.paths),
+            "symbol_count": len(s.public_api),
+            "languages": s.languages,
+            "group": group,
+        })
+
     return JSONResponse({
-        "scopes": [s.scope_id for s in index.scopes],
+        "scopes": scopes_meta,
         "scope_edges": [{"from": a, "to": b} for a, b in index.scope_edges],
-        "mermaid_graph": index.mermaid_graph or None,
     })
 
 

@@ -13,29 +13,42 @@ from .models import DocsIndex, EnvVar, PublicSymbol, ScopeResult
 logger = logging.getLogger(__name__)
 
 _ANALYSIS_SYSTEM = """\
-You are a software architect analyzing a codebase. Base every claim \
-on the structured data provided. Identify patterns and relationships. \
-Be specific -- reference file names and symbol names."""
+You are a technical writer explaining how a software project works to a new \
+developer. Write clearly and concisely. Focus on the big picture -- what the \
+program does and how it works -- not on individual files or symbols."""
 
 _ANALYSIS_PROMPT = """\
-Analyze the following scope results from a {languages} repository and write a \
-cross-scope architectural analysis.
+Based on the scope data below, write a high-level overview of how this \
+{languages} program works.
 
 Repository: {repo_path}
 
 Scopes:
 {scope_block}
 
-Import-based dependency edges (scope -> scope):
+Dependency edges (scope -> scope):
 {edges_block}
 
-Write 3-5 paragraphs covering:
-1. How the scopes relate to each other architecturally.
-2. Data flow: where requests enter, how they're processed, what gets stored.
-3. Shared dependencies and cross-cutting patterns (auth, config, logging).
-4. Notable architectural decisions or patterns you observe.
+Write a clear, readable overview using markdown formatting (headings, bullets, \
+bold). Structure it as:
 
-Be specific. Reference scope names, file names, and symbols."""
+## What it does
+One paragraph: what is this program and what problem does it solve?
+
+## How it works
+Describe the main user/data flow from start to finish. Use a numbered list \
+or short paragraphs. Focus on what happens when someone uses the program, \
+not internal implementation details.
+
+## Key components
+A short bullet list of the major parts and what each one is responsible for. \
+Use plain language, not scope IDs.
+
+## Tech stack
+One-liner or short bullet list of languages, frameworks, and key technologies.
+
+Keep the total length under 300 words. No file paths or symbol names -- just \
+describe the system at a level that helps someone quickly understand the project."""
 
 _MERMAID_SYSTEM = """\
 You are a software architect creating a Mermaid architecture diagram. \
@@ -121,6 +134,34 @@ def _compute_scope_edges(scope_results: list[ScopeResult]) -> list[tuple[str, st
                     if target and target != sr.scope_id:
                         edges.add((sr.scope_id, target))
                         break
+
+    # Connect orphan scopes by shared directory prefix so nothing floats alone.
+    connected = {sid for pair in edges for sid in pair}
+    all_ids = {sr.scope_id for sr in scope_results}
+    orphans = all_ids - connected
+
+    if orphans:
+        # Build scope -> primary directory mapping
+        scope_dirs: dict[str, str] = {}
+        for sr in scope_results:
+            if sr.paths:
+                first = sr.paths[0].replace("\\", "/")
+                parts = first.split("/")
+                scope_dirs[sr.scope_id] = "/".join(parts[:2]) if len(parts) > 1 else parts[0]
+
+        for orphan in orphans:
+            orphan_dir = scope_dirs.get(orphan, "")
+            best_match: str | None = None
+            best_len = 0
+            for sid in connected:
+                sid_dir = scope_dirs.get(sid, "")
+                # Find the connected scope sharing the longest directory prefix
+                common = os.path.commonprefix([orphan_dir, sid_dir])
+                if len(common) > best_len:
+                    best_len = len(common)
+                    best_match = sid
+            if best_match:
+                edges.add((orphan, best_match))
 
     return sorted(edges)
 

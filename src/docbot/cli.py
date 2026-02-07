@@ -832,6 +832,64 @@ def run(
         input()
 
 
+# ---------------------------------------------------------------------------
+# Replay command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def replay(
+    run_id: Optional[str] = typer.Argument(
+        None, help="Run ID to replay (default: most recent)."
+    ),
+    path: Optional[Path] = typer.Argument(
+        None, help="Repository path (default: current directory)."
+    ),
+    port: int = typer.Option(8001, help="Port for replay server."),
+) -> None:
+    """Replay a past pipeline visualization."""
+    from .git.history import list_snapshots
+    from .viz_server import start_replay_server
+    import webbrowser
+
+    project_root, docbot_dir = _require_docbot(path)
+
+    # Determine which run to replay
+    if run_id:
+        events_path = docbot_dir / "history" / run_id / "pipeline_events.json"
+        if not events_path.exists():
+            console.print(f"[red]Events not found for run:[/red] {run_id}")
+            raise typer.Exit(code=1)
+    else:
+        # Use most recent run
+        snapshots = list_snapshots(docbot_dir)
+        if not snapshots:
+            console.print("[yellow]No snapshots found.[/yellow]")
+            raise typer.Exit(code=1)
+
+        # Find most recent run with events
+        for snap in reversed(snapshots):
+            events_path = docbot_dir / "history" / snap.run_id / "pipeline_events.json"
+            if events_path.exists():
+                run_id = snap.run_id
+                break
+        else:
+            console.print("[yellow]No runs with pipeline events found.[/yellow]")
+            console.print(
+                "  Hint: Run 'docbot generate --visualize' to create a visualization."
+            )
+            raise typer.Exit(code=1)
+
+    console.print(f"[green]Replaying run:[/green] {run_id}")
+    console.print(f"  Events: {events_path}")
+
+    # Open browser
+    webbrowser.open(f"http://127.0.0.1:{port}")
+
+    # Start server (blocking)
+    start_replay_server(events_path, port=port)
+
+
 if __name__ == "__main__":
     app()
 # Test comment

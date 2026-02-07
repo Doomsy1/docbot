@@ -495,7 +495,77 @@ async def generate_async(
     
     meta.finished_at = datetime.now(timezone.utc).isoformat()
     
+    # Build scope_file_map: scope_id -> list of repo-relative file paths
+    from .project import save_state
+    from .git_utils import get_current_commit
+    from .models import ProjectState
+    
+    scope_file_map: dict[str, list[str]] = {}
+    for sr in scope_results:
+        # Normalize paths to forward slashes for consistency
+        scope_file_map[sr.scope_id] = [p.replace("\\", "/") for p in sr.paths]
+    
+    # Get current commit hash
+    current_commit = get_current_commit(repo_path)
+    
+    # Save state.json
+    state = ProjectState(
+        last_commit=current_commit,
+        last_run_id=run_id,
+        last_run_at=meta.finished_at,
+        scope_file_map=scope_file_map,
+    )
+    save_state(docbot_root, state)
+    
+    # Save RunMeta to history/
+    history_dir = docbot_root / "history"
+    history_dir.mkdir(exist_ok=True)
+    (history_dir / f"{run_id}.json").write_text(
+        meta.model_dump_json(indent=2), encoding="utf-8"
+    )
+    
     tracker.set_state("orchestrator", AgentState.done)
     console.print(f"\n[bold green]Done![/bold green] Documentation in: {docs_dir}")
     return docbot_root
 
+
+async def update_async(
+    docbot_root: Path,
+    config: DocbotConfig,
+    llm_client: LLMClient | None = None,
+    tracker: NoOpTracker | None = None,
+) -> Path:
+    """Incrementally update documentation based on git changes.
+    
+    Loads state from .docbot/state.json, validates the last commit is still
+    reachable, and falls back to generate_async() if not.
+    
+    For now (Step 5), this just validates and calls generate_async().
+    Later steps will add incremental update logic.
+    
+    Returns the docbot_root path.
+    """
+    from .project import load_state
+    from .git_utils import is_commit_reachable
+    
+    docbot_root = docbot_root.resolve()
+    repo_path = docbot_root.parent
+    
+    # Load state
+    state = load_state(docbot_root)
+    
+    # Validate last_commit is reachable
+    if state.last_commit is None:
+        console.print("[yellow]No previous run found. Running full generate...[/yellow]")
+        return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    if not is_commit_reachable(repo_path, state.last_commit):
+        console.print(f"[yellow]Last commit {state.last_commit[:8]} is no longer reachable.[/yellow]")
+        console.print("[yellow]Running full generate...[/yellow]")
+        return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    # State is valid, but for now (Step 5) we just call generate_async
+    # Later steps will add incremental update logic
+    console.print(f"[dim]State valid (last commit: {state.last_commit[:8]})[/dim]")
+    console.print("[yellow]Incremental update not yet implemented. Running full generate...[/yellow]")
+    return await generate_async(docbot_root, config, llm_client, tracker)

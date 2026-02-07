@@ -13,38 +13,38 @@ a given phase. Dependencies between developers are managed through interface con
 
 ### Current ownership (Phase 3, updated for planned package reorganization)
 
-| Current file                 | Planned location (after 3C reorg) | Owner  |
-| ---------------------------- | --------------------------------- | ------ |
-| `src/docbot/cli.py`          | `cli.py` (stays at top)           | Dev A  |
-| `src/docbot/models.py`       | `models.py` (stays at top)        | Dev A  |
-| `src/docbot/llm.py`          | `llm.py` (stays at top)           | Dev A  |
-| `src/docbot/__init__.py`     | `__init__.py` (stays at top)      | Dev A  |
-| `pyproject.toml`             | (root)                            | Dev A  |
-| `src/docbot/project.py`      | `git/project.py`                  | Dev A  |
-| `src/docbot/scanner.py`      | `pipeline/scanner.py`             | Dev B  |
-| `src/docbot/orchestrator.py` | `pipeline/orchestrator.py`        | Dev B  |
-| `src/docbot/git_utils.py`    | `git/utils.py`                    | Dev B  |
-| `src/docbot/hooks.py`        | `git/hooks.py`                    | Dev B  |
-| `src/docbot/extractors/*`    | `extractors/*` (already a package)| Dev B  |
-| `src/docbot/explorer.py`     | `pipeline/explorer.py`            | Dev B  |
-| `src/docbot/search.py`       | `web/search.py`                   | Dev B  |
-| `src/docbot/planner.py`      | `pipeline/planner.py`             | Dev C  |
-| `src/docbot/reducer.py`      | `pipeline/reducer.py`             | Dev C  |
-| `src/docbot/renderer.py`     | `pipeline/renderer.py`            | Dev C  |
-| `src/docbot/tracker.py`      | `pipeline/tracker.py`             | Dev C  |
-| `src/docbot/server.py`       | `web/server.py`                   | Dev C  |
-| `src/docbot/viz_server.py`   | `viz/viz_server.py`               | Dev C  |
-| `src/docbot/_viz_html.py`    | `viz/_viz_html.py`                | Dev C  |
-| `src/docbot/mock_viz.py`     | `viz/mock_viz.py`                 | Dev C  |
-| `webapp/*`                   | `webapp/*`                        | Dev D  |
-| `tests/*`                    | `tests/*`                         | Dev B  |
+| Current file                 | Planned location (after 3C reorg)  | Owner |
+| ---------------------------- | ---------------------------------- | ----- |
+| `src/docbot/cli.py`          | `cli.py` (stays at top)            | Dev A |
+| `src/docbot/models.py`       | `models.py` (stays at top)         | Dev A |
+| `src/docbot/llm.py`          | `llm.py` (stays at top)            | Dev A |
+| `src/docbot/__init__.py`     | `__init__.py` (stays at top)       | Dev A |
+| `pyproject.toml`             | (root)                             | Dev A |
+| `src/docbot/project.py`      | `git/project.py`                   | Dev A |
+| `src/docbot/scanner.py`      | `pipeline/scanner.py`              | Dev B |
+| `src/docbot/orchestrator.py` | `pipeline/orchestrator.py`         | Dev B |
+| `src/docbot/git_utils.py`    | `git/utils.py`                     | Dev B |
+| `src/docbot/hooks.py`        | `git/hooks.py`                     | Dev B |
+| `src/docbot/extractors/*`    | `extractors/*` (already a package) | Dev B |
+| `src/docbot/explorer.py`     | `pipeline/explorer.py`             | Dev B |
+| `src/docbot/search.py`       | `web/search.py`                    | Dev B |
+| `src/docbot/planner.py`      | `pipeline/planner.py`              | Dev C |
+| `src/docbot/reducer.py`      | `pipeline/reducer.py`              | Dev C |
+| `src/docbot/renderer.py`     | `pipeline/renderer.py`             | Dev C |
+| `src/docbot/tracker.py`      | `pipeline/tracker.py`              | Dev C |
+| `src/docbot/server.py`       | `web/server.py`                    | Dev C |
+| `src/docbot/viz_server.py`   | `viz/viz_server.py`                | Dev C |
+| `src/docbot/_viz_html.py`    | `viz/_viz_html.py`                 | Dev C |
+| `src/docbot/mock_viz.py`     | `viz/mock_viz.py`                  | Dev C |
+| `webapp/*`                   | `webapp/*`                         | Dev D |
+| `tests/*`                    | `tests/*`                          | Dev B |
 
 **New files (planned):**
 
-| Planned file                 | Owner  | Phase   |
-| ---------------------------- | ------ | ------- |
-| `src/docbot/git/history.py`  | Dev B  | 3D      |
-| `src/docbot/git/diff.py`     | Dev B  | 3E      |
+| Planned file                | Owner | Phase |
+| --------------------------- | ----- | ----- |
+| `src/docbot/git/history.py` | Dev B | 3D    |
+| `src/docbot/git/diff.py`    | Dev B | 3E    |
 
 ---
 
@@ -209,29 +209,29 @@ full experience.
 
 #### Orchestrator Refactor (`src/docbot/orchestrator.py`) -- Dev B
 
-- [ ] Extract pipeline stage helpers from `run_async()`:
-  - [ ] `_run_scan(repo_path, tracker)` -> ScanResult
-  - [ ] `_run_plan(scan, max_scopes, llm_client, tracker)` -> list[ScopePlan]
-  - [ ] `_run_explore(plans, repo_path, sem, timeout, llm_client, tracker)` -> list[ScopeResult]
-  - [ ] `_run_reduce(scope_results, repo_path, llm_client, tracker)` -> DocsIndex
-  - [ ] `_run_render(docs_index, output_dir, llm_client, tracker)` -> list[Path]
-- [ ] Refactor `run_async()` to call extracted helpers (no behavior change)
-- [ ] Implement `generate_async(docbot_root, config, llm_client, tracker)`:
-  - [ ] Infer `repo_path = docbot_root.parent`
-  - [ ] Run full 5-stage pipeline, output to `docbot_root`
-  - [ ] Save plan.json, per-scope results, docs_index.json
-  - [ ] Build scope_file_map, call `save_state()` with current commit
-  - [ ] Save RunMeta to history/
-- [ ] Implement `update_async(docbot_root, config, llm_client, tracker)`:
-  - [ ] Load state, validate last_commit via `is_commit_reachable()`
-  - [ ] Fall back to `generate_async()` if commit unreachable
-  - [ ] Get changed files, map to affected scopes via scope_file_map
-  - [ ] Handle new unscoped files (assign to nearest scope by directory)
-  - [ ] If >50% scopes affected, print suggestion to run `generate` instead
-  - [ ] Re-explore affected scopes, load cached results for unaffected
-  - [ ] Merge and re-run REDUCE
-  - [ ] Call selective renderer functions (Dev C)
-  - [ ] Update state.json and save run history
+- [x] Extract pipeline stage helpers from `run_async()`:
+  - [x] `_run_scan(repo_path, tracker)` -> ScanResult
+  - [x] `_run_plan(scan, max_scopes, llm_client, tracker)` -> list[ScopePlan]
+  - [x] `_run_explore(plans, repo_path, sem, timeout, llm_client, tracker)` -> list[ScopeResult]
+  - [x] `_run_reduce(scope_results, repo_path, llm_client, tracker)` -> DocsIndex
+  - [x] `_run_render(docs_index, output_dir, llm_client, tracker)` -> list[Path]
+- [x] Refactor `run_async()` to call extracted helpers (no behavior change)
+- [x] Implement `generate_async(docbot_root, config, llm_client, tracker)`:
+  - [x] Infer `repo_path = docbot_root.parent`
+  - [x] Run full 5-stage pipeline, output to `docbot_root`
+  - [x] Save plan.json, per-scope results, docs_index.json
+  - [x] Build scope_file_map, call `save_state()` with current commit
+  - [x] Save RunMeta to history/
+- [x] Implement `update_async(docbot_root, config, llm_client, tracker)`:
+  - [x] Load state, validate last_commit via `is_commit_reachable()`
+  - [x] Fall back to `generate_async()` if commit unreachable
+  - [x] Get changed files, map to affected scopes via scope_file_map
+  - [x] Handle new unscoped files (assign to nearest scope by directory)
+  - [x] If >50% scopes affected, print suggestion to run `generate` instead
+  - [x] Re-explore affected scopes, load cached results for unaffected
+  - [x] Merge and re-run REDUCE
+  - [x] Call selective renderer functions (Dev C)
+  - [x] Update state.json and save run history
 
 #### Renderer Refactor (`src/docbot/renderer.py`) -- Dev C
 
@@ -309,17 +309,17 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Snapshot Management (`src/docbot/git/history.py`) -- Dev B
 
-- [ ] `save_snapshot(docbot_dir, docs_index, scope_results, run_id, commit)` -- create DocSnapshot + save scope results
-- [ ] `load_snapshot(docbot_dir, run_id)` -- load a specific snapshot
-- [ ] `list_snapshots(docbot_dir)` -- list available snapshots with metadata
-- [ ] `prune_snapshots(docbot_dir, max_count)` -- remove oldest beyond limit
-- [ ] Snapshot storage: `.docbot/history/<run_id>.json` (metadata) + `.docbot/history/<run_id>/` (scope results)
+- [x] `save_snapshot(docbot_dir, docs_index, scope_results, run_id, commit)` -- create DocSnapshot + save scope results
+- [x] `load_snapshot(docbot_dir, run_id)` -- load a specific snapshot
+- [x] `list_snapshots(docbot_dir)` -- list available snapshots with metadata
+- [x] `prune_snapshots(docbot_dir, max_count)` -- remove oldest beyond limit
+- [x] Snapshot storage: `.docbot/history/<run_id>.json` (metadata) + `.docbot/history/<run_id>/` (scope results)
 
 #### Pipeline Integration -- Dev B
 
-- [ ] Hook `save_snapshot()` into `generate_async()` after state save
-- [ ] Hook `save_snapshot()` into `update_async()` after state save
-- [ ] Call `prune_snapshots()` after each save
+- [x] Hook `save_snapshot()` into `generate_async()` after state save
+- [x] Hook `save_snapshot()` into `update_async()` after state save
+- [x] Call `prune_snapshots()` after each save
 
 ---
 
@@ -345,11 +345,11 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Diff Logic (`src/docbot/git/diff.py`) -- Dev B
 
-- [ ] `compute_diff(snapshot_from, snapshot_to)` -> DiffReport
-- [ ] Compare scope lists (added/removed/modified)
-- [ ] Per modified scope: compare file lists, symbol lists, doc hashes
-- [ ] Compare graph edges (added/removed)
-- [ ] Compute stats deltas
+- [x] `compute_diff(snapshot_from, snapshot_to)` -> DiffReport
+- [x] Compare scope lists (added/removed/modified)
+- [x] Per modified scope: compare file lists, symbol lists, doc hashes
+- [x] Compare graph edges (added/removed)
+- [x] Compute stats deltas
 
 #### CLI Command -- Dev A
 
@@ -367,10 +367,10 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Expand Hook Support (`src/docbot/hooks.py`) -- Dev B
 
-- [ ] Add `install_post_merge_hook(repo_root)` -- same pattern as post-commit
-- [ ] Update `install_hook()` to install both post-commit and post-merge by default
-- [ ] Add `--commit-only` flag to install only post-commit
-- [ ] Update `uninstall_hook()` to remove from both hook files
+- [x] Add `install_post_merge_hook(repo_root)` -- same pattern as post-commit
+- [x] Update `install_hook()` to install both post-commit and post-merge by default
+- [x] Add `--commit-only` flag to install only post-commit
+- [x] Update `uninstall_hook()` to remove from both hook files
 
 #### CLI Updates -- Dev A
 
@@ -434,8 +434,8 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Save Events to Disk (`src/docbot/orchestrator.py`) -- Dev B
 
-- [ ] Call `tracker.export_events()` at end of `generate_async()` and `update_async()`
-- [ ] Write to `.docbot/history/<run_id>/pipeline_events.json`
+- [x] Call `tracker.export_events()` at end of `generate_async()` and `update_async()`
+- [x] Write to `.docbot/history/<run_id>/pipeline_events.json`
 
 #### Replay Server (`src/docbot/viz_server.py`) -- Dev C
 

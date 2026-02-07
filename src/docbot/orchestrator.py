@@ -524,6 +524,26 @@ async def generate_async(
         meta.model_dump_json(indent=2), encoding="utf-8"
     )
     
+    # Save snapshot for version history
+    from .git.history import save_snapshot, prune_snapshots
+    
+    if current_commit:
+        save_snapshot(docbot_root, docs_index, scope_results, run_id, current_commit)
+        # Prune old snapshots based on config
+        removed = prune_snapshots(docbot_root, config.max_snapshots)
+        if removed > 0:
+            console.print(f"[dim]Pruned {removed} old snapshot(s)[/dim]")
+    
+    # Save pipeline events for visualization replay
+    run_history_dir = docbot_root / "history" / run_id
+    run_history_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Save tracker snapshot (will be replaced with export_events() once Dev C implements it)
+    pipeline_events = tracker.snapshot()
+    (run_history_dir / "pipeline_events.json").write_text(
+        json.dumps(pipeline_events, indent=2), encoding="utf-8"
+    )
+    
     tracker.set_state("orchestrator", AgentState.done)
     console.print(f"\n[bold green]Done![/bold green] Documentation in: {docs_dir}")
     return docbot_root
@@ -564,8 +584,229 @@ async def update_async(
         console.print("[yellow]Running full generate...[/yellow]")
         return await generate_async(docbot_root, config, llm_client, tracker)
     
-    # State is valid, but for now (Step 5) we just call generate_async
-    # Later steps will add incremental update logic
+    # State is valid - detect changed files
+    from .git_utils import get_changed_files
+    
     console.print(f"[dim]State valid (last commit: {state.last_commit[:8]})[/dim]")
-    console.print("[yellow]Incremental update not yet implemented. Running full generate...[/yellow]")
-    return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    # Get changed files since last commit
+    changed_files = get_changed_files(repo_path, state.last_commit)
+    
+    if not changed_files:
+        console.print("[green]No files changed since last run. Nothing to update.[/green]")
+        return docbot_root
+    
+    console.print(f"[bold]Detected {len(changed_files)} changed file(s)[/bold]")
+    
+    # Map changed files to affected scopes
+    affected_scope_ids: set[str] = set()
+    unscoped_files: list[str] = []
+    
+    for changed_file in changed_files:
+        # Normalize to forward slashes
+        normalized = changed_file.replace("\\", "/")
+        # Check which scopes contain this file
+        found = False
+        for scope_id, scope_files in state.scope_file_map.items():
+            if normalized in scope_files:
+                affected_scope_ids.add(scope_id)
+                found = True
+        if not found:
+            unscoped_files.append(normalized)
+    
+    # Handle new unscoped files by assigning to nearest scope
+    if unscoped_files:
+        console.print(f"[yellow]Found {len(unscoped_files)} new file(s) not in any scope[/yellow]")
+        
+        for unscoped in unscoped_files:
+            # Find nearest scope by directory proximity (common path prefix)
+            best_scope = None
+            best_match_len = 0
+            
+            unscoped_parts = Path(unscoped).parts
+            
+            for scope_id, scope_files in state.scope_file_map.items():
+                for scope_file in scope_files:
+                    scope_parts = Path(scope_file).parts
+                    # Count common prefix length
+                    common_len = 0
+                    for i in range(min(len(unscoped_parts), len(scope_parts))):
+                        if unscoped_parts[i] == scope_parts[i]:
+                            common_len += 1
+                        else:
+                            break
+                    if common_len > best_match_len:
+                        best_match_len = common_len
+                        best_scope = scope_id
+            
+            if best_scope:
+                console.print(f"  Assigning {unscoped} to scope '{best_scope}'")
+                affected_scope_ids.add(best_scope)
+            else:
+                console.print(f"  [yellow]Could not assign {unscoped} to any scope[/yellow]")
+    
+    if not affected_scope_ids:
+        console.print("[yellow]Changed files don't map to any existing scopes.[/yellow]")
+        console.print("[yellow]Running full generate...[/yellow]")
+        return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    console.print(f"[bold]Affected scopes:[/bold] {', '.join(sorted(affected_scope_ids))}")
+    
+    # Step 8: Selective re-exploration
+    # Load cached scope results for unaffected scopes
+    scopes_dir = docbot_root / "scopes"
+    if not scopes_dir.exists():
+        console.print("[yellow]No cached scope results found. Running full generate...[/yellow]")
+        return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    # Load plan.json to get all scope plans
+    plan_path = docbot_root / "plan.json"
+    if not plan_path.exists():
+        console.print("[yellow]No plan.json found. Running full generate...[/yellow]")
+        return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    from .models import ScopePlan
+    plans_data = json.loads(plan_path.read_text(encoding="utf-8"))
+    all_plans = [ScopePlan(**p) for p in plans_data]
+    
+    # Separate affected and unaffected plans
+    affected_plans = [p for p in all_plans if p.scope_id in affected_scope_ids]
+    unaffected_plans = [p for p in all_plans if p.scope_id not in affected_scope_ids]
+    
+    # Check if >50% of scopes are affected
+    total_scopes = len(all_plans)
+    affected_count = len(affected_plans)
+    affected_percentage = (affected_count / total_scopes * 100) if total_scopes > 0 else 0
+    
+    if affected_percentage > 50:
+        console.print(f"[yellow]Warning: {affected_count}/{total_scopes} scopes affected ({affected_percentage:.0f}%).[/yellow]")
+        console.print("[yellow]Consider running 'docbot generate' for a full rebuild instead.[/yellow]")
+    
+    console.print(f"[bold]Re-exploring {len(affected_plans)} affected scope(s), "
+                  f"loading {len(unaffected_plans)} cached scope(s)[/bold]")
+    
+    # Load cached results for unaffected scopes
+    from .models import ScopeResult
+    cached_results: list[ScopeResult] = []
+    for plan in unaffected_plans:
+        cached_file = scopes_dir / f"{plan.scope_id}.json"
+        if cached_file.exists():
+            cached_results.append(
+                ScopeResult.model_validate_json(cached_file.read_text(encoding="utf-8"))
+            )
+        else:
+            console.print(f"  [yellow]Warning: cached result for '{plan.scope_id}' not found[/yellow]")
+    
+    # Re-explore affected scopes
+    if tracker is None:
+        tracker = NoOpTracker()
+    
+    # Setup extractors
+    from .extractors import setup_extractors
+    setup_extractors(llm_client=llm_client)
+    
+    # Build tracker tree for incremental update
+    tracker.add_node("orchestrator", "Orchestrator (Incremental)")
+    tracker.add_node("explorer_hub", "Explorer Hub", "orchestrator")
+    tracker.add_node("reducer", "Reducer", "orchestrator")
+    tracker.add_node("renderer", "Renderer", "orchestrator")
+    tracker.set_state("orchestrator", AgentState.running)
+    
+    # Re-explore affected scopes
+    affected_results = await _run_explore(
+        affected_plans, repo_path, config.concurrency, config.timeout, llm_client, tracker, mock=False
+    )
+    
+    # Save updated scope results
+    for sr in affected_results:
+        (scopes_dir / f"{sr.scope_id}.json").write_text(
+            sr.model_dump_json(indent=2), encoding="utf-8",
+        )
+    
+    # Merge affected + cached results
+    all_scope_results = affected_results + cached_results
+    
+    succeeded = sum(1 for r in all_scope_results if r.error is None)
+    failed = len(all_scope_results) - succeeded
+    
+    if failed:
+        console.print(f"  [yellow]{failed} scope(s) failed.[/yellow]")
+    console.print(f"  [green]{succeeded}/{len(all_scope_results)} scope(s) succeeded.[/green]")
+    
+    # Re-run reduce with merged results
+    docs_index = await _run_reduce(all_scope_results, str(repo_path), llm_client, tracker, mock=False)
+    
+    # Save updated docs_index.json
+    index_path = docbot_root / "docs_index.json"
+    index_path.write_text(docs_index.model_dump_json(indent=2), encoding="utf-8")
+    
+    # Re-render documentation
+    docs_dir = docbot_root / "docs"
+    docs_dir.mkdir(exist_ok=True)
+    written = await _run_render(docs_index, all_scope_results, docs_dir, llm_client, tracker, mock=False)
+    
+    # Update state
+    from .project import save_state
+    from .git_utils import get_current_commit
+    from .models import ProjectState, RunMeta
+    
+    run_id = _make_run_id()
+    meta = RunMeta(
+        run_id=run_id,
+        repo_path=str(repo_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        finished_at=datetime.now(timezone.utc).isoformat(),
+        scope_count=len(all_scope_results),
+        succeeded=succeeded,
+        failed=failed,
+    )
+    
+    # Build updated scope_file_map
+    scope_file_map: dict[str, list[str]] = {}
+    for sr in all_scope_results:
+        scope_file_map[sr.scope_id] = [p.replace("\\", "/") for p in sr.paths]
+    
+    # Get current commit hash
+    current_commit = get_current_commit(repo_path)
+    
+    # Save state.json
+    state = ProjectState(
+        last_commit=current_commit,
+        last_run_id=run_id,
+        last_run_at=meta.finished_at,
+        scope_file_map=scope_file_map,
+    )
+    save_state(docbot_root, state)
+    
+    # Save RunMeta to history/
+    history_dir = docbot_root / "history"
+    history_dir.mkdir(exist_ok=True)
+    (history_dir / f"{run_id}.json").write_text(
+        meta.model_dump_json(indent=2), encoding="utf-8"
+    )
+    
+    # Save snapshot for version history
+    from .git.history import save_snapshot, prune_snapshots
+    
+    if current_commit:
+        save_snapshot(docbot_root, docs_index, all_scope_results, run_id, current_commit)
+        # Prune old snapshots based on config
+        removed = prune_snapshots(docbot_root, config.max_snapshots)
+        if removed > 0:
+            console.print(f"[dim]Pruned {removed} old snapshot(s)[/dim]")
+    
+    # Save pipeline events for visualization replay
+    run_history_dir = docbot_root / "history" / run_id
+    run_history_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Save tracker snapshot (will be replaced with export_events() once Dev C implements it)
+    pipeline_events = tracker.snapshot()
+    (run_history_dir / "pipeline_events.json").write_text(
+        json.dumps(pipeline_events, indent=2), encoding="utf-8"
+    )
+    
+    tracker.set_state("orchestrator", AgentState.done)
+    console.print(f"\n[bold green]Incremental update complete![/bold green] Documentation in: {docs_dir}")
+    return docbot_root
+
+

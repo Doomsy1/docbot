@@ -128,6 +128,7 @@ def _ensure_webapp_built() -> None:
     """Build the webapp if the dist folder doesn't exist."""
     import subprocess
     import sys
+    import shutil
 
     here = Path(__file__).parent.resolve()
     potential_dists = [
@@ -152,9 +153,35 @@ def _ensure_webapp_built() -> None:
     node_modules = webapp_dir / "node_modules"
     if not node_modules.exists():
         console.print("[bold]Installing webapp dependencies...[/bold]")
+        npm_exe: str | None = None
+        # On Windows, npm is typically a .cmd shim (npm.cmd). Some environments
+        # (or sanitized PATH/PATHEXT) can fail to resolve it when invoked from
+        # subprocess with shell=False, so we explicitly probe common names.
+        for candidate in (
+            "npm.cmd",
+            "npm.exe",
+            "npm.bat",
+            "npm",
+        ):
+            npm_exe = shutil.which(candidate)
+            if npm_exe:
+                break
+
+        if npm_exe is None and os.name == "nt":
+            program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            fallback = program_files / "nodejs" / "npm.cmd"
+            if fallback.exists():
+                npm_exe = str(fallback)
+
+        if npm_exe is None:
+            console.print(
+                "[red]Error: npm not found. Please install Node.js and npm.[/red]"
+            )
+            sys.exit(1)
+
         try:
             subprocess.run(
-                ["npm", "install"],
+                [npm_exe, "install"],
                 cwd=str(webapp_dir),
                 check=True,
                 capture_output=True,
@@ -163,17 +190,23 @@ def _ensure_webapp_built() -> None:
         except subprocess.CalledProcessError as e:
             console.print(f"[red]Error: npm install failed:[/red] {e.stderr}")
             sys.exit(1)
-        except FileNotFoundError:
-            console.print(
-                "[red]Error: npm not found. Please install Node.js and npm.[/red]"
-            )
-            sys.exit(1)
 
     # Build the webapp
     console.print("[bold]Building webapp...[/bold]")
+    npm_exe = shutil.which("npm.cmd") or shutil.which("npm.exe") or shutil.which("npm")
+    if npm_exe is None and os.name == "nt":
+        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        fallback = program_files / "nodejs" / "npm.cmd"
+        if fallback.exists():
+            npm_exe = str(fallback)
+
+    if npm_exe is None:
+        console.print("[red]Error: npm not found. Please install Node.js and npm.[/red]")
+        sys.exit(1)
+
     try:
         subprocess.run(
-            ["npm", "run", "build"],
+            [npm_exe, "run", "build"],
             cwd=str(webapp_dir),
             check=True,
             capture_output=True,

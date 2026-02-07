@@ -393,9 +393,9 @@
 
 #### Existing Viz Integration
 
-- [ ] Decide: integrate existing D3 pipeline viz into webapp OR deprecate
+- [x] Decide: integrate existing D3 pipeline viz into webapp OR deprecate
 - [ ] If integrating: adapt `tracker.py` to emit events to webapp
-- [ ] If deprecating: mark `viz_server.py` and `_viz_html.py` as legacy
+- [x] If deprecating: mark `viz_server.py` and `_viz_html.py` as legacy
 
 #### Self-check before merge
 

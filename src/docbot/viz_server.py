@@ -1,4 +1,4 @@
-"""Stdlib HTTP server for serving the pipeline visualization."""
+"""Legacy D3 pipeline visualization server. DEPRECATED in favor of the React webapp."""
 
 from __future__ import annotations
 

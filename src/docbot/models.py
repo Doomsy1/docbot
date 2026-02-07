@@ -284,3 +284,4 @@ class DiffReport(BaseModel):
     modified_scopes: list[ScopeModification] = Field(default_factory=list)
     graph_changes: GraphDelta = Field(default_factory=GraphDelta)
     stats_delta: StatsDelta = Field(default_factory=StatsDelta)
+# Test for diff

@@ -1,1 +1,15 @@
 @import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #000000;
+  --border: #e5e7eb;
+}
+
+body {
+  @apply bg-[var(--background)] text-[var(--foreground)] antialiased font-sans;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  @apply tracking-tight font-medium;
+}

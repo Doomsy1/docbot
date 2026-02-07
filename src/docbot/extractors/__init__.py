@@ -47,7 +47,7 @@ def setup_extractors(*, llm_client: object | None = None) -> None:
 
         fallback = LLMExtractor(llm_client)
         # Register for any language in LANGUAGE_EXTENSIONS not already covered.
-        from ..scanner import LANGUAGE_EXTENSIONS
+        from ..pipeline.scanner import LANGUAGE_EXTENSIONS
 
         for lang in set(LANGUAGE_EXTENSIONS.values()):
             if lang not in _REGISTRY:

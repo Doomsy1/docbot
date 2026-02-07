@@ -96,6 +96,9 @@ class ScopePlan(BaseModel):
     title: str
     paths: list[str]
     notes: str = ""
+    estimated_cost: float = 0.0
+    estimated_tokens: int = 0
+    bucket: str = ""
 
 
 class ScopeResult(BaseModel):
@@ -178,6 +181,8 @@ class ProjectState(BaseModel):
 
     scope_file_map: dict[str, list[str]] = Field(default_factory=dict)
     """Mapping of scope_id to the list of repo-relative file paths it covers."""
+    scope_perf_map: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Optional per-scope performance hints from prior runs."""
 
 
 class DocbotConfig(BaseModel):
@@ -192,12 +197,24 @@ class DocbotConfig(BaseModel):
 
     concurrency: int = 4
     """Maximum parallel explorer workers."""
+    scope_workers: int | None = None
+    """Optional replacement for concurrency; if set, used for scope exploration."""
 
     timeout: float = 120.0
     """Per-scope timeout in seconds."""
+    llm_workers: int = 6
+    """Maximum concurrent LLM calls for exploration/reduce paths."""
+    renderer_llm_workers: int = 4
+    """Maximum concurrent LLM calls during renderer stage."""
 
     max_scopes: int = 20
     """Maximum number of documentation scopes."""
+    target_scope_cost: float = 18.0
+    """Target cost budget used by planner balancing."""
+    split_threshold: float = 1.6
+    """Split scopes when estimated cost exceeds target_scope_cost * split_threshold."""
+    merge_threshold: float = 0.45
+    """Merge tiny scopes when estimated cost is below target_scope_cost * merge_threshold."""
 
     max_snapshots: int = 10
     """Number of history snapshots to retain."""
@@ -210,6 +227,15 @@ class DocbotConfig(BaseModel):
 
     agent_depth: int = 2
     """Maximum subagent recursion depth (1=file agents only, 2=file+symbol agents)."""
+    agent_scope_max_parallel: int = 8
+    """Maximum concurrent subagents for a single scope tree."""
+
+    llm_backoff_enabled: bool = True
+    """Enable automatic retry/backoff for transient LLM failures."""
+    llm_backoff_max_retries: int = 4
+    """Maximum retries for retryable LLM failures."""
+    llm_adaptive_reduction_factor: float = 0.6
+    """Reduce effective concurrency by this factor when sustained failures occur."""
 
 
 # ---------------------------------------------------------------------------

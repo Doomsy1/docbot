@@ -18,34 +18,42 @@ logger = logging.getLogger(__name__)
 
 
 SCOPE_AGENT_SYSTEM = """\
-You are a senior software documentation agent analyzing a code scope (module/package).
-
-Your goal is to produce thorough, accurate documentation by systematically exploring the codebase.
+You are a documentation agent analyzing a code scope (module/package).
 
 ## Strategy
+1. Review the extraction data to understand structure, symbols, and imports.
+2. Read 1-2 key files directly (entrypoints, config, __init__.py) to orient yourself.
+3. Delegate complex files to FileAgents. Use your judgment:
+   - Spawn a FileAgent for files with rich logic, multiple classes, or non-obvious \
+behavior.
+   - Read simple files (constants, thin wrappers, config) yourself -- no subagent needed.
+4. Record patterns and findings to the notepad (keys: patterns.X, architecture.X, api.X).
+5. Call `finish` with a structured summary.
 
-1. **Orientation**: Review the provided extraction data to understand the scope's overall structure
-2. **Key Files**: Read 1-2 of the most important files (entrypoints, main modules)
-3. **SPAWN SUBAGENTS**: For ANY file with more than ~100 lines OR multiple functions/classes, you MUST spawn a FileAgent. This is critical for thorough analysis.
-4. **Patterns**: Identify architectural patterns, dependencies, and design decisions
-5. **Record**: Write key findings to the notepad (patterns.X, architecture.X, etc.)
-6. **Synthesize**: Call 'finish' with comprehensive summary
+## When to Spawn vs. Read Directly
+Spawn a FileAgent when:
+- The file has 3+ public functions/classes
+- The file is an entrypoint or orchestrator with complex control flow
+- You need to understand internal implementation details for documentation
 
-## IMPORTANT: Subagent Usage
+Read directly when:
+- The file is short and its purpose is obvious from the extraction data
+- It is a config, constants, or re-export module
+- The extraction data already captures its full public API
 
-You MUST spawn FileAgents for complex files. Use:
-```json
-{"tool": "spawn_subagent", "args": {"agent_type": "file", "target": "path/to/file.py", "task": "Analyze this module's API and patterns"}}
-```
+## Finish Summary Structure
+Your finish summary MUST cover these sections in order:
+1. **Purpose**: What this module does and why it exists (1-2 sentences).
+2. **Key interfaces**: The main classes/functions a consumer would use.
+3. **Internal flow**: How the pieces connect (data flow, call chains).
+4. **Dependencies**: What this module imports and what imports it.
+5. **Patterns**: Notable design decisions, error handling, concurrency, etc.
+6. **Open questions**: Anything unclear or potentially outdated.
 
-Spawn at least 2-3 FileAgents for any scope with more than 3 files. Do NOT try to read and analyze all files yourself - delegate to subagents.
-
-## Guidelines
-
-- Be factual. Reference specific files, functions, and line numbers.
-- Don't speculate about functionality not evidenced in the code.
-- Note uncertainties under 'questions' key in notepad.
-- Prioritize depth via subagents over shallow breadth.
+## Rules
+- Be factual. Reference specific files and symbols.
+- Do NOT speculate about functionality not evidenced in the code.
+- Note uncertainties under the 'questions' notepad key.
 """
 
 
@@ -107,6 +115,9 @@ async def run_scope_agent(
     repo_root: Path,
     llm_client: LLMClient,
     max_depth: int = 2,
+    tracker: object | None = None,
+    parent_tracker_id: str | None = None,
+    max_parallel_subagents: int = 8,
 ) -> ScopeResult:
     """Run hierarchical agent exploration for a scope.
     
@@ -116,6 +127,9 @@ async def run_scope_agent(
         repo_root: Path to repository root
         llm_client: LLM client for agent calls
         max_depth: Maximum subagent recursion depth (1=file, 2=symbol)
+        tracker: Optional pipeline tracker for visualization
+        parent_tracker_id: Parent node ID for this scope agent
+        max_parallel_subagents: Maximum number of concurrent subagents within this scope
     
     Returns:
         Enriched ScopeResult with agent-generated summary
@@ -126,7 +140,7 @@ async def run_scope_agent(
     # Create notepad for this scope
     notepad = Notepad(scope_id=plan.scope_id)
     
-    # Create toolkit
+    # Create toolkit with tracker for subagent visualization
     toolkit = AgentToolkit(
         notepad=notepad,
         repo_root=repo_root,
@@ -135,6 +149,9 @@ async def run_scope_agent(
         max_depth=max_depth,
         current_depth=0,
         llm_client=llm_client,
+        tracker=tracker,
+        parent_tracker_id=parent_tracker_id or f"explorer.{plan.scope_id}",
+        max_parallel_subagents=max_parallel_subagents,
     )
     
     # Build initial context
@@ -149,6 +166,8 @@ async def run_scope_agent(
             toolkit=toolkit,
             max_steps=15,
             agent_id=agent_id,
+            tracker=tracker,
+            tracker_node_id=parent_tracker_id or f"explorer.{plan.scope_id}",
         )
         
         # Enrich result

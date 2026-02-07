@@ -6,10 +6,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from ..llm import LLMClient
+    from ..llm import LLMClient, StreamedToolCall
     from .tools import AgentToolkit
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,8 @@ async def run_agent_loop(
     toolkit: AgentToolkit,
     max_steps: int = 15,
     agent_id: str = "",
+    tracker: object | None = None,
+    tracker_node_id: str = "",
 ) -> str:
     """Run agent loop until 'finish' tool is called or max_steps reached.
     
@@ -119,7 +121,14 @@ async def run_agent_loop(
         
         # Add assistant response to history
         messages.append({"role": "assistant", "content": response})
-        
+
+        # Record LLM text to tracker
+        if tracker and tracker_node_id and response:
+            try:
+                tracker.append_text(tracker_node_id, response)  # type: ignore[union-attr]
+            except Exception:
+                pass
+
         # Parse tool calls
         tool_calls = parse_tool_calls(response)
         
@@ -141,6 +150,7 @@ async def run_agent_loop(
             logger.debug("[%s] Tool call: %s(%s)", agent_id, call.name, call.args)
             
             if call.name == "finish":
+                await toolkit.flush_subagents()
                 summary = call.args.get("summary", "")
                 if summary:
                     return summary
@@ -148,13 +158,21 @@ async def run_agent_loop(
             
             # Execute tool
             result = await toolkit.execute(call.name, call.args)
-            
+
+            # Record tool call to tracker
+            if tracker and tracker_node_id:
+                try:
+                    tracker.record_tool_call(tracker_node_id, call.name, call.args, result[:200])  # type: ignore[union-attr]
+                except Exception:
+                    pass
+
             # Add tool result to messages
             messages.append({
                 "role": "user",
                 "content": f"Tool '{call.name}' result:\n{result}"
             })
     
+    await toolkit.flush_subagents()
     logger.warning("[%s] Max steps reached", agent_id)
     return f"(Agent reached max steps without finishing. Last response excerpt: {response[:500]}...)"
 
@@ -162,26 +180,27 @@ async def run_agent_loop(
 def _build_tool_instruction() -> str:
     """Build instruction text for tool usage."""
     return """
-## Available Tools
+## Tool Usage
 
-To use a tool, respond with a JSON code block:
+Respond with a JSON code block to call a tool:
 
 ```json
-{"tool": "tool_name", "args": {"arg1": "value1", ...}}
+{"tool": "tool_name", "args": {"arg1": "value1"}}
 ```
 
 **Tools:**
+1. `read_file(path)` -- Read a source file. Use for short/simple files you can \
+analyze yourself.
+2. `read_symbol(file, symbol)` -- Read a specific function or class definition.
+3. `write_notepad(key, content)` -- Record a finding. Use dot-notation keys \
+(e.g. patterns.auth, api.login, architecture.overview).
+4. `spawn_subagent(agent_type, target, task)` -- Delegate deep analysis. \
+agent_type is "file" or "symbol"; target is a file path (or "file:symbol" for \
+symbol agents); task describes what to analyze.
+5. `finish(summary)` -- Return your final summary. Call this when done.
 
-1. `read_file(path)` - Read source code from a file (use sparingly, prefer subagents for complex files)
-2. `read_symbol(file, symbol)` - Read a specific function/class definition
-3. `write_notepad(key, content)` - Record a finding (use dot notation: patterns.X, api.X)
-4. `spawn_subagent(agent_type, target, task)` - **PREFERRED**: Spawn file/symbol subagent for deep analysis
-   - agent_type: "file" or "symbol"
-   - target: file path, or "file:symbol_name" for symbols
-   - task: description of what to analyze
-5. `finish(summary)` - Complete with final summary (call when done)
-
-**IMPORTANT**: For scopes with 3+ files, spawn FileAgents rather than reading everything yourself. This enables parallel analysis and better coverage.
+**Workflow**: Orient yourself with extraction data, read or delegate files as \
+appropriate, record findings, then finish.
 """
 
 
@@ -194,10 +213,180 @@ def _extract_summary(response: str) -> str:
         idx = lower.find(marker)
         if idx != -1:
             return response[idx + len(marker):].strip()
-    
+
     # Return last paragraph as summary
     paragraphs = [p.strip() for p in response.split("\n\n") if p.strip()]
     if paragraphs:
         return paragraphs[-1]
-    
+
     return response[:1000]
+
+
+# ---------------------------------------------------------------------------
+# Streaming agent loop
+# ---------------------------------------------------------------------------
+
+# Tools that can execute immediately mid-stream (they just schedule async tasks)
+_SPAWN_TOOLS = {"spawn_subagent", "delegate_folder"}
+
+
+async def run_agent_loop_streaming(
+    llm_client: LLMClient,
+    system_prompt: str,
+    initial_context: str,
+    toolkit: AgentToolkit,
+    tool_definitions: list[dict] | None = None,
+    max_steps: int = 15,
+    agent_id: str = "",
+    on_text_delta: Callable[[str], None] | None = None,
+    on_tool_start: Callable[[str, dict], None] | None = None,
+    tracker: object | None = None,
+    tracker_node_id: str = "",
+) -> str:
+    """Streaming agent loop that executes spawn tools mid-stream.
+
+    Like ``run_agent_loop`` but uses ``llm_client.stream_chat()`` and fires
+    spawn-type tool calls (``delegate_folder``, ``spawn_subagent``) as soon as
+    their JSON arguments are complete, rather than waiting for the full
+    response.  Other tools are queued and executed after the stream ends.
+
+    Parameters
+    ----------
+    tool_definitions:
+        OpenAI-format tool defs to pass to the LLM.  Defaults to the
+        standard ``TOOL_DEFINITIONS`` if not provided.
+    on_text_delta:
+        Called with each text chunk as it arrives.
+    on_tool_start:
+        Called when a tool call is detected (name, parsed args).
+    """
+    from ..llm import StreamedToolCall
+
+    if tool_definitions is None:
+        from .tools import TOOL_DEFINITIONS
+        tool_definitions = TOOL_DEFINITIONS
+
+    tool_instruction = _build_tool_instruction_streaming(tool_definitions)
+
+    messages: list[dict] = [
+        {"role": "system", "content": system_prompt + "\n\n" + tool_instruction},
+        {"role": "user", "content": initial_context},
+    ]
+
+    for step in range(max_steps):
+        logger.debug("[%s] Streaming step %d/%d", agent_id, step + 1, max_steps)
+
+        # Accumulate full text and tool calls from stream
+        full_text = ""
+        tool_calls: dict[int, StreamedToolCall] = {}  # index -> accumulator
+        queued_tool_results: list[tuple[str, dict]] = []  # (name, args) for non-spawn
+        finish_called = False
+        finish_summary = ""
+
+        try:
+            async for delta in llm_client.stream_chat(messages, tools=tool_definitions):
+                # Content delta
+                if delta.content:
+                    full_text += delta.content
+                    if on_text_delta:
+                        on_text_delta(delta.content)
+                    if tracker and tracker_node_id:
+                        try:
+                            tracker.append_text(tracker_node_id, delta.content)  # type: ignore[union-attr]
+                        except Exception:
+                            pass
+
+                # Tool call delta
+                if delta.tool_index is not None:
+                    idx = delta.tool_index
+                    if idx not in tool_calls:
+                        tool_calls[idx] = StreamedToolCall(index=idx)
+                    tc = tool_calls[idx]
+                    if delta.tool_name:
+                        tc.name = delta.tool_name
+                    if delta.tool_args_chunk:
+                        tc.arguments_json += delta.tool_args_chunk
+
+                    # Check if this tool call is now complete
+                    parsed = tc.try_parse()
+                    if parsed is not None and tc.name:
+                        if on_tool_start:
+                            on_tool_start(tc.name, parsed)
+
+                        if tc.name == "finish":
+                            finish_called = True
+                            finish_summary = parsed.get("summary", "")
+                        elif tc.name in _SPAWN_TOOLS:
+                            # Execute spawn tools immediately (they create async tasks)
+                            result = await toolkit.execute(tc.name, parsed)
+                            if tracker and tracker_node_id:
+                                try:
+                                    tracker.record_tool_call(tracker_node_id, tc.name, parsed, result[:200])  # type: ignore[union-attr]
+                                except Exception:
+                                    pass
+                        else:
+                            queued_tool_results.append((tc.name, parsed))
+
+                        # Reset so we don't re-process
+                        tc.arguments_json = ""
+                        tc.name = ""
+
+        except Exception as e:
+            logger.error("[%s] Stream failed: %s", agent_id, e)
+            return f"(Agent error: stream failed - {e})"
+
+        # Execute queued non-spawn tools
+        tool_result_msgs: list[str] = []
+        for name, args in queued_tool_results:
+            logger.debug("[%s] Tool call: %s(%s)", agent_id, name, args)
+            result = await toolkit.execute(name, args)
+            if tracker and tracker_node_id:
+                try:
+                    tracker.record_tool_call(tracker_node_id, name, args, result[:200])  # type: ignore[union-attr]
+                except Exception:
+                    pass
+            tool_result_msgs.append(f"Tool '{name}' result:\n{result}")
+
+        # Handle finish
+        if finish_called:
+            await toolkit.flush_subagents()
+            if finish_summary:
+                return finish_summary
+            return _extract_summary(full_text) if full_text else "(Agent finished without summary)"
+
+        # Build assistant message for history
+        # Construct a representation that includes both text and tool usage
+        assistant_content = full_text
+        if tool_calls:
+            completed_names = [f"{n}({json.dumps(a)[:80]})" for n, a in queued_tool_results]
+            if completed_names:
+                assistant_content += "\n\n[Tools called: " + ", ".join(completed_names) + "]"
+        messages.append({"role": "assistant", "content": assistant_content or "(tool calls only)"})
+
+        # Add tool results
+        if tool_result_msgs:
+            messages.append({
+                "role": "user",
+                "content": "\n\n---\n\n".join(tool_result_msgs),
+            })
+
+        # If no tool calls at all, prompt for tool use
+        if not tool_calls and not full_text.strip():
+            messages.append({
+                "role": "user",
+                "content": "Please use one of the available tools to continue your analysis, or call 'finish' with your summary.",
+            })
+
+    await toolkit.flush_subagents()
+    logger.warning("[%s] Max steps reached (streaming)", agent_id)
+    return f"(Agent reached max steps. Last text: {full_text[:500]}...)" if full_text else "(Max steps reached)"
+
+
+def _build_tool_instruction_streaming(tool_defs: list[dict]) -> str:
+    """Build a brief tool instruction for models that also receive native tool defs."""
+    names = [t["function"]["name"] for t in tool_defs if "function" in t]
+    return (
+        "You have access to the following tools: " + ", ".join(names) + ". "
+        "Use them via the function calling interface. "
+        "Call 'finish' with a comprehensive summary when your analysis is complete."
+    )

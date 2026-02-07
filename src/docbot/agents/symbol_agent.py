@@ -38,6 +38,8 @@ async def run_symbol_agent(
     repo_root: Path,
     llm_client: LLMClient,
     scope_result: ScopeResult,
+    tracker: object | None = None,
+    parent_tracker_id: str | None = None,
 ) -> str:
     """Analyze a specific symbol and write findings to notepad.
     
@@ -52,6 +54,8 @@ async def run_symbol_agent(
         repo_root: Repository root
         llm_client: LLM client
         scope_result: Scope extraction data
+        tracker: Optional pipeline tracker (unused - leaf agent)
+        parent_tracker_id: Parent node ID (unused - leaf agent)
     
     Returns:
         Analysis summary

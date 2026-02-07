@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.scripts]
-docbot = "docbot.cli:app"
+docbot = "docbot.app.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/docbot"]

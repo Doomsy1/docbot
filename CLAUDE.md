@@ -16,7 +16,8 @@ docbot serve                           # launch interactive webapp
 # Key flags on generate
 docbot generate -j 8 -t 180 -m openai/gpt-oss-20b
 docbot generate --no-llm               # template-only mode (no LLM calls)
-docbot generate --visualize            # open live D3.js pipeline visualization
+docbot generate --agents               # enable recursive agent exploration
+docbot generate --agents --agent-depth 1  # file-level only (no symbol agents)
 
 # Other commands
 docbot update                          # incremental update (changed files only)
@@ -30,10 +31,12 @@ Requires Python 3.11+. Configuration: `.env` file with `OPENROUTER_KEY=sk-or-...
 ## Tests
 
 ```bash
-pytest tests/
+pytest tests/                    # all tests
+pytest tests/test_scanner.py     # single file
+pytest tests/test_scanner.py -k "test_name"  # single test
 ```
 
-No test suite exists yet -- tests directory contains only `__init__.py`.
+Test files: `test_scanner`, `test_explorer`, `test_python_extractor`, `test_treesitter_extractor`, `test_llm_extractor`, `test_agent_toolkit_parallel`, `test_llm_rate_control`, `test_planner_balancing`.
 
 ## Architecture
 
@@ -44,8 +47,8 @@ SCAN -> PLAN -> EXPLORE (parallel) -> REDUCE -> RENDER (parallel)
 ```
 
 1. **Scanner** (`scanner.py`) -- walks repo, finds source files across all languages, classifies entrypoints/packages
-2. **Planner** (`planner.py`) -- groups files into documentation scopes by directory; LLM refines groupings
-3. **Explorer** (`explorer.py`) -- per-scope extraction via tree-sitter (10 languages) or LLM fallback (everything else), run in parallel via `asyncio.Semaphore`; LLM enriches each scope with a narrative summary
+2. **Planner** (`planner.py`) -- groups files into documentation scopes by directory; LLM refines groupings; estimates cost per scope and auto-splits/merges scopes to hit a target cost budget
+3. **Explorer** (`explorer.py`) -- per-scope extraction via tree-sitter (10 languages) or LLM fallback (everything else), run in parallel via `asyncio.Semaphore`; LLM enriches each scope with a narrative summary. Optionally uses recursive agents (`--agents` flag) for deeper analysis
 4. **Reducer** (`reducer.py`) -- merges all scope results into a `DocsIndex`, deduplicates, computes dependency edges from imports, LLM writes cross-scope analysis + Mermaid graph
 5. **Renderer** (`renderer.py`) -- generates per-scope markdown docs, README, architecture overview, API reference, and HTML report; all narrative docs are LLM-written in parallel
 
@@ -55,22 +58,36 @@ SCAN -> PLAN -> EXPLORE (parallel) -> REDUCE -> RENDER (parallel)
 -   `treesitter_extractor.py` -- tree-sitter for TS/JS, Go, Rust, Java, Kotlin, C#, Swift, Ruby
 -   `llm_extractor.py` -- LLM-based extraction for any unsupported language
 
-**LLM is central, not optional.** The `--no-llm` flag exists as a fallback but the real value comes from LLM-generated narratives at every stage. The LLM client (`llm.py`) is a minimal async wrapper around OpenRouter using only stdlib `urllib.request` + `asyncio.to_thread()`.
+**Agent system** (`agents/`) -- recursive, tool-using agents for deep code exploration (enabled via `--agents`):
 
-**Git integration** (`project.py`, `git_utils.py`, `hooks.py`) -- `.docbot/` project directory management, git diff tracking for incremental updates, post-commit hook support.
+-   `loop.py` -- core async agent execution loop; parses tool calls from OpenAI function calling format or fallback JSON blocks; max 15 steps per agent
+-   `scope_agent.py` -- top-level agent per scope; spawns FileAgents for complex files
+-   `file_agent.py` -- mid-level agent per file; can spawn SymbolAgents for deep function/class analysis
+-   `symbol_agent.py` -- leaf agent for individual symbols (single-shot, no subagents)
+-   `tools.py` -- tool definitions and executor (`read_file`, `read_symbol`, `write_notepad`, `spawn_subagent`, `finish`)
+-   `notepad.py` -- thread-safe hierarchical notepad for inter-agent communication using dot-notation keys (`patterns.X`, `symbols.X`, `files.X`)
+
+Agent depth is configurable: depth 2 (default) = ScopeAgent -> FileAgent -> SymbolAgent; depth 1 = ScopeAgent -> FileAgent only.
+
+**LLM client** (`llm.py`) -- minimal async wrapper around OpenRouter using only stdlib `urllib.request` + `asyncio.to_thread()`. Includes automatic retry with exponential backoff (default 4 retries), adaptive concurrency reduction during sustained failures, and a global concurrency semaphore (default 6 workers).
+
+**Git integration** (`project.py`, `git_utils.py`, `hooks.py`) -- `.docbot/` project directory management, git diff tracking for incremental updates, post-commit hook support. `ProjectState` tracks `scope_perf_map` to inform future cost estimates from prior runs.
 
 **Interactive webapp** (`server.py` + `webapp/`) -- FastAPI backend serving analyzed data + AI chat. React SPA with interactive system graph (ReactFlow), chat panel, code viewer, guided tours, documentation browser.
 
-**Pipeline visualization** (`tracker.py`, `viz_server.py`, `_viz_html.py`) -- thread-safe state tracker + stdlib HTTP server serving an embedded D3.js radial tree that polls `/state` every 400ms.
+**Pipeline visualization** (`tracker.py` + webapp Pipeline tab) -- thread-safe tracker emits timeline events and orchestrator persists them to `.docbot/history/<run_id>/pipeline_events.json`; FastAPI serves `/api/pipeline/runs` + `/api/pipeline/events`.
 
 ## Key Data Models (`models.py`)
 
 -   `Citation` -- source location (file, line_start, line_end, symbol, snippet) -- used for traceability throughout
--   `ScopePlan` -> `ScopeResult` -- the core unit of work; a scope groups related files for documentation
+-   `ScopePlan` -> `ScopeResult` -- the core unit of work; a scope groups related files for documentation. `ScopePlan` includes `estimated_cost`, `estimated_tokens`, and `bucket` fields for cost balancing
 -   `DocsIndex` -- the global merged output containing all scopes, symbols, env vars, edges, and LLM analysis
 -   `RunMeta` -- execution statistics for a pipeline run
--   `ProjectState` -- persistent state tracking (last commit, scope-file map) stored in `.docbot/state.json`
--   `DocbotConfig` -- user configuration (model, concurrency, timeout, etc.) stored in `.docbot/config.toml`
+-   `ProjectState` -- persistent state tracking (last commit, scope-file map, scope-perf-map) stored in `.docbot/state.json`
+-   `DocbotConfig` -- user configuration stored in `.docbot/config.toml`; key fields: `model`, `concurrency`, `timeout`, `max_scopes`, `target_scope_cost`, `split_threshold`, `merge_threshold`, `use_agents`, `agent_depth`, `agent_scope_max_parallel`, `llm_backoff_enabled`, `llm_backoff_max_retries`, `llm_adaptive_reduction_factor`
+-   `NoteEntry` -- single note with content, author, timestamp, citation (used by agent notepad)
+-   `DocSnapshot`, `ScopeSummary`, `SnapshotStats` -- documentation history/snapshots
+-   `DiffReport`, `ScopeModification`, `GraphDelta`, `StatsDelta` -- before/after comparisons
 
 ## Conventions
 
@@ -80,6 +97,8 @@ SCAN -> PLAN -> EXPLORE (parallel) -> REDUCE -> RENDER (parallel)
 -   Per-file extraction failures are caught and recorded -- they never kill scope or pipeline
 -   LLM failures gracefully degrade to template-based fallbacks
 -   Output goes to `.docbot/` project directory (git-tracked config only; everything else gitignored)
+-   Agent system uses depth tracking to prevent infinite recursion; subagents are scheduled immediately but flushed in batch via `flush_subagents()`
+-   Multiple levels of concurrency semaphores: global LLM workers, scope-level parallelism, and agent-level parallelism
 
 ## Roadmap Context
 

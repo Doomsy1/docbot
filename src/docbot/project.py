@@ -104,6 +104,7 @@ def save_config(docbot_dir: Path, config: DocbotConfig) -> None:
         f"concurrency = {config.concurrency}",
         f"timeout = {config.timeout}",
         f"max_scopes = {config.max_scopes}",
+        f"max_snapshots = {config.max_snapshots}",
         f"no_llm = {'true' if config.no_llm else 'false'}",
     ]
     (docbot_dir / "config.toml").write_text(

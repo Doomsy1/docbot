@@ -338,7 +338,7 @@ export default function Graph({ onSelectFile }: GraphProps) {
     const r = node.radius;
 
     if (node.isExternal) {
-      // External service node — hexagon-ish rounded rect with dashed border
+      // External service node — rounded rect with dashed border
       const w = r * 2;
       const h = r * 1.4;
       const cornerR = 8 / globalScale;

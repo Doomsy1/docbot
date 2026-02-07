@@ -51,24 +51,62 @@ Keep the total length under 300 words. No file paths or symbol names -- just \
 describe the system at a level that helps someone quickly understand the project."""
 
 _MERMAID_SYSTEM = """\
-You are a software architect creating a Mermaid architecture diagram. \
-Return ONLY valid Mermaid syntax starting with "graph TD". No markdown fences. \
-No commentary before or after the diagram. CRITICAL: Define each node EXACTLY \
-ONCE. Never redefine a node with a different label or shape."""
+You are a software architect creating a clean, readable Mermaid system \
+architecture diagram based on analyzed codebase data. Your goal is to show \
+HOW the system works -- components, data flows, external dependencies, and \
+interactions -- NOT the file/directory structure. Prioritize CLARITY and \
+READABILITY over completeness. Return ONLY valid Mermaid syntax starting \
+with "graph TD". No markdown fences. No commentary. CRITICAL: Define each \
+node EXACTLY ONCE. Never redefine a node with a different label or shape."""
 
 _MERMAID_PROMPT = """\
-Create a Mermaid architecture diagram for this {languages} repository.
+Create a clean, readable Mermaid SYSTEM ARCHITECTURE diagram for this \
+{languages} repository. This should look like a real architecture diagram \
+an engineer would draw on a whiteboard.
 
-STRICT requirements:
+DESIGN PRINCIPLES (critical for readability):
+- KEEP IT CLEAN: Aim for 6-12 nodes max. Merge minor components into their \
+parent if they don't have distinct external interactions. A utility/scripts \
+scope with no unique connections should be omitted or merged, not shown as \
+its own node.
+- MINIMIZE CROSSING ARROWS: If multiple services all connect to the same \
+database, route them through a shared path or use a subgraph to keep edges \
+short and parallel. Prefer vertical flow over diagonal spaghetti.
+- LABEL ARROWS SPARINGLY: Only add an edge label when the protocol or \
+interaction type is NON-OBVIOUS or DIFFERENT from surrounding edges. If \
+everything in a subgraph talks HTTP, don't label every arrow "HTTP/REST" -- \
+label at most one representative edge or use a subgraph title to convey it. \
+Use labels for genuinely useful info like "WebSocket", "S3 upload", "gRPC", \
+"scrapes", "enqueues job", etc.
+- NO DUPLICATE LABELS: Never put the same label text on more than 2 edges. \
+If a pattern repeats (e.g. 4 services query MongoDB), use ONE labeled edge \
+and unlabeled arrows for the rest.
+- SUBGRAPH DISCIPLINE: Only use a subgraph if it contains 2+ nodes. Never \
+wrap a single node in a subgraph. Don't nest subgraphs.
+
+NODE NAMING:
+- Name nodes by their ROLE (e.g. "REST API", "Job Scraper", "React App", \
+"Video Pipeline") based on what the exploration discovered, not directory names.
+- Include external dependencies (databases, cloud storage, third-party APIs) \
+as their own nodes when mentioned in the analysis.
+
+STRICT Mermaid syntax requirements:
 - Use "graph TD" (top-down layout).
-- Use simple alpha-numeric IDs (s1, s2, etc).
-- CRITICAL: Wrap all labels in double quotes (e.g. id1["Main Logic"]).
+- Use simple alpha-numeric IDs (s1, s2, db1, ext1, etc).
+- CRITICAL: Wrap ALL labels in double quotes (e.g. id1["REST API"]).
+- For databases use: db1[("Database")]
+- For external services use: ext1(("External API"))
+- For subgraphs use: subgraph Title\\n...\\nend
 - Return ONLY the Mermaid code. No markdown fences. No commentary.
 
-Scopes:
-{scope_block}
+Here is what the automated exploration discovered about each component:
 
-Edges: {edges_block}
+{arch_scope_block}
+
+Detected dependency edges between components:
+{edges_block}
+
+System entrypoints: {entrypoints}
 """
 
 
@@ -164,6 +202,46 @@ def _compute_scope_edges(scope_results: list[ScopeResult]) -> list[tuple[str, st
                 edges.add((orphan, best_match))
 
     return sorted(edges)
+
+
+def _build_arch_scope_block(scope_results: list[ScopeResult]) -> str:
+    """Build a rich scope description for the mermaid architecture diagram.
+
+    Includes summaries, key APIs, entrypoints, and env vars so the LLM
+    understands what each component *does* rather than just its directory name.
+    """
+    parts = []
+    for sr in scope_results:
+        if sr.error:
+            continue
+        langs = f" [{', '.join(sr.languages)}]" if sr.languages else ""
+        parts.append(f"## {sr.title} (id: {sr.scope_id}){langs}")
+
+        if sr.summary:
+            # Give the LLM the first ~600 chars of the summary -- enough to
+            # understand the component's role without overwhelming the prompt.
+            summary = sr.summary[:600]
+            if len(sr.summary) > 600:
+                summary += "..."
+            parts.append(f"  Role: {summary}")
+
+        if sr.entrypoints:
+            parts.append(f"  Entrypoints: {', '.join(sr.entrypoints)}")
+
+        # Surface the most important public API symbols (max 8)
+        if sr.public_api:
+            top_syms = sr.public_api[:8]
+            sym_strs = [f"{s.kind} {s.name}" for s in top_syms]
+            parts.append(f"  Key APIs: {', '.join(sym_strs)}")
+
+        # Env vars hint at external service dependencies
+        if sr.env_vars:
+            env_names = [e.name for e in sr.env_vars[:10]]
+            parts.append(f"  Env vars: {', '.join(env_names)}")
+
+        parts.append(f"  Files: {len(sr.paths)}")
+        parts.append("")
+    return "\n".join(parts)
 
 
 def _build_scope_block(scope_results: list[ScopeResult]) -> str:
@@ -287,11 +365,12 @@ async def reduce_with_llm(
 
     async def _mermaid_task() -> str | None:
         try:
+            arch_scope_block = _build_arch_scope_block(scope_results)
             mermaid_raw = await llm_client.ask(
                 _MERMAID_PROMPT.format(
                     languages=languages,
                     repo_path=repo_path,
-                    scope_block=scope_block,
+                    arch_scope_block=arch_scope_block,
                     edges_block=edges_block,
                     entrypoints=ep_block,
                 ),

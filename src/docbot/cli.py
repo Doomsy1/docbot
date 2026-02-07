@@ -128,6 +128,7 @@ def _ensure_webapp_built() -> None:
     """Build the webapp if the dist folder doesn't exist."""
     import subprocess
     import sys
+    import shutil
 
     here = Path(__file__).parent.resolve()
     potential_dists = [
@@ -152,9 +153,35 @@ def _ensure_webapp_built() -> None:
     node_modules = webapp_dir / "node_modules"
     if not node_modules.exists():
         console.print("[bold]Installing webapp dependencies...[/bold]")
+        npm_exe: str | None = None
+        # On Windows, npm is typically a .cmd shim (npm.cmd). Some environments
+        # (or sanitized PATH/PATHEXT) can fail to resolve it when invoked from
+        # subprocess with shell=False, so we explicitly probe common names.
+        for candidate in (
+            "npm.cmd",
+            "npm.exe",
+            "npm.bat",
+            "npm",
+        ):
+            npm_exe = shutil.which(candidate)
+            if npm_exe:
+                break
+
+        if npm_exe is None and os.name == "nt":
+            program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            fallback = program_files / "nodejs" / "npm.cmd"
+            if fallback.exists():
+                npm_exe = str(fallback)
+
+        if npm_exe is None:
+            console.print(
+                "[red]Error: npm not found. Please install Node.js and npm.[/red]"
+            )
+            sys.exit(1)
+
         try:
             subprocess.run(
-                ["npm", "install"],
+                [npm_exe, "install"],
                 cwd=str(webapp_dir),
                 check=True,
                 capture_output=True,
@@ -163,17 +190,23 @@ def _ensure_webapp_built() -> None:
         except subprocess.CalledProcessError as e:
             console.print(f"[red]Error: npm install failed:[/red] {e.stderr}")
             sys.exit(1)
-        except FileNotFoundError:
-            console.print(
-                "[red]Error: npm not found. Please install Node.js and npm.[/red]"
-            )
-            sys.exit(1)
 
     # Build the webapp
     console.print("[bold]Building webapp...[/bold]")
+    npm_exe = shutil.which("npm.cmd") or shutil.which("npm.exe") or shutil.which("npm")
+    if npm_exe is None and os.name == "nt":
+        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        fallback = program_files / "nodejs" / "npm.cmd"
+        if fallback.exists():
+            npm_exe = str(fallback)
+
+    if npm_exe is None:
+        console.print("[red]Error: npm not found. Please install Node.js and npm.[/red]")
+        sys.exit(1)
+
     try:
         subprocess.run(
-            ["npm", "run", "build"],
+            [npm_exe, "run", "build"],
             cwd=str(webapp_dir),
             check=True,
             capture_output=True,
@@ -240,9 +273,9 @@ def generate(
     ),
 ) -> None:
     """Run the full documentation pipeline, output to .docbot/."""
-    from .orchestrator import run_async
-    from .project import load_config, load_state, save_state
-    from .git_utils import get_current_commit
+    from .models import DocbotConfig
+    from .orchestrator import generate_async, run_async
+    from .project import load_config
     from .tracker import NoOpTracker, PipelineTracker
 
     project_root, docbot_dir = _require_docbot(path)
@@ -250,11 +283,13 @@ def generate(
     cfg = load_config(docbot_dir)
 
     # CLI flags override config values (only when explicitly provided).
-    effective_model = model or cfg.model
-    effective_concurrency = concurrency if concurrency is not None else cfg.concurrency
-    effective_timeout = timeout if timeout is not None else cfg.timeout
-    effective_max_scopes = max_scopes if max_scopes is not None else cfg.max_scopes
-    effective_no_llm = no_llm or cfg.no_llm
+    effective_cfg = DocbotConfig(
+        model=model or cfg.model,
+        concurrency=concurrency if concurrency is not None else cfg.concurrency,
+        timeout=timeout if timeout is not None else cfg.timeout,
+        max_scopes=max_scopes if max_scopes is not None else cfg.max_scopes,
+        no_llm=no_llm or cfg.no_llm,
+    )
 
     # --mock-viz: simulated pipeline for visualization development.
     if mock_viz:
@@ -266,7 +301,7 @@ def generate(
         asyncio.run(
             run_async(
                 repo_path=project_root,
-                concurrency=effective_concurrency,
+                concurrency=effective_cfg.concurrency,
                 tracker=tracker,
                 mock=True,
             )
@@ -275,7 +310,7 @@ def generate(
         input()
         return
 
-    llm_client = _build_llm_client(effective_model, effective_no_llm)
+    llm_client = _build_llm_client(effective_cfg.model, effective_cfg.no_llm)
 
     # Set up visualization tracker.
     tracker: PipelineTracker | NoOpTracker
@@ -289,40 +324,17 @@ def generate(
         tracker = NoOpTracker()
 
     if llm_client is not None:
-        console.print(f"[bold]LLM:[/bold] {effective_model} via OpenRouter")
+        console.print(f"[bold]LLM:[/bold] {effective_cfg.model} via OpenRouter")
 
-    # Run the pipeline, outputting to .docbot/.
+    # Run the git-aware pipeline, outputting to .docbot/.
     asyncio.run(
-        run_async(
-            repo_path=project_root,
-            output_base=docbot_dir,
-            max_scopes=effective_max_scopes,
-            concurrency=effective_concurrency,
-            timeout=effective_timeout,
+        generate_async(
+            docbot_root=docbot_dir,
+            config=effective_cfg,
             llm_client=llm_client,
             tracker=tracker,
         )
     )
-
-    # Update project state with the current commit.
-    state = load_state(docbot_dir)
-    commit = get_current_commit(project_root)
-    if commit:
-        state.last_commit = commit
-    # Build scope_file_map from the plan if it was saved.
-    import json
-
-    plan_path = docbot_dir / "plan.json"
-    if plan_path.is_file():
-        try:
-            plans = json.loads(plan_path.read_text(encoding="utf-8"))
-            state.scope_file_map = {p["scope_id"]: p["paths"] for p in plans}
-        except Exception:
-            pass
-    from datetime import datetime, timezone
-
-    state.last_run_at = datetime.now(timezone.utc).isoformat()
-    save_state(docbot_dir, state)
 
     if visualize:
         console.print(
@@ -348,88 +360,31 @@ def update(
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
 ) -> None:
     """Incrementally update docs for files changed since the last documented commit."""
-    from .git_utils import get_changed_files, get_current_commit, is_commit_reachable
-    from .project import load_config, load_state, save_state
+    from .models import DocbotConfig
+    from .orchestrator import update_async
+    from .project import load_config
+    from .tracker import NoOpTracker
 
     project_root, docbot_dir = _require_docbot(path)
     _load_dotenv(project_root)
     cfg = load_config(docbot_dir)
-    state = load_state(docbot_dir)
-
-    # Must have a previous run to update from.
-    if not state.last_commit:
-        console.print(
-            "[yellow]No previous run found.[/yellow] "
-            "Run [bold]docbot generate[/bold] first."
-        )
-        raise typer.Exit(code=1)
-
-    # Validate the recorded commit is still reachable.
-    if not is_commit_reachable(project_root, state.last_commit):
-        console.print(
-            f"[yellow]Warning:[/yellow] Commit {state.last_commit[:8]} is no longer reachable "
-            "(rebase or force-push?). Running full generate instead."
-        )
-        # Delegate to generate.
-        generate(
-            path=path,
-            model=model,
-            concurrency=concurrency,
-            timeout=timeout,
-            no_llm=no_llm,
-        )
-        return
-
-    current_commit = get_current_commit(project_root)
-    if current_commit == state.last_commit:
-        console.print(
-            "[green]Documentation is up to date.[/green] No new commits since last run."
-        )
-        return
-
-    changed_files = get_changed_files(project_root, state.last_commit)
-    if not changed_files:
-        console.print("[green]No file changes detected.[/green]")
-        state.last_commit = current_commit
-        save_state(docbot_dir, state)
-        return
-
-    # Map changed files to affected scopes.
-    affected_scopes: set[str] = set()
-    unscoped_files: list[str] = []
-    for f in changed_files:
-        found = False
-        for scope_id, paths in state.scope_file_map.items():
-            if f in paths:
-                affected_scopes.add(scope_id)
-                found = True
-        if not found:
-            unscoped_files.append(f)
-
-    total_scopes = len(state.scope_file_map)
-    console.print(
-        f"  {len(changed_files)} file(s) changed, "
-        f"{len(affected_scopes)}/{total_scopes} scope(s) affected."
+    effective_cfg = DocbotConfig(
+        model=model or cfg.model,
+        concurrency=concurrency if concurrency is not None else cfg.concurrency,
+        timeout=timeout if timeout is not None else cfg.timeout,
+        max_scopes=cfg.max_scopes,
+        no_llm=no_llm or cfg.no_llm,
     )
-    if unscoped_files:
-        console.print(
-            f"  [yellow]{len(unscoped_files)} file(s) not in any scope[/yellow] "
-            "(will be picked up on next full generate)."
-        )
 
-    if total_scopes > 0 and len(affected_scopes) > total_scopes * 0.5:
-        console.print(
-            "[yellow]Over half of scopes affected.[/yellow] "
-            "Consider running [bold]docbot generate[/bold] for a full rebuild."
-        )
+    llm_client = _build_llm_client(effective_cfg.model, effective_cfg.no_llm)
 
-    # TODO: Implement incremental pipeline (Phase 3.5 in CHECKLIST.md).
-    # For now, fall back to a full generate when update is requested.
-    console.print(
-        "[dim]Incremental update not yet implemented -- running full generate.[/dim]"
-    )
-    generate(
-        path=path, model=model, concurrency=concurrency, timeout=timeout, no_llm=no_llm
+    asyncio.run(
+        update_async(
+            docbot_root=docbot_dir,
+            config=effective_cfg,
+            llm_client=llm_client,
+            tracker=NoOpTracker(),
+        )
     )
 
 

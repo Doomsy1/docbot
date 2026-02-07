@@ -272,24 +272,15 @@ def _detect_external_services(index: "DocsIndex") -> tuple[list[dict], list[dict
     found_services: dict[str, set[str]] = {}  # service_id -> set of scope_ids
 
     for svc_id, svc in _EXTERNAL_SERVICES.items():
-        env_kws = svc["env_keywords"]
         imp_kws = svc["import_keywords"]
 
         for s in index.scopes:
-            matched = False
-            # Check only THIS scope's own env vars (not global)
-            for env_name in scope_env[s.scope_id]:
-                if any(kw in env_name for kw in env_kws):
-                    matched = True
+            # Only match on direct imports — env vars are too indirect
+            # (config files define env vars but don't actually call the service)
+            for imp in scope_imp[s.scope_id]:
+                if any(kw in imp for kw in imp_kws):
+                    found_services.setdefault(svc_id, set()).add(s.scope_id)
                     break
-            # Check this scope's imports
-            if not matched:
-                for imp in scope_imp[s.scope_id]:
-                    if any(kw in imp for kw in imp_kws):
-                        matched = True
-                        break
-            if matched:
-                found_services.setdefault(svc_id, set()).add(s.scope_id)
 
     external_nodes = []
     external_edges = []
@@ -301,9 +292,7 @@ def _detect_external_services(index: "DocsIndex") -> tuple[list[dict], list[dict
             "icon": svc["icon"],
         })
         for sid in scope_ids:
-            # Bidirectional: scope talks to service, service responds back
             external_edges.append({"from": sid, "to": f"ext_{svc_id}"})
-            external_edges.append({"from": f"ext_{svc_id}", "to": sid})
 
     return external_nodes, external_edges
 

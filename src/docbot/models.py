@@ -199,5 +199,82 @@ class DocbotConfig(BaseModel):
     max_scopes: int = 20
     """Maximum number of documentation scopes."""
 
+    max_snapshots: int = 10
+    """Number of history snapshots to retain."""
+
     no_llm: bool = False
     """Skip LLM enrichment; extraction still runs."""
+
+
+# ---------------------------------------------------------------------------
+# Snapshot history models (Phase 3D)
+# ---------------------------------------------------------------------------
+
+class ScopeSummary(BaseModel):
+    """Compact per-scope stats captured in a snapshot."""
+
+    file_count: int
+    symbol_count: int
+    summary_hash: str
+
+
+class SnapshotStats(BaseModel):
+    """High-level aggregate metrics stored with each snapshot."""
+
+    total_files: int
+    total_scopes: int
+    total_symbols: int
+    total_edges: int
+
+
+class DocSnapshot(BaseModel):
+    """Snapshot metadata persisted to `.docbot/history/`."""
+
+    commit_hash: str
+    run_id: str
+    timestamp: str
+    scope_summaries: dict[str, ScopeSummary] = Field(default_factory=dict)
+    graph_digest: str
+    doc_hashes: dict[str, str] = Field(default_factory=dict)
+    stats: SnapshotStats
+
+
+# ---------------------------------------------------------------------------
+# Diff models (Phase 3E)
+# ---------------------------------------------------------------------------
+
+class GraphDelta(BaseModel):
+    """Architecture graph differences between two snapshots."""
+
+    added_edges: list[tuple[str, str]] = Field(default_factory=list)
+    removed_edges: list[tuple[str, str]] = Field(default_factory=list)
+    changed_nodes: list[str] = Field(default_factory=list)
+
+
+class StatsDelta(BaseModel):
+    """Numeric deltas from one snapshot to another."""
+
+    total_files: int = 0
+    total_scopes: int = 0
+    total_symbols: int = 0
+
+
+class ScopeModification(BaseModel):
+    """Per-scope change summary."""
+
+    scope_id: str
+    added_files: list[str] = Field(default_factory=list)
+    removed_files: list[str] = Field(default_factory=list)
+    added_symbols: list[str] = Field(default_factory=list)
+    removed_symbols: list[str] = Field(default_factory=list)
+    summary_changed: bool = False
+
+
+class DiffReport(BaseModel):
+    """Top-level diff report returned by `docbot diff` and web APIs."""
+
+    added_scopes: list[str] = Field(default_factory=list)
+    removed_scopes: list[str] = Field(default_factory=list)
+    modified_scopes: list[ScopeModification] = Field(default_factory=list)
+    graph_changes: GraphDelta = Field(default_factory=GraphDelta)
+    stats_delta: StatsDelta = Field(default_factory=StatsDelta)

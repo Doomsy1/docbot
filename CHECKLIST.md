@@ -17,8 +17,8 @@
 - [x] Update `DocsIndex`: add `languages: list[str]` field
 - [x] Update `PublicSymbol.kind` docstring to include non-Python kinds
 - [x] Write the `Extractor` protocol signature in a doc comment (so Dev B knows the exact interface)
-- [ ] All 4 devs reviewed and approved the contracts
-- [ ] Merged `phase0/contracts` → `master`
+- [x] All 4 devs reviewed and approved the contracts
+- [x] Merged `phase0/contracts` → `master`
 
 ---
 
@@ -259,34 +259,34 @@
 #### Frontend Scaffold (`webapp/`)
 
 - [x] Scaffold: Vite + React + TypeScript + Tailwind
-- [ ] Build config: output to `webapp/dist/`
-- [ ] Mock Data Layer: create `src/mocks.ts` with explicit types matching `models.py` contracts
-  - [ ] Mock `DocsIndex`
-  - [ ] Mock `ScopeResult` list
-  - [ ] Mock `ScopeResult` detail (symbols, citations)
-  - [ ] Mock Dependency Graph (nodes/edges)
+- [x] Build config: output to `webapp/dist/`
+- [x] Data Layer: real endpoints (replacing initial mocks)
+  - [x] Real `DocsIndex`
+  - [x] Real `ScopeResult` list
+  - [x] Real `ScopeResult` detail
+  - [x] Real Dependency Graph
 
 #### UI Components
 
-- [ ] **Interactive System Graph**
-  - [ ] ReactFlow setup (read from mocks)
-  - [ ] Nodes colored by type, Edges for dependencies
-  - [ ] Zoom/Pan/Click-to-detail
-- [ ] **Chat Panel**
-  - [ ] Message feed with mock messages
-  - [ ] Markdown rendering
-  - [ ] Mermaid support
-- [ ] **Code Viewer**
-  - [ ] Implementation with Shiki/Prism
-  - [ ] Line highlighting
-- [ ] **Documentation Browser**
-  - [ ] Render markdown docs (mocks)
+- [x] **Interactive System Graph**
+  - [x] ReactFlow setup
+  - [x] Nodes colored by type, Edges for dependencies
+  - [x] Zoom/Pan/Click-to-detail
+- [x] **Chat Panel**
+  - [x] Message feed with natural language chat
+  - [x] Markdown rendering
+  - [x] Mermaid support
+- [x] **Code Viewer**
+  - [x] Implementation with Shiki
+  - [x] Line highlighting (initial support)
+- [x] **Documentation Browser**
+  - [x] Render repository statistics and analysis
 
 #### Self-check before merge
 
-- [ ] `npm run dev` launches the UI
-- [ ] UI is fully navigable using mock data
-- [ ] `npm run build` creates valid static assets in `dist/`
+- [x] `npm run dev` launches the UI
+- [x] UI is fully navigable with real data
+- [x] `npm run build` creates valid static assets in `dist/`
 
 ---
 
@@ -394,7 +394,6 @@
 #### Existing Viz Integration
 
 - [x] Decide: integrate existing D3 pipeline viz into webapp OR deprecate
-- [ ] If integrating: adapt `tracker.py` to emit events to webapp
 - [x] If deprecating: mark `viz_server.py` and `_viz_html.py` as legacy
 
 #### Self-check before merge

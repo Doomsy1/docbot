@@ -12,7 +12,7 @@ uv pip install -e .
 docbot /path/to/repo
 
 # Key flags
-docbot /path/to/repo -o ./output -j 8 -t 180 -m google/gemini-2.5-flash-lite-preview-09-2025
+docbot /path/to/repo -o ./output -j 8 -t 180 -m xiaomi/mimo-v2-flash
 docbot /path/to/repo --no-llm          # template-only mode (no LLM calls)
 docbot /path/to/repo --visualize       # open live D3.js pipeline visualization
 ```

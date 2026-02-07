@@ -135,12 +135,11 @@ async def get_scope_detail(scope_id: str) -> JSONResponse:
 async def get_graph() -> JSONResponse:
     """Return scope edges and optional Mermaid graph for visualization."""
     index = _load_index()
-    return JSONResponse(
-        {
-            "scope_edges": [{"from": a, "to": b} for a, b in index.scope_edges],
-            "mermaid_graph": index.mermaid_graph or None,
-        }
-    )
+    return JSONResponse({
+        "scopes": [s.scope_id for s in index.scopes],
+        "scope_edges": [{"from": a, "to": b} for a, b in index.scope_edges],
+        "mermaid_graph": index.mermaid_graph or None,
+    })
 
 
 @app.get("/api/files/{file_path:path}")

@@ -7,39 +7,38 @@ import TourViewer from './components/TourViewer';
 import ArchitectureDev from './components/ArchitectureDev';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph' | 'chat' | 'files' | 'tours' | 'dev-arch'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph' | 'files' | 'tours' | 'dev-arch'>('dashboard');
   const [selectedFile, setSelectedFile] = useState<string | undefined>();
+
+  const selectFile = (path: string) => {
+    setActiveTab('files');
+    setSelectedFile(path);
+  };
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-white text-black font-sans">
       <header className="border-b border-black p-4 flex justify-between items-center">
         <h1 className="text-xl font-bold tracking-tight">docbot</h1>
         <div className="flex gap-4 text-sm font-medium">
-          <button 
+          <button
             onClick={() => setActiveTab('dashboard')}
             className={`hover:underline ${activeTab === 'dashboard' ? 'underline decoration-2' : ''}`}
           >
             Dashboard
           </button>
-          <button 
+          <button
             onClick={() => setActiveTab('graph')}
             className={`hover:underline ${activeTab === 'graph' ? 'underline decoration-2' : ''}`}
           >
             Graph
           </button>
-          <button 
+          <button
             onClick={() => setActiveTab('tours')}
             className={`hover:underline ${activeTab === 'tours' ? 'underline decoration-2' : ''}`}
           >
             Tours
           </button>
-          <button 
-            onClick={() => setActiveTab('chat')}
-            className={`hover:underline ${activeTab === 'chat' ? 'underline decoration-2' : ''}`}
-          >
-            Chat
-          </button>
-          <button 
+          <button
             onClick={() => setActiveTab('files')}
             className={`hover:underline ${activeTab === 'files' ? 'underline decoration-2' : ''}`}
           >
@@ -53,39 +52,33 @@ export default function App() {
           </button>
         </div>
       </header>
-      
-      <main className="flex-1 overflow-hidden relative">
-        {activeTab === 'dashboard' && <Dashboard />}
-        {activeTab === 'tours' && (
-          <TourViewer onSelectFile={(path) => {
-             setActiveTab('files');
-             setSelectedFile(path);
-          }} />
-        )}
-        {activeTab === 'graph' && (
-          <Graph onSelectFile={(path) => {
-             setActiveTab('files');
-             setSelectedFile(path);
-          }} />
-        )}
-        {activeTab === 'chat' && (
-          <div className="max-w-2xl mx-auto h-full p-4">
-            <Chat onSelectFile={(path) => {
-              setActiveTab('files');
-              setSelectedFile(path);
-            }} />
-          </div>
-        )}
-        {activeTab === 'files' && (
-          <div className="h-full p-4">
-            <FileViewer 
-              filePath={selectedFile} 
-              onSelectFile={(path) => setSelectedFile(path)}
-            />
-          </div>
-        )}
-        {activeTab === 'dev-arch' && <ArchitectureDev />}
-      </main>
+
+      <div className="flex-1 flex overflow-hidden">
+        {/* Main content area */}
+        <main className="flex-1 overflow-hidden relative">
+          {activeTab === 'dashboard' && <Dashboard />}
+          {activeTab === 'tours' && (
+            <TourViewer onSelectFile={selectFile} />
+          )}
+          {activeTab === 'graph' && (
+            <Graph onSelectFile={selectFile} />
+          )}
+          {activeTab === 'files' && (
+            <div className="h-full p-4">
+              <FileViewer
+                filePath={selectedFile}
+                onSelectFile={(path) => setSelectedFile(path)}
+              />
+            </div>
+          )}
+          {activeTab === 'dev-arch' && <ArchitectureDev />}
+        </main>
+
+        {/* Chat sidebar - always visible */}
+        <div className="w-[380px] shrink-0 border-l border-black h-full">
+          <Chat onSelectFile={selectFile} />
+        </div>
+      </div>
     </div>
   )
 }

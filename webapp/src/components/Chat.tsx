@@ -69,7 +69,7 @@ export default function Chat({ onSelectFile }: ChatProps) {
   };
 
   return (
-    <div className="flex flex-col h-full bg-white border border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+    <div className="flex flex-col h-full bg-white">
       {/* Message List */}
       <div 
         ref={scrollRef}

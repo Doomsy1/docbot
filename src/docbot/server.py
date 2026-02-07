@@ -8,8 +8,10 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from .models import DocsIndex
+from .models import DocsIndex, Citation
 from .search import SearchIndex, SearchResult
+from .llm import LLMClient
+from pydantic import BaseModel
 
 app = FastAPI(title="docbot", version="0.1.0")
 
@@ -17,6 +19,14 @@ app = FastAPI(title="docbot", version="0.1.0")
 _run_dir: Path | None = None
 _index_cache: DocsIndex | None = None
 _search_index_cache: SearchIndex | None = None
+_llm_client: LLMClient | None = None
+
+class ChatRequest(BaseModel):
+    query: str
+
+class ChatResponse(BaseModel):
+    answer: str
+    citations: list[Citation]
 
 
 def _load_index() -> DocsIndex:
@@ -215,20 +225,71 @@ async def get_fs() -> JSONResponse:
     return JSONResponse(tree["children"])
 
 
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest) -> ChatResponse:
+    """Answer questions about the codebase using RAG."""
+    if not req.query:
+        return ChatResponse(answer="Please provide a query.", citations=[])
+
+    if _llm_client is None:
+        raise HTTPException(status_code=503, detail="LLM not configured (missing OPENROUTER_KEY).")
+
+    # 1. Search for context
+    idx = _load_search_index()
+    results = idx.search(req.query, limit=10)
+    
+    if not results:
+        # Fallback to general LLM if no direct code matches found?
+        # For now, let's keep it grounded in the project.
+        context = "No specific code matches found in the index."
+    else:
+        # 2. Build context
+        context_blocks = []
+        for r in results:
+            block = f"File: {r.citation.file}\n"
+            if r.citation.symbol:
+                block += f"Symbol: {r.citation.symbol}\n"
+            block += f"Snippet: {r.match_context}\n"
+            context_blocks.append(block)
+        context = "\n---\n".join(context_blocks)
+
+    # 3. Call LLM
+    system_prompt = """You are 'docbot', a helpful AI that explains codebases.
+Use the provided code context to answer the user's question accurately.
+If the answer isn't in the context, say you don't know based on the current indexing.
+BE CONCISE. Use Markdown for formatting.
+"""
+    user_prompt = f"Code Context:\n{context}\n\nUser Question: {req.query}"
+    
+    try:
+        answer = _llm_client.chat(user_prompt, system=system_prompt)
+        return ChatResponse(
+            answer=answer,
+            citations=[r.citation for r in results]
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM Error: {e}")
+
+
 
 # ---------------------------------------------------------------------------
 # Server launcher
 # ---------------------------------------------------------------------------
 
-def start_server(run_dir: Path, host: str = "127.0.0.1", port: int = 8000) -> None:
+def start_server(run_dir: Path, host: str = "127.0.0.1", port: int = 8000, api_key: str | None = None) -> None:
     """Start the webapp server pointing at a completed run directory."""
     import uvicorn
     from fastapi.staticfiles import StaticFiles
 
-    global _run_dir, _index_cache, _search_index_cache
+    global _run_dir, _index_cache, _search_index_cache, _llm_client
     _run_dir = run_dir.resolve()
     _index_cache = None
     _search_index_cache = None
+    
+    if api_key:
+        _llm_client = LLMClient(api_key=api_key)
+    else:
+        _llm_client = None
 
     # Locate webapp/dist relative to this file
     # dev mode: src/docbot/server.py -> ../../webapp/dist

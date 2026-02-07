@@ -314,7 +314,7 @@
 
 - [x] `GET /api/source/{file_path}` — serve source code
 - [x] `GET /api/search?q=term` — search symbols
-- [ ] `POST /api/chat` — AI chat endpoint
+- [x] `POST /api/chat` — AI chat endpoint
 - [ ] `GET /api/tours` — list guided tours
 - [ ] Tour generation logic integration
 

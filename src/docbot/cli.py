@@ -155,9 +155,13 @@ def serve(
 
     from .server import start_server
 
+    # Try loading .env so the chat endpoint has the key
+    _load_dotenv(Path.cwd())
+    api_key = os.environ.get("OPENROUTER_KEY", "").strip()
+
     console.print(f"[bold cyan]Serving[/bold cyan] {run_dir}")
     console.print(f"  http://{host}:{port}")
-    start_server(run_dir, host=host, port=port)
+    start_server(run_dir, host=host, port=port, api_key=api_key)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { IconSend, IconLoader2, IconQuote } from '@tabler/icons-react';
+import Mermaid from './Mermaid';
 
 interface Citation {
   file: string;
@@ -84,7 +85,25 @@ export default function Chat({ onSelectFile }: ChatProps) {
               
               <div className={`p-4 border border-black ${m.sender === 'user' ? 'bg-gray-50' : 'bg-white shadow-[4px_4px_0px_0px_rgba(30,58,138,0.1)]'}`}>
                 <div className="prose prose-sm max-w-none font-sans leading-relaxed text-gray-800">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  <ReactMarkdown 
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                        code({ node, inline, className, children, ...props }: any) {
+                          const match = /language-mermaid/.exec(className || '');
+                          const value = String(children).replace(/\n$/, '');
+                          
+                          if (!inline && match) {
+                            return <Mermaid chart={value} />;
+                          }
+                          
+                          return (
+                            <code className={className} {...props}>
+                              {children}
+                            </code>
+                          );
+                        }
+                    }}
+                  >
                     {m.text}
                   </ReactMarkdown>
                 </div>

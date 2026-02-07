@@ -129,35 +129,82 @@ def run(
 
 @app.command()
 def serve(
-    run_dir: Path = typer.Argument(..., help="Path to a completed docbot run directory."),
+    path: Path = typer.Argument(..., help="Path to a run directory or a repository to analyze then serve."),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
     port: int = typer.Option(8000, "--port", "-p", help="Port number."),
+    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID (for chat & tours)."),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Don't auto-open browser."),
 ) -> None:
-    """Launch the interactive webapp to explore a completed run."""
-    run_dir = Path(run_dir).resolve()
-    if not run_dir.is_dir():
-        console.print(f"[red]Error:[/red] {run_dir} is not a directory.")
+    """Launch the interactive webapp to explore a completed run.
+
+    PATH can be a docbot run directory (containing docs_index.json) or a
+    repository — in which case docbot runs analysis first, then serves.
+    """
+    path = Path(path).resolve()
+    if not path.is_dir():
+        console.print(f"[red]Error:[/red] {path} is not a directory.")
         raise typer.Exit(code=1)
 
-    index_path = run_dir / "docs_index.json"
-    if not index_path.exists():
-        # Fallback: check if run_dir contains run subdirectories (timestamped)
-        # and pick the latest one.
-        candidates = sorted([d for d in run_dir.iterdir() if d.is_dir() and (d / "docs_index.json").exists()])
-        if candidates:
-            latest = candidates[-1]
-            console.print(f"[yellow]No index in {run_dir}, using latest run:[/yellow] {latest.name}")
-            run_dir = latest
-            index_path = run_dir / "docs_index.json"
+    _load_dotenv(Path.cwd())
+
+    # Determine if this is a run directory or a repo to analyze.
+    run_dir = _resolve_run_dir(path)
+
+    if run_dir is None:
+        # Looks like a repo — run analysis first.
+        console.print(f"[bold]No docs_index.json found — running analysis on[/bold] {path}")
+        from .orchestrator import run_async
+
+        from .llm import LLMClient
+
+        llm_client = None
+        api_key = os.environ.get("OPENROUTER_KEY", "").strip()
+        if api_key:
+            llm_client = LLMClient(api_key=api_key, model=model)
         else:
-            console.print(f"[red]Error:[/red] No docs_index.json found in {run_dir} (or its subdirectories).")
-            raise typer.Exit(code=1)
+            console.print("[yellow]OPENROUTER_KEY not set. Running in template-only mode.[/yellow]")
+
+        run_dir = asyncio.run(run_async(repo_path=path, llm_client=llm_client))
+        console.print()
+
+    # Build LLM client for chat/tours.
+    from .llm import LLMClient
+
+    llm_client = None
+    api_key = os.environ.get("OPENROUTER_KEY", "").strip()
+    if api_key:
+        llm_client = LLMClient(api_key=api_key, model=model)
 
     from .server import start_server
 
+    url = f"http://{host}:{port}"
     console.print(f"[bold cyan]Serving[/bold cyan] {run_dir}")
-    console.print(f"  http://{host}:{port}")
-    start_server(run_dir, host=host, port=port)
+    console.print(f"  {url}")
+
+    if not no_browser:
+        import webbrowser
+        # Open after a short delay to let the server start.
+        import threading
+        threading.Timer(1.0, webbrowser.open, args=(url,)).start()
+
+    start_server(run_dir, host=host, port=port, llm_client=llm_client)
+
+
+def _resolve_run_dir(path: Path) -> Path | None:
+    """Check if *path* is or contains a docbot run directory. Returns None if not."""
+    if (path / "docs_index.json").exists():
+        return path
+
+    # Check for timestamped run subdirectories.
+    candidates = sorted(
+        [d for d in path.iterdir() if d.is_dir() and (d / "docs_index.json").exists()]
+    )
+    if candidates:
+        latest = candidates[-1]
+        console.print(f"[yellow]Using latest run:[/yellow] {latest.name}")
+        return latest
+
+    return None
 
 
 if __name__ == "__main__":

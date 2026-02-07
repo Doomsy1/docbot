@@ -19,6 +19,10 @@ dependencies = [
     "tree-sitter-go>=0.21",
     "tree-sitter-rust>=0.21",
     "tree-sitter-java>=0.21",
+    "tree-sitter-kotlin>=1.0",
+    "tree-sitter-c-sharp>=0.21",
+    "tree-sitter-ruby>=0.21",
+    "tree-sitter-swift>=0.0.1",
     # Webapp
     "fastapi>=0.110",
     "uvicorn>=0.27",

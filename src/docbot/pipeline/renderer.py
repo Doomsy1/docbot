@@ -11,7 +11,7 @@ import html as html_mod
 import logging
 from pathlib import Path
 
-from .models import DocsIndex, ScopeResult
+from ..models import DocsIndex, ScopeResult
 
 logger = logging.getLogger(__name__)
 
@@ -441,7 +441,7 @@ def _build_scope_details(index: DocsIndex) -> str:
 
 async def _generate_scope_doc_llm(scope: ScopeResult, llm_client: object) -> str:
     """LLM-written per-scope module documentation."""
-    from .llm import LLMClient
+    from ..llm import LLMClient
     assert isinstance(llm_client, LLMClient)
 
     languages = _lang_label(scope)
@@ -477,7 +477,7 @@ async def _generate_scope_doc_llm(scope: ScopeResult, llm_client: object) -> str
 
 
 async def _generate_readme_llm(index: DocsIndex, llm_client: object) -> str:
-    from .llm import LLMClient
+    from ..llm import LLMClient
     assert isinstance(llm_client, LLMClient)
 
     languages = _lang_label(index)
@@ -498,7 +498,7 @@ async def _generate_readme_llm(index: DocsIndex, llm_client: object) -> str:
 
 
 async def _generate_architecture_llm(index: DocsIndex, llm_client: object) -> str:
-    from .llm import LLMClient
+    from ..llm import LLMClient
     assert isinstance(llm_client, LLMClient)
 
     languages = _lang_label(index)

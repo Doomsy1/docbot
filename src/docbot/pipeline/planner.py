@@ -7,7 +7,7 @@ import logging
 import re
 from pathlib import PurePosixPath
 
-from .models import ScopePlan
+from ..models import ScopePlan
 from .scanner import ScanResult
 
 logger = logging.getLogger(__name__)
@@ -127,7 +127,7 @@ async def refine_plan_with_llm(
     llm_client: object,
 ) -> list[ScopePlan]:
     """Have the LLM refine the auto-generated scope plan."""
-    from .llm import LLMClient
+    from ..llm import LLMClient
     assert isinstance(llm_client, LLMClient)
 
     all_paths = [sf.path for sf in scan.source_files] if scan.source_files else scan.py_files

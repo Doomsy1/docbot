@@ -10,8 +10,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .llm import LLMClient
-from .models import Citation, DocsIndex
+from ..llm import LLMClient
+from ..models import Citation, DocsIndex
 from .search import SearchIndex
 
 logger = logging.getLogger(__name__)

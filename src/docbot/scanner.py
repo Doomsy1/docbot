@@ -1,10 +1,14 @@
-"""Repo scanner -- walks the file tree and classifies Python files."""
+"""Repo scanner -- walks the file tree and classifies source files."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import SourceFile
 
 # Directories to skip unconditionally.
 SKIP_DIRS: set[str] = {".git", ".venv", "venv", "__pycache__", "dist", "build", ".tox", ".eggs", "node_modules", ".mypy_cache", ".pytest_cache"}
@@ -13,25 +17,51 @@ SKIP_DIRS: set[str] = {".git", ".venv", "venv", "__pycache__", "dist", "build", 
 ENTRYPOINT_NAMES: set[str] = {"main.py", "app.py", "server.py", "cli.py", "__main__.py", "wsgi.py", "asgi.py"}
 
 
+# Extension → language name mapping for multi-language support.
+LANGUAGE_EXTENSIONS: dict[str, str] = {
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".kt": "kotlin",
+    ".cs": "csharp",
+    ".swift": "swift",
+    ".rb": "ruby",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".h": "c",
+    ".hpp": "cpp",
+}
+
+
 @dataclass
 class ScanResult:
-    """Collected information about a Python repository."""
+    """Collected information about a repository."""
 
     root: Path
-    py_files: list[str] = field(default_factory=list)       # repo-relative paths
-    packages: list[str] = field(default_factory=list)        # repo-relative dirs with __init__.py
-    entrypoints: list[str] = field(default_factory=list)     # repo-relative paths
+    py_files: list[str] = field(default_factory=list)           # repo-relative paths (Python only, legacy)
+    source_files: list[SourceFile] = field(default_factory=list) # all discovered source files
+    packages: list[str] = field(default_factory=list)            # repo-relative dirs with __init__.py
+    entrypoints: list[str] = field(default_factory=list)         # repo-relative paths
+    languages: list[str] = field(default_factory=list)           # detected languages
 
 
 def scan_repo(root: Path) -> ScanResult:
-    """Walk *root* and return all Python files, packages, and entrypoints.
+    """Walk *root* and return all source files, packages, and entrypoints.
 
     Paths are returned **relative to root** using forward slashes for
     portability.
     """
+    from .models import SourceFile
+
     root = root.resolve()
     result = ScanResult(root=root)
     seen_packages: set[str] = set()
+    seen_languages: set[str] = set()
 
     for dirpath, dirnames, filenames in os.walk(root):
         # Prune excluded directories in-place so os.walk skips them.
@@ -42,22 +72,32 @@ def scan_repo(root: Path) -> ScanResult:
             rel_dir = ""
 
         for fname in filenames:
-            if not fname.endswith(".py"):
-                continue
+            ext = os.path.splitext(fname)[1].lower()
+            language = LANGUAGE_EXTENSIONS.get(ext)
 
             rel_path = f"{rel_dir}/{fname}" if rel_dir else fname
-            result.py_files.append(rel_path)
 
-            # Package detection
-            if fname == "__init__.py" and rel_dir and rel_dir not in seen_packages:
-                seen_packages.add(rel_dir)
-                result.packages.append(rel_dir)
+            # Track all recognised source files
+            if language:
+                result.source_files.append(SourceFile(path=rel_path, language=language))
+                seen_languages.add(language)
 
-            # Entrypoint detection
-            if fname in ENTRYPOINT_NAMES:
-                result.entrypoints.append(rel_path)
+            # Legacy: keep py_files populated for backward compatibility
+            if ext == ".py":
+                result.py_files.append(rel_path)
+
+                # Package detection
+                if fname == "__init__.py" and rel_dir and rel_dir not in seen_packages:
+                    seen_packages.add(rel_dir)
+                    result.packages.append(rel_dir)
+
+                # Entrypoint detection
+                if fname in ENTRYPOINT_NAMES:
+                    result.entrypoints.append(rel_path)
 
     result.py_files.sort()
+    result.source_files.sort(key=lambda sf: sf.path)
     result.packages.sort()
     result.entrypoints.sort()
+    result.languages = sorted(seen_languages)
     return result

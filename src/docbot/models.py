@@ -48,6 +48,27 @@ class RaisedError(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Multi-language support (Phase 0 contracts)
+# ---------------------------------------------------------------------------
+
+class SourceFile(BaseModel):
+    """A discovered source file in the repository."""
+
+    path: str       # repo-relative path (forward slashes)
+    language: str   # "python", "typescript", "go", "rust", "java", etc.
+
+
+class FileExtraction(BaseModel):
+    """Output from any extractor (AST, tree-sitter, or LLM)."""
+
+    symbols: list[PublicSymbol] = Field(default_factory=list)
+    imports: list[str] = Field(default_factory=list)
+    env_vars: list[EnvVar] = Field(default_factory=list)
+    raised_errors: list[RaisedError] = Field(default_factory=list)
+    citations: list[Citation] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Scope-level models (explorer input / output)
 # ---------------------------------------------------------------------------
 
@@ -75,6 +96,7 @@ class ScopeResult(BaseModel):
     raised_errors: list[RaisedError] = Field(default_factory=list)
     imports: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
 
     # If exploration failed, store the reason here.
     error: str | None = None
@@ -94,6 +116,7 @@ class DocsIndex(BaseModel):
     public_api: list[PublicSymbol] = Field(default_factory=list)
     entrypoints: list[str] = Field(default_factory=list)
     scope_edges: list[tuple[str, str]] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
     cross_scope_analysis: str = ""
     mermaid_graph: str = ""
 

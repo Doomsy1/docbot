@@ -43,15 +43,15 @@ VIZ_HTML = r"""<!DOCTYPE html>
   }
   #legend .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
   #legend .swatch {
-    width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0;
+    width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
   }
 
   /* Pulse animation for running nodes */
   @keyframes pulse {
     0%, 100% { opacity: 1; }
-    50% { opacity: 0.6; }
+    50% { opacity: 0.55; }
   }
-  .node-running rect { animation: pulse 1.4s ease-in-out infinite; }
+  .node-running circle { animation: pulse 1.4s ease-in-out infinite; }
 </style>
 </head>
 <body>
@@ -79,13 +79,26 @@ const STATE_COLORS = {
   error:    "#ef4444",
 };
 
-const NODE_W = 150, NODE_H = 44, NODE_R = 8;
+// Radii for the circles: root is larger
+const ROOT_R = 30;
+const NODE_R = 20;
+const LEAF_R = 15;
+
+function nodeRadius(d) {
+  if (!d.parent) return ROOT_R;
+  return d.children && d.children.length ? NODE_R : LEAF_R;
+}
+
+// Radial projection: angle x, radius y → cartesian
+function radialPoint(x, y) {
+  return [y * Math.cos(x - Math.PI / 2), y * Math.sin(x - Math.PI / 2)];
+}
 
 const svg = d3.select("#canvas").append("svg");
 const gRoot = svg.append("g");
 
 // zoom / pan
-const zoom = d3.zoom().scaleExtent([0.2, 3]).on("zoom", (e) => {
+const zoom = d3.zoom().scaleExtent([0.15, 4]).on("zoom", (e) => {
   gRoot.attr("transform", e.transform);
 });
 svg.call(zoom);
@@ -112,8 +125,18 @@ function render(data) {
   if (!rootData) return;
 
   const root = d3.hierarchy(rootData);
-  const treeLayout = d3.tree().nodeSize([NODE_W + 30, NODE_H + 50]);
+  const nodeCount = root.descendants().length;
+
+  // Scale the radius based on how many nodes we have
+  const baseRadius = Math.max(140, nodeCount * 18);
+  const treeLayout = d3.tree()
+    .size([2 * Math.PI, baseRadius])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth || 1);
   treeLayout(root);
+
+  // Pin root at center
+  root.x = 0;
+  root.y = 0;
 
   // update stats
   const total = data.nodes.length;
@@ -125,14 +148,17 @@ function render(data) {
   document.getElementById("stats").textContent = statsText;
 
   // --- Links ---
-  const linkGen = d3.linkVertical().x(d => d.x).y(d => d.y);
-  const links = gLinks.selectAll("path.link").data(root.links(), d => d.source.data.id + "-" + d.target.data.id);
+  const linkGen = d3.linkRadial().angle(d => d.x).radius(d => d.y);
+  const links = gLinks.selectAll("path.link")
+    .data(root.links(), d => d.source.data.id + "-" + d.target.data.id);
+
   links.enter()
     .append("path").attr("class", "link")
     .attr("fill", "none").attr("stroke", "#475569").attr("stroke-width", 1.5)
     .attr("d", linkGen)
     .attr("opacity", 0)
-    .transition().duration(300).attr("opacity", 1);
+    .transition().duration(300).attr("opacity", 0.7);
+
   links.transition().duration(300).attr("d", linkGen);
   links.exit().transition().duration(200).attr("opacity", 0).remove();
 
@@ -143,24 +169,39 @@ function render(data) {
   // enter
   const enter = nodes.enter().append("g")
     .attr("class", d => "node node-" + d.data.state)
-    .attr("transform", d => `translate(${d.x},${d.y})`);
+    .attr("transform", d => {
+      const [x, y] = d.parent ? radialPoint(d.x, d.y) : [0, 0];
+      return `translate(${x},${y})`;
+    });
 
-  enter.append("rect")
-    .attr("x", -NODE_W / 2).attr("y", -NODE_H / 2)
-    .attr("width", NODE_W).attr("height", NODE_H)
-    .attr("rx", NODE_R).attr("ry", NODE_R)
+  enter.append("circle")
+    .attr("r", d => nodeRadius(d))
     .attr("fill", d => STATE_COLORS[d.data.state] || "#64748b")
-    .attr("opacity", 0.9);
+    .attr("stroke", "#1e293b")
+    .attr("stroke-width", 2)
+    .attr("opacity", 0.92);
 
+  // name label
   enter.append("text")
-    .attr("text-anchor", "middle").attr("dy", "-0.15em")
-    .attr("fill", "#f8fafc").attr("font-size", "12px").attr("font-weight", "600")
-    .text(d => d.data.name.length > 18 ? d.data.name.slice(0, 16) + "…" : d.data.name);
+    .attr("class", "label")
+    .attr("text-anchor", "middle")
+    .attr("dy", d => nodeRadius(d) + 14)
+    .attr("fill", "#e2e8f0")
+    .attr("font-size", d => d.parent ? "10px" : "12px")
+    .attr("font-weight", d => d.parent ? "500" : "700")
+    .text(d => {
+      const n = d.data.name;
+      return n.length > 16 ? n.slice(0, 14) + "…" : n;
+    });
 
+  // elapsed label (inside circle)
   enter.append("text")
     .attr("class", "elapsed")
-    .attr("text-anchor", "middle").attr("dy", "1.2em")
-    .attr("fill", "#cbd5e1").attr("font-size", "10px")
+    .attr("text-anchor", "middle")
+    .attr("dy", "0.35em")
+    .attr("fill", "#f8fafc")
+    .attr("font-size", d => d.parent ? "9px" : "11px")
+    .attr("font-weight", "600")
     .text(d => d.data.elapsed > 0 ? d.data.elapsed + "s" : "");
 
   // update
@@ -168,11 +209,18 @@ function render(data) {
   merged
     .attr("class", d => "node node-" + d.data.state)
     .transition().duration(300)
-    .attr("transform", d => `translate(${d.x},${d.y})`);
+    .attr("transform", d => {
+      const [x, y] = d.parent ? radialPoint(d.x, d.y) : [0, 0];
+      return `translate(${x},${y})`;
+    });
 
-  merged.select("rect")
+  merged.select("circle")
     .transition().duration(300)
+    .attr("r", d => nodeRadius(d))
     .attr("fill", d => STATE_COLORS[d.data.state] || "#64748b");
+
+  merged.select("text.label")
+    .attr("dy", d => nodeRadius(d) + 14);
 
   merged.select("text.elapsed")
     .text(d => d.data.elapsed > 0 ? d.data.elapsed + "s" : "");
@@ -190,21 +238,25 @@ function autoFit(root) {
   const nodes = root.descendants();
   if (!nodes.length) return;
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  nodes.forEach(n => {
-    minX = Math.min(minX, n.x - NODE_W / 2);
-    maxX = Math.max(maxX, n.x + NODE_W / 2);
-    minY = Math.min(minY, n.y - NODE_H / 2);
-    maxY = Math.max(maxY, n.y + NODE_H / 2);
+  nodes.forEach(d => {
+    const [px, py] = d.parent ? radialPoint(d.x, d.y) : [0, 0];
+    const r = nodeRadius(d) + 20; // padding around node
+    minX = Math.min(minX, px - r);
+    maxX = Math.max(maxX, px + r);
+    minY = Math.min(minY, py - r);
+    maxY = Math.max(maxY, py + r);
   });
-  const pad = 60;
+  const pad = 50;
   const w = maxX - minX + pad * 2;
   const h = maxY - minY + pad * 2;
   const svgEl = svg.node();
   const sw = svgEl.clientWidth;
   const sh = svgEl.clientHeight;
-  const scale = Math.min(sw / w, sh / h, 1.5);
-  const tx = sw / 2 - (minX + maxX) / 2 * scale;
-  const ty = sh / 2 - (minY + maxY) / 2 * scale;
+  const scale = Math.min(sw / w, sh / h, 1.8);
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const tx = sw / 2 - cx * scale;
+  const ty = sh / 2 - cy * scale;
   svg.transition().duration(400).call(
     zoom.transform,
     d3.zoomIdentity.translate(tx, ty).scale(scale)

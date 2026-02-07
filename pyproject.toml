@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "docbot"
+version = "0.1.0"
+description = "Generate thorough documentation for a Python repo using parallel exploration and map-reduce."
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.9",
+    "pydantic>=2.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+docbot = "docbot.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/docbot"]

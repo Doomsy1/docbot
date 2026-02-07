@@ -50,9 +50,10 @@ SCAN -> PLAN -> EXPLORE (parallel) -> REDUCE -> RENDER (parallel)
 5. **Renderer** (`renderer.py`) -- generates per-scope markdown docs, README, architecture overview, API reference, and HTML report; all narrative docs are LLM-written in parallel
 
 **Extraction layer** (`extractors/`) -- pluggable architecture with three backends:
-- `python_extractor.py` -- Python's built-in `ast` module (zero deps)
-- `treesitter_extractor.py` -- tree-sitter for TS/JS, Go, Rust, Java, Kotlin, C#, Swift, Ruby
-- `llm_extractor.py` -- LLM-based extraction for any unsupported language
+
+-   `python_extractor.py` -- Python's built-in `ast` module (zero deps)
+-   `treesitter_extractor.py` -- tree-sitter for TS/JS, Go, Rust, Java, Kotlin, C#, Swift, Ruby
+-   `llm_extractor.py` -- LLM-based extraction for any unsupported language
 
 **LLM is central, not optional.** The `--no-llm` flag exists as a fallback but the real value comes from LLM-generated narratives at every stage. The LLM client (`llm.py`) is a minimal async wrapper around OpenRouter using only stdlib `urllib.request` + `asyncio.to_thread()`.
 
@@ -64,25 +65,26 @@ SCAN -> PLAN -> EXPLORE (parallel) -> REDUCE -> RENDER (parallel)
 
 ## Key Data Models (`models.py`)
 
-- `Citation` -- source location (file, line_start, line_end, symbol, snippet) -- used for traceability throughout
-- `ScopePlan` -> `ScopeResult` -- the core unit of work; a scope groups related files for documentation
-- `DocsIndex` -- the global merged output containing all scopes, symbols, env vars, edges, and LLM analysis
-- `RunMeta` -- execution statistics for a pipeline run
-- `ProjectState` -- persistent state tracking (last commit, scope-file map) stored in `.docbot/state.json`
-- `DocbotConfig` -- user configuration (model, concurrency, timeout, etc.) stored in `.docbot/config.toml`
+-   `Citation` -- source location (file, line_start, line_end, symbol, snippet) -- used for traceability throughout
+-   `ScopePlan` -> `ScopeResult` -- the core unit of work; a scope groups related files for documentation
+-   `DocsIndex` -- the global merged output containing all scopes, symbols, env vars, edges, and LLM analysis
+-   `RunMeta` -- execution statistics for a pipeline run
+-   `ProjectState` -- persistent state tracking (last commit, scope-file map) stored in `.docbot/state.json`
+-   `DocbotConfig` -- user configuration (model, concurrency, timeout, etc.) stored in `.docbot/config.toml`
 
 ## Conventions
 
-- All modules use `from __future__ import annotations` and Python 3.10+ union syntax (`str | None`)
-- CPU-bound work (AST parsing, file I/O) runs via `asyncio.to_thread()`; concurrency controlled by `asyncio.Semaphore`
-- LLM prompt strings are module-level constants prefixed with `_` (e.g., `_EXPLORER_PROMPT`, `_MERMAID_SYSTEM`)
-- Per-file extraction failures are caught and recorded -- they never kill scope or pipeline
-- LLM failures gracefully degrade to template-based fallbacks
-- Output goes to `.docbot/` project directory (git-tracked config only; everything else gitignored)
+-   All modules use `from __future__ import annotations` and Python 3.10+ union syntax (`str | None`)
+-   CPU-bound work (AST parsing, file I/O) runs via `asyncio.to_thread()`; concurrency controlled by `asyncio.Semaphore`
+-   LLM prompt strings are module-level constants prefixed with `_` (e.g., `_EXPLORER_PROMPT`, `_MERMAID_SYSTEM`)
+-   Per-file extraction failures are caught and recorded -- they never kill scope or pipeline
+-   LLM failures gracefully degrade to template-based fallbacks
+-   Output goes to `.docbot/` project directory (git-tracked config only; everything else gitignored)
 
 ## Roadmap Context
 
 See `ROADMAP.md` and `CHECKLIST.md` for the planned evolution:
-- **Phase 1:** Multi-language support via tree-sitter + LLM fallback extraction. [COMPLETE]
-- **Phase 2:** Interactive webapp -- FastAPI backend + React SPA. [COMPLETE]
-- **Phase 3:** Git-integrated CLI with `.docbot/` project directory, incremental updates, documentation snapshots/history, before/after comparison (`docbot diff`), git lifecycle hooks (post-merge), change-aware webapp, pipeline visualization replay, and src package reorganization. [IN PROGRESS]
+
+-   **Phase 1:** Multi-language support via tree-sitter + LLM fallback extraction. [COMPLETE]
+-   **Phase 2:** Interactive webapp -- FastAPI backend + React SPA. [COMPLETE]
+-   **Phase 3:** Git-integrated CLI with `.docbot/` project directory, incremental updates, documentation snapshots/history, before/after comparison (`docbot diff`), git lifecycle hooks (post-merge), change-aware webapp, pipeline visualization replay, and src package reorganization. [IN PROGRESS]

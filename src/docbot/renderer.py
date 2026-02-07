@@ -560,56 +560,75 @@ def render(index: DocsIndex, out_dir: Path) -> list[Path]:
     return written
 
 
-async def render_with_llm(index: DocsIndex, out_dir: Path, llm_client: object) -> list[Path]:
-    """Write all docs with LLM at every step, in parallel. Falls back to templates on failure."""
+async def render_with_llm(
+    index: DocsIndex,
+    out_dir: Path,
+    llm_client: object,
+    on_complete: callable | None = None,
+) -> list[Path]:
+    """Write all docs with LLM at every step, in parallel. Falls back to templates on failure.
+    
+    Args:
+        index: The documentation index
+        out_dir: Output directory
+        llm_client: LLM client for generation
+        on_complete: Optional callback(task_id: str) called when each task completes
+    """
     written: list[Path] = []
 
     docs_dir = out_dir / "docs"
     modules_dir = docs_dir / "modules"
     modules_dir.mkdir(parents=True, exist_ok=True)
 
-    # -- Generate ALL LLM content in parallel --------------------------------
+    # Results storage
+    scope_contents: dict[str, tuple[ScopeResult, str]] = {}
+    readme_content: str = ""
+    arch_content: str = ""
 
-    async def _scope_task(scope: ScopeResult) -> tuple[ScopeResult, str]:
+    async def _scope_task(scope: ScopeResult) -> None:
+        nonlocal scope_contents
         if scope.error:
-            return scope, _render_scope_md_template(scope)
-        try:
-            content = await _generate_scope_doc_llm(scope, llm_client)
-            return scope, content
-        except Exception as exc:
-            logger.warning("LLM scope doc for %s failed, using template: %s", scope.scope_id, exc)
-            return scope, _render_scope_md_template(scope)
+            content = _render_scope_md_template(scope)
+        else:
+            try:
+                content = await _generate_scope_doc_llm(scope, llm_client)
+            except Exception as exc:
+                logger.warning("LLM scope doc for %s failed, using template: %s", scope.scope_id, exc)
+                content = _render_scope_md_template(scope)
+        scope_contents[scope.scope_id] = (scope, content)
+        if on_complete:
+            on_complete(f"renderer.{scope.scope_id}")
 
-    async def _readme_task() -> str:
+    async def _readme_task() -> None:
+        nonlocal readme_content
         try:
-            return await _generate_readme_llm(index, llm_client)
+            readme_content = await _generate_readme_llm(index, llm_client)
         except Exception as exc:
             logger.warning("LLM README failed, using template: %s", exc)
-            return _render_readme_template(index)
+            readme_content = _render_readme_template(index)
+        if on_complete:
+            on_complete("renderer.readme")
 
-    async def _arch_task() -> str:
+    async def _arch_task() -> None:
+        nonlocal arch_content
         try:
-            return await _generate_architecture_llm(index, llm_client)
+            arch_content = await _generate_architecture_llm(index, llm_client)
         except Exception as exc:
             logger.warning("LLM architecture failed, using template: %s", exc)
-            return _render_architecture_template(index)
+            arch_content = _render_architecture_template(index)
+        if on_complete:
+            on_complete("renderer.arch")
 
-    # Fire all scope docs + README + architecture concurrently
-    scope_coros = [_scope_task(s) for s in index.scopes]
-    all_results = await asyncio.gather(
-        *scope_coros,
-        _readme_task(),
-        _arch_task(),
-    )
-
-    # Unpack: first N results are scope docs, then README, then architecture
-    scope_results = all_results[:len(index.scopes)]
-    readme_content = all_results[len(index.scopes)]
-    arch_content = all_results[len(index.scopes) + 1]
+    # Run all tasks concurrently - each calls on_complete when done
+    async with asyncio.TaskGroup() as tg:
+        for scope in index.scopes:
+            tg.create_task(_scope_task(scope))
+        tg.create_task(_readme_task())
+        tg.create_task(_arch_task())
 
     # -- Write everything to disk -------------------------------------------
 
-    for scope, content in scope_results:
+    for scope_id, (scope, content) in scope_contents.items():
         p = modules_dir / f"{scope.scope_id}.generated.md"
         p.write_text(content, encoding="utf-8")
         written.append(p)

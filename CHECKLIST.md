@@ -235,14 +235,12 @@ full experience.
 
 #### Renderer Refactor (`src/docbot/renderer.py`) -- Dev C
 
-- [ ] Extract `render_scope_doc(scope, index, out_dir, llm_client)` -- single scope markdown
-- [ ] Extract `render_readme(index, out_dir, llm_client)` -- README.generated.md
-- [ ] Extract `render_architecture(index, out_dir, llm_client)` -- architecture.generated.md
-- [ ] Extract `render_api_reference(index, out_dir)` -- api.generated.md (template-only)
-- [ ] Extract `render_html_report(index, out_dir)` -- index.html
-- [ ] Refactor `render()` and `render_with_llm()` to call individual functions (no behavior change)
-
-> **NOTE:** This is the only remaining item from 3B. Currently `update_async()` re-renders all docs.
+- [x] Extract `render_scope_doc(scope, index, out_dir, llm_client)` -- single scope markdown
+- [x] Extract `render_readme(index, out_dir, llm_client)` -- README.generated.md
+- [x] Extract `render_architecture(index, out_dir, llm_client)` -- architecture.generated.md
+- [x] Extract `render_api_reference(index, out_dir)` -- api.generated.md (template-only)
+- [x] Extract `render_html_report(index, out_dir)` -- index.html
+- [x] Refactor `render()` and `render_with_llm()` to call individual functions (no behavior change)
 
 #### CLI Update -- Dev A
 

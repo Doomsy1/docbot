@@ -24,6 +24,7 @@ _index_cache: DocsIndex | None = None
 _search_index_cache: SearchIndex | None = None
 _llm_client: LLMClient | None = None
 _tours_cache: list[dict] | None = None
+_service_details_cache: dict | None = None
 
 
 def _load_index() -> DocsIndex:
@@ -286,30 +287,40 @@ def _detect_external_services(index: "DocsIndex") -> tuple[list[dict], list[dict
     # Also check global env vars
     global_env = {e.name.lower() for e in index.env_vars}
 
-    found_services: dict[str, set[str]] = {}  # service_id -> set of scope_ids
+    # service_id -> { scope_id -> set of matched imports }
+    found_services: dict[str, dict[str, set[str]]] = {}
 
     for svc_id, svc in _EXTERNAL_SERVICES.items():
         imp_kws = svc["import_keywords"]
 
         for s in index.scopes:
-            # Only match on direct imports — env vars are too indirect
-            # (config files define env vars but don't actually call the service)
-            for imp in scope_imp[s.scope_id]:
-                if any(kw in imp for kw in imp_kws):
-                    found_services.setdefault(svc_id, set()).add(s.scope_id)
-                    break
+            matched_imports: set[str] = set()
+            # Use original-case imports for display
+            orig_imports = {i.lower(): i for i in s.imports}
+            for imp_lower, imp_orig in orig_imports.items():
+                if any(kw in imp_lower for kw in imp_kws):
+                    matched_imports.add(imp_orig)
+            if matched_imports:
+                found_services.setdefault(svc_id, {})[s.scope_id] = matched_imports
 
     external_nodes = []
     external_edges = []
-    for svc_id, scope_ids in found_services.items():
+    for svc_id, scope_map in found_services.items():
         svc = _EXTERNAL_SERVICES[svc_id]
+        # Collect all matched imports across scopes for the node
+        all_imports = sorted({imp for imps in scope_map.values() for imp in imps})
         external_nodes.append({
             "id": f"ext_{svc_id}",
             "title": svc["title"],
             "icon": svc["icon"],
+            "matched_imports": all_imports,
         })
-        for sid in scope_ids:
-            external_edges.append({"from": sid, "to": f"ext_{svc_id}"})
+        for sid, matched in scope_map.items():
+            external_edges.append({
+                "from": sid,
+                "to": f"ext_{svc_id}",
+                "imports": sorted(matched),
+            })
 
     return external_nodes, external_edges
 
@@ -354,6 +365,68 @@ async def get_graph() -> JSONResponse:
             "external_edges": external_edges,
         }
     )
+
+
+@app.get("/api/service-details")
+async def get_service_details() -> JSONResponse:
+    """Return LLM-generated usage descriptions for each external service per scope."""
+    global _service_details_cache
+    if _service_details_cache is not None:
+        return JSONResponse(_service_details_cache)
+
+    index = _load_index()
+    external_nodes, external_edges = _detect_external_services(index)
+
+    if not external_nodes:
+        _service_details_cache = {}
+        return JSONResponse({})
+
+    # Build scope summary lookup
+    scope_summaries: dict[str, str] = {}
+    for s in index.scopes:
+        scope_summaries[s.scope_id] = s.summary or s.title
+
+    # Build per-service context for the LLM prompt
+    service_contexts: list[str] = []
+    for node in external_nodes:
+        edges = [e for e in external_edges if e["to"] == node["id"]]
+        scope_parts = []
+        for edge in edges:
+            scope_id = edge["from"]
+            imports = edge.get("imports", [])
+            summary = scope_summaries.get(scope_id, scope_id)
+            scope_parts.append(
+                f'  - scope "{scope_id}": imports {imports}. Scope summary: "{summary}"'
+            )
+        service_contexts.append(
+            f'Service: {node["title"]} (id: {node["id"]})\n'
+            + "\n".join(scope_parts)
+        )
+
+    prompt = (
+        "You are a technical documentation writer. For each external service and scope pair below, "
+        "write a 1-2 sentence explanation of HOW and WHY that scope uses the service. "
+        "Be specific — reference the actual libraries/imports and what they enable. "
+        "Use the scope summary to understand the scope's purpose.\n\n"
+        + "\n\n".join(service_contexts)
+        + '\n\nRespond with JSON: {"<service_id>": {"<scope_id>": "<explanation>", ...}, ...}\n'
+        "Only include the JSON object, no other text."
+    )
+
+    if _llm_client is None:
+        # Fallback: no LLM available
+        _service_details_cache = {}
+        return JSONResponse({})
+
+    try:
+        raw = await _llm_client.ask(prompt, json_mode=True)
+        result = json.loads(raw)
+        _service_details_cache = result
+        return JSONResponse(result)
+    except Exception as exc:
+        logger.warning("Failed to generate service details: %s", exc)
+        _service_details_cache = {}
+        return JSONResponse({})
 
 
 @app.get("/api/files/{file_path:path}")
@@ -1001,17 +1074,18 @@ def start_server(
     import uvicorn
     from fastapi.staticfiles import StaticFiles
 
-    global _run_dir, _index_cache, _search_index_cache, _llm_client, _tours_cache
+    global _run_dir, _index_cache, _search_index_cache, _llm_client, _tours_cache, _service_details_cache
     _run_dir = run_dir.resolve()
     _index_cache = None
     _search_index_cache = None
     _tours_cache = None
+    _service_details_cache = None
     _llm_client = llm_client
 
     here = Path(__file__).parent.resolve()
     potential_dists = [
         here / "web_dist",  # Bundled package
-        here.parents[1] / "webapp" / "dist",  # Editable/source checkout
+        here.parents[2] / "webapp" / "dist",  # Editable/source checkout (src/docbot/web -> repo root)
     ]
 
     dist_dir = None

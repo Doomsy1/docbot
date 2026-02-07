@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { IconChartBar, IconFiles, IconCode, IconBook, IconCpu, IconChevronDown, IconChevronRight } from '@tabler/icons-react';
+import { IconChartBar, IconFiles, IconCode, IconBook, IconCpu, IconChevronDown, IconChevronRight, IconCloud, IconDatabase, IconBrain, IconApi, IconArrowRight, IconGitCommit, IconHistory } from '@tabler/icons-react';
+import Mermaid from './Mermaid';
 
 interface ScopeSummary {
   scope_id: string;
@@ -42,12 +43,105 @@ interface IndexData {
   entrypoint_groups: Record<string, string[]>;
 }
 
+interface ExternalNode {
+  id: string;
+  title: string;
+  icon: string;
+  matched_imports?: string[];
+}
+
+interface ExternalEdge {
+  from: string;
+  to: string;
+  imports?: string[];
+}
+
+interface ScopeEdge {
+  from: string;
+  to: string;
+}
+
+interface GraphData {
+  scopes: ScopeSummary[];
+  scope_edges: ScopeEdge[];
+  external_nodes: ExternalNode[];
+  external_edges: ExternalEdge[];
+}
+
+interface HistorySnapshot {
+  run_id: string;
+  timestamp: string;
+  commit_sha: string | null;
+  commit_msg: string | null;
+  scope_count: number;
+  symbol_count: number;
+  entrypoint_count: number;
+}
+
+const SERVICE_ICONS: Record<string, typeof IconCloud> = {
+  db: IconDatabase,
+  cloud: IconCloud,
+  ai: IconBrain,
+  api: IconApi,
+};
+
+const SERVICE_COLORS: Record<string, { bg: string; badge: string; border: string; text: string }> = {
+  db: { bg: 'bg-emerald-50', badge: 'bg-emerald-100 text-emerald-700', border: 'border-emerald-200', text: 'text-emerald-700' },
+  cloud: { bg: 'bg-sky-50', badge: 'bg-sky-100 text-sky-700', border: 'border-sky-200', text: 'text-sky-700' },
+  ai: { bg: 'bg-violet-50', badge: 'bg-violet-100 text-violet-700', border: 'border-violet-200', text: 'text-violet-700' },
+  api: { bg: 'bg-amber-50', badge: 'bg-amber-100 text-amber-700', border: 'border-amber-200', text: 'text-amber-700' },
+};
+
+const SERVICE_TYPE_LABELS: Record<string, string> = {
+  db: 'Database',
+  cloud: 'Cloud Storage',
+  ai: 'AI / ML',
+  api: 'External API',
+  auth: 'Auth Provider',
+};
+
+const SERVICE_DESCRIPTIONS: Record<string, string> = {
+  // Databases
+  ext_mongodb: 'MongoDB is a NoSQL document database used for storing and querying application data as flexible JSON-like documents. Scopes using it likely handle data persistence, CRUD operations, and query logic.',
+  ext_postgres: 'PostgreSQL is a relational database used for structured data storage with SQL queries, transactions, and strong consistency guarantees. Scopes using it handle core data models and business logic.',
+  ext_redis: 'Redis is an in-memory key-value store commonly used for caching, session management, rate limiting, and pub/sub messaging to improve application performance.',
+  ext_mysql: 'MySQL is a relational database used for structured data storage with SQL. Scopes using it manage persistent application state, user records, and transactional data.',
+  // Cloud / storage
+  ext_firebase: 'Firebase is a Google-backed platform providing real-time databases, authentication, hosting, and cloud functions. Scopes using it typically manage user auth, real-time data sync, or push notifications.',
+  ext_supabase: 'Supabase is an open-source Firebase alternative built on PostgreSQL, providing a database, auth, real-time subscriptions, and storage APIs.',
+  ext_aws_s3: 'AWS S3 (Simple Storage Service) is used for storing and serving files like images, videos, documents, and backups. Scopes using it handle file uploads, asset management, or static content.',
+  ext_digitalocean: 'DigitalOcean Spaces or infrastructure is used for cloud hosting, object storage, or compute resources.',
+  ext_gcs: 'Google Cloud Storage is used for storing and serving files, media assets, and data blobs in the Google Cloud ecosystem.',
+  // AI / LLM
+  ext_openai: 'OpenAI provides GPT language models and APIs for text generation, embeddings, image generation, and other AI capabilities. Scopes using it handle AI-powered features like chat, summarization, or content generation.',
+  ext_gemini: 'Google Gemini is a multimodal AI model used for text generation, reasoning, image understanding, and other intelligent processing tasks. Scopes using it integrate AI-driven analysis or generation features.',
+  ext_anthropic: 'Anthropic provides the Claude family of AI models for text generation, analysis, and reasoning. Scopes using it power AI chat, content generation, or automated analysis features.',
+  ext_openrouter: 'OpenRouter is an API gateway that provides unified access to multiple LLM providers (OpenAI, Anthropic, Google, etc.). Scopes using it make LLM calls for text generation or analysis.',
+  // Auth
+  ext_auth0: 'Auth0 is an identity platform for authentication and authorization, handling user login, SSO, MFA, and access control.',
+  ext_clerk: 'Clerk is a user authentication and management platform providing sign-in/sign-up flows, session management, and user profiles.',
+  // Messaging / APIs
+  ext_stripe: 'Stripe is a payment processing platform used for handling credit card payments, subscriptions, invoices, and financial transactions.',
+  ext_twilio: 'Twilio provides communication APIs for sending SMS messages, making phone calls, and handling real-time messaging in applications.',
+  ext_sendgrid: 'SendGrid is an email delivery service used for sending transactional emails, marketing campaigns, and email notifications.',
+  ext_selenium: 'Selenium is a browser automation framework used for web scraping, end-to-end testing, and automated interaction with web pages.',
+  ext_playwright: 'Playwright is a browser automation library for web scraping, end-to-end testing, and rendering web pages programmatically across Chromium, Firefox, and WebKit.',
+  ext_ffmpeg: 'FFmpeg is a multimedia processing toolkit used for video/audio encoding, decoding, transcoding, and format conversion. Scopes using it handle media processing pipelines.',
+  ext_greenhouse: 'Greenhouse is a recruiting and applicant tracking system (ATS). Scopes using it integrate with hiring workflows, job postings, or candidate data.',
+};
+
 export default function Dashboard() {
   const [data, setData] = useState<IndexData | null>(null);
   const [loading, setLoading] = useState(true);
   const [scopeDetails, setScopeDetails] = useState<Record<string, ScopeDetail>>({});
   const [expandedScopes, setExpandedScopes] = useState<Set<string>>(new Set());
   const [expandedSymbolScopes, setExpandedSymbolScopes] = useState<Set<string>>(new Set());
+  const [expandedServices, setExpandedServices] = useState<Set<string>>(new Set());
+  const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [historyData, setHistoryData] = useState<HistorySnapshot[] | null>(null);
+  // LLM-generated per-service per-scope usage descriptions: { ext_mongodb: { entrypoints: "...", ... }, ... }
+  const [serviceDetails, setServiceDetails] = useState<Record<string, Record<string, string>>>({});
+  const [serviceDetailsLoading, setServiceDetailsLoading] = useState(false);
 
   useEffect(() => {
     fetch('/api/index')
@@ -55,6 +149,29 @@ export default function Dashboard() {
       .then(setData)
       .catch(console.error)
       .finally(() => setLoading(false));
+
+    fetch('/api/graph')
+      .then(res => res.json())
+      .then(d => {
+        if (d.scopes) {
+          setGraphData(d);
+          // Fetch LLM-generated service usage descriptions
+          if (d.external_nodes?.length > 0) {
+            setServiceDetailsLoading(true);
+            fetch('/api/service-details')
+              .then(r => r.json())
+              .then(details => { if (details && typeof details === 'object') setServiceDetails(details); })
+              .catch(console.error)
+              .finally(() => setServiceDetailsLoading(false));
+          }
+        }
+      })
+      .catch(console.error);
+
+    fetch('/api/history')
+      .then(res => { if (res.ok) return res.json(); return null; })
+      .then(d => { if (Array.isArray(d)) setHistoryData(d); })
+      .catch(() => {});
   }, []);
 
   // Fetch scope details for all scopes once we have the index
@@ -87,6 +204,55 @@ export default function Dashboard() {
       return next;
     });
   };
+
+  const toggleService = (id: string) => {
+    setExpandedServices(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // Build external services → scope mapping with import details
+  const serviceUsage = useMemo(() => {
+    if (!graphData) return [];
+    return graphData.external_nodes.map(node => {
+      const edges = graphData.external_edges.filter(e => e.to === node.id);
+      const usedBy = edges.map(e => {
+        const scope = graphData.scopes.find(s => s.scope_id === e.from);
+        return {
+          scopeId: e.from,
+          scopeTitle: scope?.title || e.from,
+          imports: e.imports || [],
+        };
+      });
+      return { ...node, usedBy };
+    });
+  }, [graphData]);
+
+  // Build Mermaid diagram for scope dependencies
+  const scopeDepsMermaid = useMemo(() => {
+    if (!graphData || graphData.scope_edges.length === 0) return null;
+    const lines = ['graph LR'];
+    const seen = new Set<string>();
+    for (const edge of graphData.scope_edges) {
+      const fromScope = graphData.scopes.find(s => s.scope_id === edge.from);
+      const toScope = graphData.scopes.find(s => s.scope_id === edge.to);
+      const fromLabel = fromScope?.title || edge.from;
+      const toLabel = toScope?.title || edge.to;
+      if (!seen.has(edge.from)) {
+        lines.push(`    ${edge.from}["${fromLabel}"]`);
+        seen.add(edge.from);
+      }
+      if (!seen.has(edge.to)) {
+        lines.push(`    ${edge.to}["${toLabel}"]`);
+        seen.add(edge.to);
+      }
+      lines.push(`    ${edge.from} --> ${edge.to}`);
+    }
+    return lines.join('\n');
+  }, [graphData]);
 
   if (loading) {
     return (
@@ -168,6 +334,163 @@ export default function Dashboard() {
                     </div>
                 )}
             </div>
+
+            {/* External Services */}
+            {serviceUsage.length > 0 && (
+                <div className="bg-white border border-black p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+                    <div className="flex items-center gap-2 mb-6 border-b border-gray-100 pb-2">
+                        <IconCloud className="text-sky-600" />
+                        <h2 className="text-lg font-bold uppercase tracking-wide">External Services</h2>
+                        <span className="text-sm text-gray-400 ml-auto font-mono">{serviceUsage.length} detected</span>
+                    </div>
+                    <p className="text-sm text-gray-500 mb-4">
+                        Third-party services and infrastructure dependencies detected in the codebase.
+                    </p>
+                    <div className="space-y-3">
+                        {serviceUsage.map(svc => {
+                            const Icon = SERVICE_ICONS[svc.icon] || IconApi;
+                            const colors = SERVICE_COLORS[svc.icon] || SERVICE_COLORS.api;
+                            const typeLabel = SERVICE_TYPE_LABELS[svc.icon] || 'Service';
+                            const isExpanded = expandedServices.has(svc.id);
+                            return (
+                                <div key={svc.id} className="border border-gray-200 rounded-lg overflow-hidden">
+                                    <button
+                                        onClick={() => toggleService(svc.id)}
+                                        className="w-full p-4 flex items-center gap-3 hover:bg-gray-50 transition-colors text-left"
+                                    >
+                                        {isExpanded
+                                            ? <IconChevronDown size={16} className="text-gray-400 shrink-0" />
+                                            : <IconChevronRight size={16} className="text-gray-400 shrink-0" />
+                                        }
+                                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${colors.bg} ${colors.text}`}>
+                                            <Icon size={18} />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="font-mono text-sm font-bold">{svc.title}</div>
+                                            <div className="text-xs text-gray-500 mt-0.5">
+                                                {typeLabel} · used by {svc.usedBy.length} scope{svc.usedBy.length !== 1 ? 's' : ''}
+                                            </div>
+                                        </div>
+                                        <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${colors.badge}`}>
+                                            {typeLabel}
+                                        </span>
+                                    </button>
+                                    {isExpanded && (
+                                        <div className={`border-t border-gray-200 p-4 ${colors.bg} space-y-4`}>
+                                            <div className="text-sm text-gray-700 leading-relaxed">
+                                                {SERVICE_DESCRIPTIONS[svc.id] || `${svc.title} is an external dependency integrated into this project.`}
+                                            </div>
+                                            <div>
+                                                <div className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-2">Usage by scope</div>
+                                                <div className="space-y-2">
+                                                    {svc.usedBy.map((usage, i) => {
+                                                        const llmDesc = serviceDetails[svc.id]?.[usage.scopeId];
+                                                        return (
+                                                            <div key={i} className="bg-white/50 border border-gray-200 rounded-lg p-3">
+                                                                <div className="flex items-center gap-2 text-sm font-bold font-mono">
+                                                                    <IconArrowRight size={12} className="text-gray-400 shrink-0" />
+                                                                    {usage.scopeTitle}
+                                                                </div>
+                                                                {llmDesc ? (
+                                                                    <div className="ml-5 mt-1.5 text-sm text-gray-700 leading-relaxed">
+                                                                        {llmDesc}
+                                                                    </div>
+                                                                ) : serviceDetailsLoading ? (
+                                                                    <div className="ml-5 mt-1.5 text-xs text-gray-400 animate-pulse">
+                                                                        Generating usage description...
+                                                                    </div>
+                                                                ) : null}
+                                                                {usage.imports.length > 0 && (
+                                                                    <div className="ml-5 mt-2 flex flex-wrap gap-1.5">
+                                                                        {usage.imports.map(imp => (
+                                                                            <code key={imp} className="text-[11px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
+                                                                                {imp}
+                                                                            </code>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {/* Dependency Mini-Graph */}
+            {scopeDepsMermaid && (
+                <div className="bg-white border border-black p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+                    <div className="flex items-center gap-2 mb-6 border-b border-gray-100 pb-2">
+                        <IconChartBar className="text-indigo-600" />
+                        <h2 className="text-lg font-bold uppercase tracking-wide">Scope Dependencies</h2>
+                    </div>
+                    <p className="text-sm text-gray-500 mb-4">
+                        How scopes depend on each other — arrows show import/usage direction.
+                    </p>
+                    <Mermaid chart={scopeDepsMermaid} />
+                </div>
+            )}
+
+            {/* History Timeline */}
+            {historyData && historyData.length > 0 && (
+                <div className="bg-white border border-black p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+                    <div className="flex items-center gap-2 mb-6 border-b border-gray-100 pb-2">
+                        <IconHistory className="text-teal-600" />
+                        <h2 className="text-lg font-bold uppercase tracking-wide">Documentation History</h2>
+                        <span className="text-sm text-gray-400 ml-auto font-mono">{historyData.length} snapshot{historyData.length !== 1 ? 's' : ''}</span>
+                    </div>
+                    <p className="text-sm text-gray-500 mb-4">
+                        Past docbot runs showing how the codebase has evolved over time.
+                    </p>
+                    <div className="relative">
+                        {/* Timeline line */}
+                        <div className="absolute left-[15px] top-4 bottom-4 w-px bg-gray-200" />
+                        <div className="space-y-4">
+                            {historyData.map((snap, i) => (
+                                <div key={snap.run_id} className="flex gap-4 items-start relative">
+                                    <div className={`w-[31px] h-[31px] rounded-full border-2 flex items-center justify-center shrink-0 z-10 ${
+                                        i === 0
+                                            ? 'border-teal-500 bg-teal-50 text-teal-600'
+                                            : 'border-gray-300 bg-white text-gray-400'
+                                    }`}>
+                                        <IconGitCommit size={14} />
+                                    </div>
+                                    <div className={`flex-1 border rounded-lg p-3 ${i === 0 ? 'border-teal-200 bg-teal-50' : 'border-gray-200 bg-gray-50'}`}>
+                                        <div className="flex items-center gap-2 mb-1">
+                                            <span className="font-mono text-xs font-bold">
+                                                {new Date(snap.timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                                            </span>
+                                            <span className="font-mono text-[10px] text-gray-400">
+                                                {new Date(snap.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                                            </span>
+                                            {i === 0 && (
+                                                <span className="text-[10px] font-bold uppercase bg-teal-500 text-white px-1.5 py-0.5 rounded">Latest</span>
+                                            )}
+                                        </div>
+                                        {snap.commit_msg && (
+                                            <div className="text-sm text-gray-700 mb-1.5 truncate">{snap.commit_msg}</div>
+                                        )}
+                                        <div className="flex gap-4 text-xs font-mono text-gray-500">
+                                            <span>{snap.scope_count} scopes</span>
+                                            <span>{snap.symbol_count} symbols</span>
+                                            <span>{snap.entrypoint_count} entrypoints</span>
+                                            {snap.commit_sha && (
+                                                <span className="text-gray-400">{snap.commit_sha.slice(0, 7)}</span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Scopes Section */}
             <div className="bg-white border border-black p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">

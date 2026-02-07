@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(tasklist:*)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(curl:*)",
+      "Bash(python -c:*)"
     ]
   }
 }

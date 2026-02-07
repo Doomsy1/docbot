@@ -1,6 +1,6 @@
 """Web server and search functionality."""
 
-from .server import create_app
+from .server import start_server
 from .search import SearchIndex
 
-__all__ = ["create_app", "SearchIndex"]
+__all__ = ["start_server", "SearchIndex"]

@@ -564,8 +564,76 @@ async def update_async(
         console.print("[yellow]Running full generate...[/yellow]")
         return await generate_async(docbot_root, config, llm_client, tracker)
     
-    # State is valid, but for now (Step 5) we just call generate_async
-    # Later steps will add incremental update logic
+    # State is valid - detect changed files
+    from .git_utils import get_changed_files
+    
     console.print(f"[dim]State valid (last commit: {state.last_commit[:8]})[/dim]")
-    console.print("[yellow]Incremental update not yet implemented. Running full generate...[/yellow]")
+    
+    # Get changed files since last commit
+    changed_files = get_changed_files(repo_path, state.last_commit)
+    
+    if not changed_files:
+        console.print("[green]No files changed since last run. Nothing to update.[/green]")
+        return docbot_root
+    
+    console.print(f"[bold]Detected {len(changed_files)} changed file(s)[/bold]")
+    
+    # Map changed files to affected scopes
+    affected_scope_ids: set[str] = set()
+    unscoped_files: list[str] = []
+    
+    for changed_file in changed_files:
+        # Normalize to forward slashes
+        normalized = changed_file.replace("\\", "/")
+        # Check which scopes contain this file
+        found = False
+        for scope_id, scope_files in state.scope_file_map.items():
+            if normalized in scope_files:
+                affected_scope_ids.add(scope_id)
+                found = True
+        if not found:
+            unscoped_files.append(normalized)
+    
+    # Handle new unscoped files by assigning to nearest scope
+    if unscoped_files:
+        console.print(f"[yellow]Found {len(unscoped_files)} new file(s) not in any scope[/yellow]")
+        
+        for unscoped in unscoped_files:
+            # Find nearest scope by directory proximity (common path prefix)
+            best_scope = None
+            best_match_len = 0
+            
+            unscoped_parts = Path(unscoped).parts
+            
+            for scope_id, scope_files in state.scope_file_map.items():
+                for scope_file in scope_files:
+                    scope_parts = Path(scope_file).parts
+                    # Count common prefix length
+                    common_len = 0
+                    for i in range(min(len(unscoped_parts), len(scope_parts))):
+                        if unscoped_parts[i] == scope_parts[i]:
+                            common_len += 1
+                        else:
+                            break
+                    if common_len > best_match_len:
+                        best_match_len = common_len
+                        best_scope = scope_id
+            
+            if best_scope:
+                console.print(f"  Assigning {unscoped} to scope '{best_scope}'")
+                affected_scope_ids.add(best_scope)
+            else:
+                console.print(f"  [yellow]Could not assign {unscoped} to any scope[/yellow]")
+    
+    if not affected_scope_ids:
+        console.print("[yellow]Changed files don't map to any existing scopes.[/yellow]")
+        console.print("[yellow]Running full generate...[/yellow]")
+        return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    console.print(f"[bold]Affected scopes:[/bold] {', '.join(sorted(affected_scope_ids))}")
+    
+    # For now (Steps 6-7), we still call generate_async
+    # Steps 8-10 will add selective re-exploration
+    console.print("[yellow]Selective update not yet implemented. Running full generate...[/yellow]")
     return await generate_async(docbot_root, config, llm_client, tracker)
+

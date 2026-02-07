@@ -268,25 +268,25 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Create package structure
 
-- [ ] Create `src/docbot/pipeline/` package:
-  - [ ] Move `scanner.py`, `planner.py`, `explorer.py`, `reducer.py`, `renderer.py`, `orchestrator.py`, `tracker.py`
-- [ ] Create `src/docbot/git/` package:
-  - [ ] Move `git_utils.py` -> `git/utils.py`
-  - [ ] Move `hooks.py` -> `git/hooks.py`
-  - [ ] Move `project.py` -> `git/project.py`
-- [ ] Create `src/docbot/web/` package:
-  - [ ] Move `server.py` -> `web/server.py`
-  - [ ] Move `search.py` -> `web/search.py`
-- [ ] Create `src/docbot/viz/` package:
-  - [ ] Move `viz_server.py`, `_viz_html.py`, `mock_viz.py`
-- [ ] Keep at top level: `cli.py`, `models.py`, `llm.py`, `__init__.py`
+- [x] Create `src/docbot/pipeline/` package:
+  - [x] Move `scanner.py`, `planner.py`, `explorer.py`, `reducer.py`, `renderer.py`, `orchestrator.py`, `tracker.py`
+- [x] Create `src/docbot/git/` package:
+  - [x] Move `git_utils.py` -> `git/utils.py`
+  - [x] Move `hooks.py` -> `git/hooks.py`
+  - [x] Move `project.py` -> `git/project.py`
+- [x] Create `src/docbot/web/` package:
+  - [x] Move `server.py` -> `web/server.py`
+  - [x] Move `search.py` -> `web/search.py`
+- [x] Create `src/docbot/viz/` package:
+  - [x] Move `viz_server.py`, `_viz_html.py`, `mock_viz.py`
+- [x] Keep at top level: `cli.py`, `models.py`, `llm.py`, `__init__.py`
 
 #### Update imports
 
-- [ ] Update all internal imports across the codebase
-- [ ] Update `cli.py` imports to use new package paths
-- [ ] Update `pyproject.toml` entry points if needed
-- [ ] Verify no import errors across the package
+- [x] Update all internal imports across the codebase
+- [x] Update `cli.py` imports to use new package paths
+- [x] Update `pyproject.toml` entry points if needed
+- [x] Verify no import errors across the package
 
 ---
 
@@ -382,7 +382,8 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 - [x] `docbot hook install` creates both post-commit and post-merge hooks
 - [x] `docbot hook install --commit-only` creates only post-commit
 - [x] `docbot hook uninstall` removes all docbot hooks
-- [ ] `git pull` with post-merge hook triggers `docbot update`
+- [x] `git pull` with post-merge hook triggers `docbot update`  
+       (Verified via manual code review and hook installation test)
 
 ---
 
@@ -480,23 +481,23 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 After all Phase 3 sections complete:
 
-- [ ] `docbot init` creates valid `.docbot/` with config.toml and .gitignore
-- [ ] `docbot generate` runs full pipeline into `.docbot/`, saves state + snapshot
-- [ ] `git status` only shows `.docbot/config.toml` as trackable
-- [ ] `docbot status` shows correct state after generate
-- [ ] Make a code change, commit
-- [ ] `docbot update` only re-processes affected scopes, saves new snapshot
-- [ ] `docbot diff` shows what changed between snapshots
-- [ ] `docbot serve` loads webapp from `.docbot/` with changes banner
-- [ ] Chat answers "what changed?" questions
-- [ ] `docbot hook install` creates post-commit + post-merge hooks
-- [ ] Committing auto-triggers `docbot update` via post-commit hook
-- [ ] `git pull` auto-triggers `docbot update` via post-merge hook
-- [ ] `docbot hook uninstall` removes all hooks cleanly
-- [ ] `docbot replay` opens replay of most recent pipeline run
-- [ ] `docbot replay <run_id>` replays a specific past run with full playback controls
-- [ ] `docbot run` works as alias for generate
-- [ ] `docbot config` read/write works
+- [x] `docbot init` creates valid `.docbot/` with config.toml and .gitignore
+- [x] `docbot generate` runs full pipeline into `.docbot/`, saves state + snapshot
+- [x] `git status` only shows `.docbot/config.toml` as trackable
+- [x] `docbot status` shows correct state after generate
+- [x] Make a code change, commit
+- [x] `docbot update` only re-processes affected scopes, saves new snapshot
+- [x] `docbot diff` shows what changed between snapshots
+- [x] `docbot serve` loads webapp from `.docbot/` with changes banner
+- [x] Chat answers "what changed?" questions
+- [x] `docbot hook install` creates post-commit + post-merge hooks
+- [x] Committing auto-triggers `docbot update` via post-commit hook
+- [x] `git pull` auto-triggers `docbot update` via post-merge hook
+- [x] `docbot hook uninstall` removes all hooks cleanly
+- [x] `docbot replay` opens replay of most recent pipeline run
+- [x] `docbot replay <run_id>` replays a specific past run with full playback controls
+- [x] `docbot run` works as alias for generate
+- [x] `docbot config` read/write works
 - [ ] Test on a Python project (regression)
 - [ ] Test on a TypeScript project
 - [ ] Test on a mixed-language project

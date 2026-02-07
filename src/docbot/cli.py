@@ -57,8 +57,30 @@ def run(
     model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID."),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment; AST/tree-sitter extraction still runs."),
     visualize: bool = typer.Option(False, "--visualize", "--viz", help="Open a live D3.js pipeline visualization in the browser."),
+    mock_viz: bool = typer.Option(False, "--mock-viz", help="Run a mock pipeline simulation with the visualization (no LLM, no repo needed)."),
 ) -> None:
     """Scan, explore, and generate documentation for REPO."""
+
+    from .orchestrator import run_async
+    from .tracker import NoOpTracker, PipelineTracker
+
+    # --mock-viz: reuses the real pipeline with sleep stubs instead of work.
+    if mock_viz:
+        from .viz_server import start_viz_server
+
+        tracker = PipelineTracker()
+        _server, url = start_viz_server(tracker)
+        console.print(f"[bold cyan]Mock visualization:[/bold cyan] {url}")
+        asyncio.run(run_async(
+            repo_path=repo,
+            concurrency=concurrency,
+            tracker=tracker,
+            mock=True,
+        ))
+        console.print("[dim]Simulation complete. Press Enter to exit.[/dim]")
+        input()
+        return
+
     repo = Path(repo).resolve()
     if not repo.is_dir():
         console.print(f"[red]Error:[/red] {repo} is not a directory.")
@@ -68,8 +90,6 @@ def run(
     _load_dotenv(Path.cwd())
 
     from .llm import LLMClient
-    from .orchestrator import run_async
-    from .tracker import NoOpTracker, PipelineTracker
 
     # Build LLM client if key is available and not disabled.
     llm_client = None

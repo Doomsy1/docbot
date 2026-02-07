@@ -39,20 +39,29 @@ async def _explore_one(
     llm_client: LLMClient | None = None,
     tracker: NoOpTracker | None = None,
     node_id: str = "",
+    _work_fn=None,
 ) -> ScopeResult:
-    """Run a single scope exploration under concurrency + timeout control."""
+    """Run a single scope exploration under concurrency + timeout control.
+
+    When *_work_fn* is provided (an async callable accepting a ScopePlan and
+    returning a ScopeResult), it replaces the real explore_scope + LLM call.
+    This lets ``--mock-viz`` reuse the semaphore/timeout/tracker logic.
+    """
     if tracker and node_id:
         tracker.set_state(node_id, AgentState.waiting, "awaiting semaphore")
     async with sem:
         if tracker and node_id:
             tracker.set_state(node_id, AgentState.running)
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(explore_scope, plan, repo_root),
-                timeout=timeout,
-            )
-            if llm_client and result.error is None:
-                result = await enrich_scope_with_llm(result, repo_root, llm_client)
+            if _work_fn is not None:
+                result = await asyncio.wait_for(_work_fn(plan), timeout=timeout)
+            else:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(explore_scope, plan, repo_root),
+                    timeout=timeout,
+                )
+                if llm_client and result.error is None:
+                    result = await enrich_scope_with_llm(result, repo_root, llm_client)
             if tracker and node_id:
                 tracker.set_state(node_id, AgentState.done)
             return result
@@ -84,6 +93,7 @@ async def run_async(
     timeout: float = 120.0,
     llm_client: LLMClient | None = None,
     tracker: NoOpTracker | None = None,
+    mock: bool = False,
 ) -> Path:
     """Full pipeline: scan -> plan -> explore -> reduce -> render.
 
@@ -92,32 +102,43 @@ async def run_async(
     - Explorer: generates per-scope summaries
     - Reducer: writes cross-scope analysis + Mermaid architecture graph
     - Renderer: writes per-scope docs, README, and architecture overview
+
+    When *mock* is True the pipeline replays a simulated run with
+    ``asyncio.sleep()`` delays -- no file I/O, no LLM calls.  All tracker
+    state transitions are driven by the same code paths used for real runs.
     """
-    repo_path = repo_path.resolve()
-    if output_base is None:
-        output_base = Path.cwd() / "runs"
+    if mock:
+        from . import mock_viz
+        import tempfile
+        await asyncio.sleep(3.0)  # let the browser load D3 from CDN
+        using_llm = True  # so we exercise the full tracker tree
+        timeout = mock_viz.MOCK_TIMEOUT
+        run_dir = Path(tempfile.mkdtemp(prefix="docbot_mock_"))
+        console.print("[dim]Mock mode -- simulated pipeline, no LLM calls.[/dim]")
+    else:
+        repo_path = repo_path.resolve()
+        if output_base is None:
+            output_base = Path.cwd() / "runs"
+        run_id = _make_run_id()
+        run_dir = output_base / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        using_llm = llm_client is not None
+        if using_llm:
+            console.print(f"[bold]LLM:[/bold] {llm_client.model} via OpenRouter (used at every step)")
+        else:
+            console.print("[dim]No LLM configured; using template-only mode.[/dim]")
+        # Register extractors (Python AST, tree-sitter, LLM fallback).
+        setup_extractors(llm_client=llm_client)
 
     if tracker is None:
         tracker = NoOpTracker()
 
-    run_id = _make_run_id()
-    run_dir = output_base / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    meta = RunMeta(
-        run_id=run_id,
-        repo_path=str(repo_path),
-        started_at=datetime.now(timezone.utc).isoformat(),
-    )
-
-    using_llm = llm_client is not None
-    if using_llm:
-        console.print(f"[bold]LLM:[/bold] {llm_client.model} via OpenRouter (used at every step)")
-    else:
-        console.print("[dim]No LLM configured; using template-only mode.[/dim]")
-
-    # Register extractors (Python AST, tree-sitter, LLM fallback).
-    setup_extractors(llm_client=llm_client)
+    if not mock:
+        meta = RunMeta(
+            run_id=run_id,
+            repo_path=str(repo_path),
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     # -- Build tracker tree skeleton --
     tracker.add_node("orchestrator", "Orchestrator")
@@ -132,7 +153,11 @@ async def run_async(
     # 1. Scan
     console.print(f"[bold]Scanning[/bold] {repo_path} ...")
     tracker.set_state("scanner", AgentState.running)
-    scan = await asyncio.to_thread(scan_repo, repo_path)
+    if mock:
+        await asyncio.sleep(1.5)
+        scan = mock_viz.mock_scan(repo_path)
+    else:
+        scan = await asyncio.to_thread(scan_repo, repo_path)
     tracker.set_state("scanner", AgentState.done, f"{len(scan.source_files)} files")
 
     # Show per-language file counts.
@@ -155,19 +180,24 @@ async def run_async(
     # 2. Plan (+ LLM refinement)
     console.print("[bold]Planning[/bold] scopes ...")
     tracker.set_state("planner", AgentState.running)
-    plans = await asyncio.to_thread(build_plan, scan, max_scopes)
-    if using_llm:
-        console.print("  Refining plan with LLM ...")
-        plans = await refine_plan_with_llm(plans, scan, max_scopes, llm_client)
-    meta.scope_count = len(plans)
+    if mock:
+        await asyncio.sleep(2.0)
+        plans = mock_viz.mock_plans()
+    else:
+        plans = await asyncio.to_thread(build_plan, scan, max_scopes)
+        if using_llm:
+            console.print("  Refining plan with LLM ...")
+            plans = await refine_plan_with_llm(plans, scan, max_scopes, llm_client)
+        meta.scope_count = len(plans)
     tracker.set_state("planner", AgentState.done, f"{len(plans)} scopes")
     console.print(f"  Created {len(plans)} scope(s).")
 
-    plan_path = run_dir / "plan.json"
-    plan_path.write_text(
-        json.dumps([p.model_dump() for p in plans], indent=2),
-        encoding="utf-8",
-    )
+    if not mock:
+        plan_path = run_dir / "plan.json"
+        plan_path.write_text(
+            json.dumps([p.model_dump() for p in plans], indent=2),
+            encoding="utf-8",
+        )
 
     # 3. Explore in parallel (+ LLM summaries)
     sem = asyncio.Semaphore(concurrency)
@@ -193,6 +223,7 @@ async def run_async(
             result = await _explore_one(
                 plan, repo_path, sem, timeout, llm_client,
                 tracker=tracker, node_id=nid,
+                _work_fn=mock_viz.mock_explore_work if mock else None,
             )
             progress.advance(task)
             return result
@@ -203,17 +234,19 @@ async def run_async(
 
     tracker.set_state("explorer_hub", AgentState.done)
 
-    scopes_dir = run_dir / "scopes"
-    scopes_dir.mkdir(exist_ok=True)
-    for sr in scope_results:
-        (scopes_dir / f"{sr.scope_id}.json").write_text(
-            sr.model_dump_json(indent=2), encoding="utf-8",
-        )
+    if not mock:
+        scopes_dir = run_dir / "scopes"
+        scopes_dir.mkdir(exist_ok=True)
+        for sr in scope_results:
+            (scopes_dir / f"{sr.scope_id}.json").write_text(
+                sr.model_dump_json(indent=2), encoding="utf-8",
+            )
 
     succeeded = sum(1 for r in scope_results if r.error is None)
     failed = len(scope_results) - succeeded
-    meta.succeeded = succeeded
-    meta.failed = failed
+    if not mock:
+        meta.succeeded = succeeded
+        meta.failed = failed
 
     if failed:
         console.print(f"  [yellow]{failed} scope(s) failed.[/yellow]")
@@ -227,16 +260,21 @@ async def run_async(
         tracker.add_node("reducer.mermaid", "Mermaid graph", "reducer")
         tracker.set_state("reducer.analysis", AgentState.running)
         tracker.set_state("reducer.mermaid", AgentState.running)
-        console.print("  Generating cross-scope analysis and architecture graph with LLM ...")
-        docs_index = await reduce_with_llm(scope_results, str(repo_path), llm_client)
+        if mock:
+            await asyncio.sleep(2.5)
+            docs_index = mock_viz.mock_docs_index(scope_results, str(repo_path))
+        else:
+            console.print("  Generating cross-scope analysis and architecture graph with LLM ...")
+            docs_index = await reduce_with_llm(scope_results, str(repo_path), llm_client)
         tracker.set_state("reducer.analysis", AgentState.done)
         tracker.set_state("reducer.mermaid", AgentState.done)
     else:
         docs_index = await asyncio.to_thread(reduce, scope_results, str(repo_path))
     tracker.set_state("reducer", AgentState.done)
 
-    index_path = run_dir / "docs_index.json"
-    index_path.write_text(docs_index.model_dump_json(indent=2), encoding="utf-8")
+    if not mock:
+        index_path = run_dir / "docs_index.json"
+        index_path.write_text(docs_index.model_dump_json(indent=2), encoding="utf-8")
 
     # 5. Render (+ LLM for all narrative docs)
     console.print("[bold]Rendering[/bold] documentation ...")
@@ -254,8 +292,12 @@ async def run_async(
         tracker.set_state("renderer.readme", AgentState.running)
         tracker.set_state("renderer.arch", AgentState.running)
 
-        console.print("  Writing all docs with LLM ...")
-        written = await render_with_llm(docs_index, run_dir, llm_client)
+        if mock:
+            await asyncio.sleep(2.0)
+            written = []
+        else:
+            console.print("  Writing all docs with LLM ...")
+            written = await render_with_llm(docs_index, run_dir, llm_client)
 
         for sr in scope_results:
             tracker.set_state(f"renderer.{sr.scope_id}", AgentState.done)
@@ -268,8 +310,9 @@ async def run_async(
     for w in written:
         console.print(f"  wrote {w.relative_to(run_dir)}")
 
-    meta.finished_at = datetime.now(timezone.utc).isoformat()
-    (run_dir / "run_meta.json").write_text(meta.model_dump_json(indent=2), encoding="utf-8")
+    if not mock:
+        meta.finished_at = datetime.now(timezone.utc).isoformat()
+        (run_dir / "run_meta.json").write_text(meta.model_dump_json(indent=2), encoding="utf-8")
 
     tracker.set_state("orchestrator", AgentState.done)
     console.print(f"\n[bold green]Done![/bold green] Output in: {run_dir}")

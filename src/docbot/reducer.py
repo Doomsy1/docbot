@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
@@ -12,12 +13,12 @@ from .models import DocsIndex, EnvVar, PublicSymbol, ScopeResult
 logger = logging.getLogger(__name__)
 
 _ANALYSIS_SYSTEM = """\
-You are a software architect analyzing a Python codebase. Base every claim \
+You are a software architect analyzing a codebase. Base every claim \
 on the structured data provided. Identify patterns and relationships. \
 Be specific -- reference file names and symbol names."""
 
 _ANALYSIS_PROMPT = """\
-Analyze the following scope results from a Python repository and write a \
+Analyze the following scope results from a {languages} repository and write a \
 cross-scope architectural analysis.
 
 Repository: {repo_path}
@@ -43,7 +44,7 @@ No commentary before or after the diagram. CRITICAL: Define each node EXACTLY \
 ONCE. Never redefine a node with a different label or shape."""
 
 _MERMAID_PROMPT = """\
-Create a Mermaid architecture diagram for this Python repository.
+Create a Mermaid architecture diagram for this {languages} repository.
 
 Repository: {repo_path}
 
@@ -69,29 +70,68 @@ STRICT requirements:
 Return ONLY the Mermaid code. Start with "graph TD". No fences. No commentary."""
 
 
+# Common source-file extensions to strip when building path-based scope lookups.
+_SOURCE_EXTS = frozenset({
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
+    ".kt", ".cs", ".swift", ".rb", ".cpp", ".c", ".h", ".hpp",
+})
+
+
 def _compute_scope_edges(scope_results: list[ScopeResult]) -> list[tuple[str, str]]:
-    """Infer directed edges (from_scope -> to_scope) based on import statements."""
+    """Infer directed edges (from_scope -> to_scope) based on import statements.
+
+    Uses two strategies:
+      1. File-path-based matching (works for any language).
+      2. Dotted-prefix matching (works for Python-style imports).
+    """
+    # Strategy 1: map each file path (minus extension) to its scope.
+    path_to_scope: dict[str, str] = {}
+    for sr in scope_results:
+        for p in sr.paths:
+            # Store full path without extension: "src/docbot/cli" -> scope_id
+            stem, ext = os.path.splitext(p)
+            path_to_scope[stem] = sr.scope_id
+            # Also store the basename alone for short imports
+            path_to_scope[PurePosixPath(stem).name] = sr.scope_id
+
+    # Strategy 2: dotted prefix map (original Python approach).
     prefix_to_scope: dict[str, str] = {}
     for sr in scope_results:
         for p in sr.paths:
             parts = PurePosixPath(p).parts
             for i in range(1, len(parts) + 1):
                 segment = list(parts[:i])
-                if segment[-1].endswith(".py"):
-                    segment[-1] = segment[-1][:-3]
+                base, ext = os.path.splitext(segment[-1])
+                if ext in _SOURCE_EXTS:
+                    segment[-1] = base
                 dotted = ".".join(segment)
                 prefix_to_scope[dotted] = sr.scope_id
 
     edges: set[tuple[str, str]] = set()
     for sr in scope_results:
         for imp in sr.imports:
-            parts = imp.split(".")
-            for i in range(len(parts), 0, -1):
-                candidate = ".".join(parts[:i])
-                target = prefix_to_scope.get(candidate)
-                if target and target != sr.scope_id:
-                    edges.add((sr.scope_id, target))
-                    break
+            found = False
+
+            # Try file-path matching first (handles "./foo", "../bar", "@scope/pkg").
+            # Normalise common path-style imports.
+            normalised = imp.lstrip("./").replace("\\", "/")
+            stem, ext = os.path.splitext(normalised)
+            if ext in _SOURCE_EXTS:
+                normalised = stem
+            target = path_to_scope.get(normalised)
+            if target and target != sr.scope_id:
+                edges.add((sr.scope_id, target))
+                found = True
+
+            # Fall back to dotted-prefix matching.
+            if not found:
+                parts = imp.split(".")
+                for i in range(len(parts), 0, -1):
+                    candidate = ".".join(parts[:i])
+                    target = prefix_to_scope.get(candidate)
+                    if target and target != sr.scope_id:
+                        edges.add((sr.scope_id, target))
+                        break
 
     return sorted(edges)
 
@@ -100,13 +140,13 @@ def _build_scope_block(scope_results: list[ScopeResult]) -> str:
     parts = []
     for sr in scope_results:
         status = "[FAILED]" if sr.error else ""
-        parts.append(f"### {sr.title} (scope_id: {sr.scope_id}) {status}")
+        langs = f" [{', '.join(sr.languages)}]" if sr.languages else ""
+        parts.append(f"### {sr.title} (scope_id: {sr.scope_id}){langs} {status}")
         parts.append(f"  Files: {len(sr.paths)}, Public symbols: {len(sr.public_api)}, "
                       f"Env vars: {len(sr.env_vars)}, Errors raised: {len(sr.raised_errors)}")
         if sr.entrypoints:
             parts.append(f"  Entrypoints: {', '.join(sr.entrypoints)}")
         if sr.summary:
-            # First 500 chars of the summary
             parts.append(f"  Summary: {sr.summary[:500]}")
         parts.append("")
     return "\n".join(parts)
@@ -120,11 +160,13 @@ def reduce(
     all_env: list[EnvVar] = []
     all_api: list[PublicSymbol] = []
     all_entrypoints: list[str] = []
+    all_languages: set[str] = set()
     seen_env: set[str] = set()
     seen_sym: set[str] = set()
     seen_ep: set[str] = set()
 
     for sr in scope_results:
+        all_languages.update(sr.languages)
         for ev in sr.env_vars:
             key = (ev.name, ev.citation.file)
             if key not in seen_env:
@@ -154,6 +196,7 @@ def reduce(
         public_api=all_api,
         entrypoints=all_entrypoints,
         scope_edges=scope_edges,
+        languages=sorted(all_languages),
     )
 
 
@@ -191,6 +234,7 @@ async def reduce_with_llm(
     # First do the mechanical merge.
     index = reduce(scope_results, repo_path)
 
+    languages = ", ".join(index.languages) if index.languages else "software"
     scope_block = _build_scope_block(scope_results)
     edges_block = ", ".join(f"{a} -> {b}" for a, b in index.scope_edges) or "(none detected)"
     ep_block = ", ".join(index.entrypoints) or "(none)"
@@ -200,6 +244,7 @@ async def reduce_with_llm(
         try:
             return await llm_client.ask(
                 _ANALYSIS_PROMPT.format(
+                    languages=languages,
                     repo_path=repo_path,
                     scope_block=scope_block,
                     edges_block=edges_block,
@@ -214,6 +259,7 @@ async def reduce_with_llm(
         try:
             mermaid_raw = await llm_client.ask(
                 _MERMAID_PROMPT.format(
+                    languages=languages,
                     repo_path=repo_path,
                     scope_block=scope_block,
                     edges_block=edges_block,

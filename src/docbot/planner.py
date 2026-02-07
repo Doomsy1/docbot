@@ -14,19 +14,22 @@ logger = logging.getLogger(__name__)
 
 # Keywords (in path segments or filename stems) that mark cross-cutting concerns.
 _CROSSCUTTING_RE = re.compile(
-    r"(config|settings|conf|log|logging|auth|middleware|errors|exceptions|security|permissions)",
+    r"(config|settings|conf|log|logging|auth|middleware|errors|exceptions"
+    r"|security|permissions|utils|helpers|common|shared|types|models)",
     re.IGNORECASE,
 )
 
 _PLANNER_SYSTEM = """\
 You are a documentation architect. You receive a draft documentation plan for \
-a Python repository and improve it. Return ONLY valid JSON -- no markdown \
+a software repository and improve it. Return ONLY valid JSON -- no markdown \
 fences, no commentary."""
 
 _PLANNER_PROMPT = """\
-A tool auto-generated the following documentation plan for a Python repository.
+A tool auto-generated the following documentation plan for a repository.
 
-Repository file listing ({file_count} Python files):
+Languages detected: {languages}
+
+Repository file listing ({file_count} source files):
 {file_listing}
 
 Packages detected: {packages}
@@ -64,12 +67,15 @@ def _is_crosscutting(rel_path: str) -> bool:
 def build_plan(scan: ScanResult, max_scopes: int = 20) -> list[ScopePlan]:
     """Create up to *max_scopes* scope plans from the scan result (no LLM)."""
 
+    # Use source_files when available, fall back to py_files for compat.
+    all_paths = [sf.path for sf in scan.source_files] if scan.source_files else scan.py_files
+
     entrypoint_set = set(scan.entrypoints)
     crosscutting_files: list[str] = []
     entrypoint_files: list[str] = []
     group_files: dict[str, list[str]] = {}
 
-    for p in scan.py_files:
+    for p in all_paths:
         if p in entrypoint_set:
             entrypoint_files.append(p)
         if _is_crosscutting(p):
@@ -93,7 +99,7 @@ def build_plan(scan: ScanResult, max_scopes: int = 20) -> list[ScopePlan]:
             scope_id="crosscutting",
             title="Cross-cutting concerns",
             paths=sorted(set(crosscutting_files)),
-            notes="Config, logging, auth, middleware, and error-handling modules.",
+            notes="Config, logging, auth, middleware, error-handling, and shared utility modules.",
         ))
 
     for key in sorted(group_files):
@@ -124,13 +130,17 @@ async def refine_plan_with_llm(
     from .llm import LLMClient
     assert isinstance(llm_client, LLMClient)
 
+    all_paths = [sf.path for sf in scan.source_files] if scan.source_files else scan.py_files
+    languages = ", ".join(scan.languages) if scan.languages else "Python"
+
     draft = json.dumps([s.model_dump() for s in scopes], indent=2)
-    file_listing = "\n".join(f"  {f}" for f in scan.py_files[:200])
-    if len(scan.py_files) > 200:
-        file_listing += f"\n  ... and {len(scan.py_files) - 200} more"
+    file_listing = "\n".join(f"  {f}" for f in all_paths[:200])
+    if len(all_paths) > 200:
+        file_listing += f"\n  ... and {len(all_paths) - 200} more"
 
     prompt = _PLANNER_PROMPT.format(
-        file_count=len(scan.py_files),
+        languages=languages,
+        file_count=len(all_paths),
         file_listing=file_listing,
         packages=", ".join(scan.packages[:30]) or "(none)",
         entrypoints=", ".join(scan.entrypoints) or "(none)",

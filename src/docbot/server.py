@@ -171,6 +171,50 @@ async def get_file(file_path: str) -> JSONResponse:
         raise HTTPException(status_code=500, detail=f"Error reading file: {e}")
 
 
+@app.get("/api/fs")
+async def get_fs() -> JSONResponse:
+    """Return the repository file structure as a tree."""
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+
+    index = _load_index()
+    repo_root = Path(index.repo_path).resolve()
+    
+    if not repo_root.exists():
+         raise HTTPException(status_code=500, detail=f"Repository root not found at {repo_root}")
+
+    def build_tree(path: Path) -> dict:
+        name = path.name
+        rel_path = str(path.relative_to(repo_root))
+        if path.is_file():
+            return {"name": name, "path": rel_path, "type": "file"}
+        
+        # Directory
+        children = []
+        try:
+            # Sort directories first, then files
+            items = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+            for item in items:
+                # Basic filtering
+                if item.name.startswith(".") and item.name != ".gitignore":
+                    continue
+                if item.name in ("__pycache__", "venv", "node_modules", "runs", "dist", "build"):
+                    continue
+                if item.is_dir() and item.name.endswith(".egg-info"):
+                    continue
+                    
+                children.append(build_tree(item))
+        except PermissionError:
+            pass
+            
+        return {"name": name, "path": rel_path if path != repo_root else ".", "type": "directory", "children": children}
+
+    tree = build_tree(repo_root)
+    # Return the children of the root so we don't have a single "." root node if we don't want it,
+    # but having a root node is fine. Let's return the root's children to be cleaner.
+    return JSONResponse(tree["children"])
+
+
 
 # ---------------------------------------------------------------------------
 # Server launcher

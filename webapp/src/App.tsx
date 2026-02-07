@@ -43,7 +43,12 @@ export default function App() {
             }} />
           </div>
         )}
-        {activeTab === 'files' && <FileViewer filePath={selectedFile} />}
+        {activeTab === 'files' && (
+          <FileViewer 
+            filePath={selectedFile} 
+            onSelectFile={(path) => setSelectedFile(path)}
+          />
+        )}
       </main>
     </div>
   )

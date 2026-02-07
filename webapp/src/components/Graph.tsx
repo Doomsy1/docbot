@@ -6,9 +6,48 @@ import ReactFlow, {
   useNodesState, 
   useEdgesState, 
   addEdge,
+  Position
 } from 'reactflow';
 import type { Connection, Edge, Node } from 'reactflow';
+import dagre from 'dagre';
 import 'reactflow/dist/style.css';
+
+const nodeWidth = 200;
+const nodeHeight = 50;
+
+const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => {
+  const dagreGraph = new dagre.graphlib.Graph();
+  dagreGraph.setDefaultEdgeLabel(() => ({}));
+
+  dagreGraph.setGraph({ rankdir: direction });
+
+  nodes.forEach((node) => {
+    dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
+  });
+
+  edges.forEach((edge) => {
+    dagreGraph.setEdge(edge.source, edge.target);
+  });
+
+  dagre.layout(dagreGraph);
+
+  const layoutedNodes = nodes.map((node) => {
+    const nodeWithPosition = dagreGraph.node(node.id);
+    return {
+      ...node,
+      targetPosition: direction === 'LR' ? Position.Left : Position.Top,
+      sourcePosition: direction === 'LR' ? Position.Right : Position.Bottom,
+      // We are shifting the dagre node position (anchor=center center) to the top left
+      // so it matches the React Flow node anchor point (top left).
+      position: {
+        x: nodeWithPosition.x - nodeWidth / 2,
+        y: nodeWithPosition.y - nodeHeight / 2,
+      },
+    };
+  });
+
+  return { nodes: layoutedNodes, edges };
+};
 
 export default function Graph() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
@@ -31,30 +70,25 @@ export default function Graph() {
         });
         const scopeList = Array.from(uniqueScopes).sort();
 
-        // 2. Create Nodes with simple grid layout
-        const COLS = 3;
-        const X_GAP = 250;
-        const Y_GAP = 100;
-        
-        const newNodes: Node[] = scopeList.map((scopeId, i) => ({
+        // 2. Create Initial Nodes (position doesn't matter, dagre will fix it)
+        const initialNodes: Node[] = scopeList.map((scopeId) => ({
           id: scopeId,
-          position: { 
-            x: (i % COLS) * X_GAP, 
-            y: Math.floor(i / COLS) * Y_GAP 
-          },
+          position: { x: 0, y: 0 },
           data: { label: scopeId },
           style: { 
             border: '1px solid black', 
             background: 'white', 
             borderRadius: 0, 
-            width: 200, 
+            width: nodeWidth, 
             textAlign: 'center',
-            padding: '10px'
+            padding: '10px',
+            fontSize: '12px',
+            fontFamily: 'monospace'
           },
         }));
 
         // 3. Create Edges
-        const newEdges: Edge[] = scopeEdges.map((e, i) => ({
+        const initialEdges: Edge[] = scopeEdges.map((e, i) => ({
           id: `e-${i}`,
           source: e.from,
           target: e.to,
@@ -63,15 +97,19 @@ export default function Graph() {
           type: 'smoothstep'
         }));
 
-        setNodes(newNodes);
-        setEdges(newEdges);
+        const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
+          initialNodes,
+          initialEdges
+        );
+
+        setNodes(layoutedNodes);
+        setEdges(layoutedEdges);
       } catch (err) {
         console.error("Failed to fetch graph", err);
       }
     }
     fetchData();
-  }, [setNodes, setEdges]);
-
+  }, [setNodes, setEdges]); // Ensure dependency array is correct
 
   return (
     <div className="h-full w-full border border-black">
@@ -85,7 +123,11 @@ export default function Graph() {
       >
         <Controls showInteractive={false} className="!bg-white !border !border-black !shadow-none [&>button]:!border-b [&>button]:!border-black [&>button]:!fill-black" />
         <Background color="#000" gap={20} size={1} />
-        <MiniMap style={{ border: '1px solid black' }} maskColor="rgba(255, 255, 255, 0.8)" nodeColor="black" />
+        <MiniMap 
+          style={{ border: '1px solid black' }} 
+          maskColor="rgba(255, 255, 255, 0.8)" 
+          nodeColor="black" 
+        />
       </ReactFlow>
     </div>
   );

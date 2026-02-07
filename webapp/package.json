@@ -12,6 +12,8 @@
   "dependencies": {
     "@tabler/icons": "^3.36.1",
     "@tabler/icons-react": "^3.36.1",
+    "@types/dagre": "^0.7.53",
+    "dagre": "^0.8.5",
     "mermaid": "^10.9.5",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

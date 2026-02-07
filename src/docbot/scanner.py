@@ -11,10 +11,77 @@ if TYPE_CHECKING:
     from .models import SourceFile
 
 # Directories to skip unconditionally.
-SKIP_DIRS: set[str] = {".git", ".venv", "venv", "__pycache__", "dist", "build", ".tox", ".eggs", "node_modules", ".mypy_cache", ".pytest_cache"}
+SKIP_DIRS: set[str] = {
+    ".git", ".venv", "venv", "__pycache__", "dist", "build", ".tox", ".eggs",
+    "node_modules", ".mypy_cache", ".pytest_cache",
+    # Additional build / cache directories for other languages
+    "target",          # Rust / Java (Maven)
+    "bin", "obj",      # C# / Go binaries
+    ".gradle",         # Gradle
+    ".next", ".nuxt",  # Next.js / Nuxt
+    "vendor",          # Go vendor, PHP
+    "pkg",             # Go pkg
+    ".cargo",          # Rust
+    "Pods",            # iOS CocoaPods
+    ".build",          # Swift
+    "coverage",        # test coverage output
+    ".cache",          # generic caches
+}
 
-# Basenames that signal an entrypoint.
-ENTRYPOINT_NAMES: set[str] = {"main.py", "app.py", "server.py", "cli.py", "__main__.py", "wsgi.py", "asgi.py"}
+# Language-aware entrypoint basenames.
+ENTRYPOINT_NAMES: dict[str, str] = {
+    # Python
+    "main.py": "python",
+    "app.py": "python",
+    "server.py": "python",
+    "cli.py": "python",
+    "__main__.py": "python",
+    "wsgi.py": "python",
+    "asgi.py": "python",
+    # Go
+    "main.go": "go",
+    # Rust
+    "main.rs": "rust",
+    "lib.rs": "rust",
+    # Java / Kotlin
+    "Main.java": "java",
+    "Application.java": "java",
+    "App.java": "java",
+    "Main.kt": "kotlin",
+    "Application.kt": "kotlin",
+    # JavaScript / TypeScript
+    "index.js": "javascript",
+    "index.ts": "typescript",
+    "index.tsx": "typescript",
+    "server.js": "javascript",
+    "server.ts": "typescript",
+    "app.js": "javascript",
+    "app.ts": "typescript",
+    # Ruby
+    "main.rb": "ruby",
+    # C#
+    "Program.cs": "csharp",
+    # Swift
+    "main.swift": "swift",
+    # C/C++
+    "main.c": "c",
+    "main.cpp": "cpp",
+}
+
+# Files that signal a package / module root for each language.
+PACKAGE_MARKERS: dict[str, str] = {
+    "__init__.py": "python",
+    "package.json": "javascript",
+    "go.mod": "go",
+    "Cargo.toml": "rust",
+    "pom.xml": "java",
+    "build.gradle": "java",
+    "build.gradle.kts": "kotlin",
+    # .csproj matched via suffix check below
+
+    "Package.swift": "swift",
+    "Gemfile": "ruby",
+}
 
 
 # Extension → language name mapping for multi-language support.
@@ -86,14 +153,30 @@ def scan_repo(root: Path) -> ScanResult:
             if ext == ".py":
                 result.py_files.append(rel_path)
 
-                # Package detection
-                if fname == "__init__.py" and rel_dir and rel_dir not in seen_packages:
-                    seen_packages.add(rel_dir)
-                    result.packages.append(rel_dir)
+            # Package / module root detection (language-aware)
+            # Handle suffix-based markers (e.g. .csproj files)
+            if fname.endswith(".csproj"):
+                pkg_dir = rel_dir if rel_dir else "."
+                if pkg_dir not in seen_packages:
+                    seen_packages.add(pkg_dir)
+                    result.packages.append(pkg_dir)
+            if fname in PACKAGE_MARKERS:
+                pkg_lang = PACKAGE_MARKERS[fname]
+                if pkg_lang == "python":
+                    # Python packages are the directory containing __init__.py
+                    if rel_dir and rel_dir not in seen_packages:
+                        seen_packages.add(rel_dir)
+                        result.packages.append(rel_dir)
+                else:
+                    # Other languages: the directory containing the marker is a package root
+                    pkg_dir = rel_dir if rel_dir else "."
+                    if pkg_dir not in seen_packages:
+                        seen_packages.add(pkg_dir)
+                        result.packages.append(pkg_dir)
 
-                # Entrypoint detection
-                if fname in ENTRYPOINT_NAMES:
-                    result.entrypoints.append(rel_path)
+            # Entrypoint detection (language-aware)
+            if fname in ENTRYPOINT_NAMES:
+                result.entrypoints.append(rel_path)
 
     result.py_files.sort()
     result.source_files.sort(key=lambda sf: sf.path)

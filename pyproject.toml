@@ -4,13 +4,25 @@ build-backend = "hatchling.build"
 
 [project]
 name = "docbot"
-version = "0.1.0"
-description = "Generate thorough documentation for a Python repo using parallel exploration and map-reduce."
+version = "0.2.0"
+description = "Generate thorough documentation for any repository using parallel exploration and map-reduce."
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.9",
     "pydantic>=2.0",
     "rich>=13.0",
+    # Tree-sitter extraction
+    "tree-sitter>=0.21",
+    "tree-sitter-python>=0.21",
+    "tree-sitter-javascript>=0.21",
+    "tree-sitter-typescript>=0.21",
+    "tree-sitter-go>=0.21",
+    "tree-sitter-rust>=0.21",
+    "tree-sitter-java>=0.21",
+    # Webapp
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "sse-starlette>=1.8",
 ]
 
 [project.scripts]

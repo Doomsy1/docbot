@@ -21,17 +21,25 @@ class LLMClient:
 
     api_key: str
     model: str = DEFAULT_MODEL
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.3
 
-    def _call_sync(self, messages: list[dict[str, str]]) -> str:
+    def _call_sync(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = False,
+    ) -> str:
         """Blocking HTTP call to OpenRouter. Meant to be run via asyncio.to_thread."""
-        payload = json.dumps({
+        body: dict = {
             "model": self.model,
             "messages": messages,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
-        }).encode("utf-8")
+        }
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        payload = json.dumps(body).encode("utf-8")
 
         req = urllib.request.Request(
             OPENROUTER_URL,
@@ -59,14 +67,25 @@ class LLMClient:
         except (KeyError, IndexError) as exc:
             raise RuntimeError(f"Unexpected OpenRouter response shape: {body}") from exc
 
-    async def chat(self, messages: list[dict[str, str]]) -> str:
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = False,
+    ) -> str:
         """Send a chat completion request asynchronously."""
-        return await asyncio.to_thread(self._call_sync, messages)
+        return await asyncio.to_thread(self._call_sync, messages, json_mode=json_mode)
 
-    async def ask(self, prompt: str, *, system: str | None = None) -> str:
+    async def ask(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        json_mode: bool = False,
+    ) -> str:
         """Convenience: single user prompt with optional system message."""
         messages: list[dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        return await self.chat(messages)
+        return await self.chat(messages, json_mode=json_mode)

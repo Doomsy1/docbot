@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from docbot.scanner import (
+from docbot.pipeline.scanner import (
+    ENTRYPOINT_NAMES,
     LANGUAGE_EXTENSIONS,
     SKIP_DIRS,
-    ScanResult,
     scan_repo,
 )
 

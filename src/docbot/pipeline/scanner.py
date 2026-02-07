@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .models import SourceFile
+    from ..models import SourceFile
 
 # Directories to skip unconditionally.
 SKIP_DIRS: set[str] = {
@@ -126,7 +126,7 @@ def scan_repo(root: Path) -> ScanResult:
     Paths are returned **relative to root** using forward slashes for
     portability.
     """
-    from .models import SourceFile
+    from ..models import SourceFile
 
     root = root.resolve()
     result = ScanResult(root=root)

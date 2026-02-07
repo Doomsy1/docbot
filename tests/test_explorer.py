@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from docbot.extractors import setup_extractors
-from docbot.explorer import explore_scope
+from docbot.pipeline.explorer import explore_scope
 from docbot.models import ScopePlan
 
 

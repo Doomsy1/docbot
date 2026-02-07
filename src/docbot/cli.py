@@ -62,7 +62,7 @@ def _require_docbot(path: Path | None = None) -> tuple[Path, Path]:
     Returns ``(project_root, docbot_dir)`` where *docbot_dir* is the
     ``.docbot/`` directory and *project_root* is its parent.
     """
-    from .project import find_docbot_root
+    from .git.project import find_docbot_root
 
     start = Path(path).resolve() if path else Path.cwd()
     project_root = find_docbot_root(start)
@@ -230,7 +230,7 @@ def init(
     ),
 ) -> None:
     """Initialise a .docbot/ directory in a git repository."""
-    from .project import init_project
+    from .git.project import init_project
 
     target = Path(path).resolve() if path else Path.cwd()
 
@@ -280,9 +280,9 @@ def generate(
 ) -> None:
     """Run the full documentation pipeline, output to .docbot/."""
     from .models import DocbotConfig
-    from .orchestrator import generate_async, run_async
-    from .project import load_config
-    from .tracker import NoOpTracker, PipelineTracker
+    from .pipeline.orchestrator import generate_async, run_async
+    from .git.project import load_config
+    from .pipeline.tracker import NoOpTracker, PipelineTracker
 
     project_root, docbot_dir = _require_docbot(path)
     _load_dotenv(project_root)
@@ -301,7 +301,7 @@ def generate(
 
     # --mock-viz: simulated pipeline for visualization development.
     if mock_viz:
-        from .viz_server import start_viz_server
+        from .viz.viz_server import start_viz_server
 
         tracker = PipelineTracker()
         _server, url = start_viz_server(tracker)
@@ -323,7 +323,7 @@ def generate(
     # Set up visualization tracker.
     tracker: PipelineTracker | NoOpTracker
     if visualize:
-        from .viz_server import start_viz_server
+        from .viz.viz_server import start_viz_server
 
         tracker = PipelineTracker()
         _server, url = start_viz_server(tracker)
@@ -369,9 +369,9 @@ def update(
 ) -> None:
     """Incrementally update docs for files changed since the last documented commit."""
     from .models import DocbotConfig
-    from .orchestrator import update_async
-    from .project import load_config
-    from .tracker import NoOpTracker
+    from .pipeline.orchestrator import update_async
+    from .git.project import load_config
+    from .pipeline.tracker import NoOpTracker
 
     project_root, docbot_dir = _require_docbot(path)
     _load_dotenv(project_root)
@@ -403,8 +403,8 @@ def status(
     ),
 ) -> None:
     """Show the current documentation state."""
-    from .git_utils import get_changed_files, get_current_commit
-    from .project import load_config, load_state
+    from .git.utils import get_changed_files, get_current_commit
+    from .git.project import load_config, load_state
 
     project_root, docbot_dir = _require_docbot(path)
     state = load_state(docbot_dir)
@@ -483,7 +483,7 @@ def serve(
         run_dir = _resolve_run_dir(resolved)
     else:
         # Default: try to find .docbot/ in the current project.
-        from .project import find_docbot_root
+        from .git.project import find_docbot_root
 
         project_root = find_docbot_root(Path.cwd())
         if project_root and (project_root / ".docbot" / "docs_index.json").exists():
@@ -496,7 +496,7 @@ def serve(
             console.print(
                 f"[bold]No docs found -- running analysis on[/bold] {resolved}"
             )
-            from .orchestrator import run_async
+            from .pipeline.orchestrator import run_async
 
             llm_client = _build_llm_client(model)
             run_dir = asyncio.run(run_async(repo_path=resolved, llm_client=llm_client))
@@ -514,7 +514,7 @@ def serve(
     # Ensure webapp is built before starting server
     _ensure_webapp_built()
 
-    from .server import start_server
+    from .web.server import start_server
 
     url = f"http://{host}:{port}"
     console.print(f"[bold cyan]Serving[/bold cyan] {run_dir}")
@@ -536,7 +536,7 @@ def config(
     path: Optional[Path] = typer.Option(None, "--path", help="Repository path."),
 ) -> None:
     """View or modify .docbot/config.toml settings."""
-    from .project import load_config, save_config
+    from .git.project import load_config, save_config
 
     _project_root, docbot_dir = _require_docbot(path)
 
@@ -697,7 +697,7 @@ def hook_install(
     By default, installs both post-commit and post-merge hooks.
     Use --commit-only to install only the post-commit hook.
     """
-    from .hooks import install_hook
+    from .git.hooks import install_hook
 
     project_root, _docbot_dir = _require_docbot(path)
 
@@ -721,7 +721,7 @@ def hook_uninstall(
     ),
 ) -> None:
     """Remove the docbot post-commit hook."""
-    from .hooks import uninstall_hook
+    from .git.hooks import uninstall_hook
 
     project_root, _docbot_dir = _require_docbot(path)
 
@@ -772,8 +772,8 @@ def run(
 
     This is the original standalone pipeline. Prefer 'docbot init' + 'docbot generate'.
     """
-    from .orchestrator import run_async
-    from .tracker import NoOpTracker, PipelineTracker
+    from .pipeline.orchestrator import run_async
+    from .pipeline.tracker import NoOpTracker, PipelineTracker
 
     if mock_viz:
         from .viz_server import start_viz_server
@@ -849,7 +849,7 @@ def replay(
 ) -> None:
     """Replay a past pipeline visualization."""
     from .git.history import list_snapshots
-    from .viz_server import start_replay_server
+    from .viz.viz_server import start_replay_server
     import webbrowser
 
     project_root, docbot_dir = _require_docbot(path)

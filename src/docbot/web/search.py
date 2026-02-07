@@ -11,7 +11,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .models import Citation, FileExtraction, PublicSymbol
+from ..models import Citation, FileExtraction, PublicSymbol
 
 
 @dataclass

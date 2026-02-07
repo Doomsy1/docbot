@@ -10,7 +10,7 @@ import json
 import tomllib
 from pathlib import Path
 
-from .models import DocbotConfig, ProjectState
+from ..models import DocbotConfig, ProjectState
 
 # ---------------------------------------------------------------------------
 # Constants

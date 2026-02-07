@@ -12,9 +12,9 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from .explorer import enrich_scope_with_llm, explore_scope
-from .extractors import setup_extractors
-from .llm import LLMClient
-from .models import DocsIndex, RunMeta, ScopePlan, ScopeResult
+from ..extractors import setup_extractors
+from ..llm import LLMClient
+from ..models import DocsIndex, RunMeta, ScopePlan, ScopeResult
 from .planner import build_plan, refine_plan_with_llm
 from .reducer import reduce, reduce_with_llm
 from .renderer import render, render_with_llm
@@ -445,7 +445,7 @@ async def generate_async(
         tracker = NoOpTracker()
     
     # Setup extractors
-    from .extractors import setup_extractors
+    from ..extractors import setup_extractors
     setup_extractors(llm_client=llm_client)
     
     using_llm = llm_client is not None
@@ -533,9 +533,9 @@ async def generate_async(
     meta.finished_at = datetime.now(timezone.utc).isoformat()
     
     # Build scope_file_map: scope_id -> list of repo-relative file paths
-    from .project import save_state
-    from .git_utils import get_current_commit
-    from .models import ProjectState
+    from ..git.project import save_state
+    from ..git.utils import get_current_commit
+    from ..models import ProjectState
     
     scope_file_map: dict[str, list[str]] = {}
     for sr in scope_results:
@@ -602,8 +602,8 @@ async def update_async(
     
     Returns the docbot_root path.
     """
-    from .project import load_state
-    from .git_utils import is_commit_reachable
+    from ..git.project import load_state
+    from ..git.utils import is_commit_reachable
     
     docbot_root = docbot_root.resolve()
     repo_path = docbot_root.parent
@@ -622,7 +622,7 @@ async def update_async(
         return await generate_async(docbot_root, config, llm_client, tracker)
     
     # State is valid - detect changed files
-    from .git_utils import get_changed_files
+    from ..git.utils import get_changed_files
     
     console.print(f"[dim]State valid (last commit: {state.last_commit[:8]})[/dim]")
     
@@ -702,7 +702,7 @@ async def update_async(
         console.print("[yellow]No plan.json found. Running full generate...[/yellow]")
         return await generate_async(docbot_root, config, llm_client, tracker)
     
-    from .models import ScopePlan
+    from ..models import ScopePlan
     plans_data = json.loads(plan_path.read_text(encoding="utf-8"))
     all_plans = [ScopePlan(**p) for p in plans_data]
     
@@ -723,7 +723,7 @@ async def update_async(
                   f"loading {len(unaffected_plans)} cached scope(s)[/bold]")
     
     # Load cached results for unaffected scopes
-    from .models import ScopeResult
+    from ..models import ScopeResult
     cached_results: list[ScopeResult] = []
     for plan in unaffected_plans:
         cached_file = scopes_dir / f"{plan.scope_id}.json"
@@ -739,7 +739,7 @@ async def update_async(
         tracker = NoOpTracker()
     
     # Setup extractors
-    from .extractors import setup_extractors
+    from ..extractors import setup_extractors
     setup_extractors(llm_client=llm_client)
     
     # Build tracker tree for incremental update
@@ -786,9 +786,9 @@ async def update_async(
     written = await _run_render(docs_index, all_scope_results, docs_dir, llm_client, tracker, mock=False)
     
     # Update state
-    from .project import save_state
-    from .git_utils import get_current_commit
-    from .models import ProjectState, RunMeta
+    from ..git.project import save_state
+    from ..git.utils import get_current_commit
+    from ..models import ProjectState, RunMeta
     
     run_id = _make_run_id()
     tracker.set_run_id(run_id)

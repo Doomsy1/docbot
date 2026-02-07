@@ -653,6 +653,15 @@ async def update_async(
     affected_plans = [p for p in all_plans if p.scope_id in affected_scope_ids]
     unaffected_plans = [p for p in all_plans if p.scope_id not in affected_scope_ids]
     
+    # Check if >50% of scopes are affected
+    total_scopes = len(all_plans)
+    affected_count = len(affected_plans)
+    affected_percentage = (affected_count / total_scopes * 100) if total_scopes > 0 else 0
+    
+    if affected_percentage > 50:
+        console.print(f"[yellow]Warning: {affected_count}/{total_scopes} scopes affected ({affected_percentage:.0f}%).[/yellow]")
+        console.print("[yellow]Consider running 'docbot generate' for a full rebuild instead.[/yellow]")
+    
     console.print(f"[bold]Re-exploring {len(affected_plans)} affected scope(s), "
                   f"loading {len(unaffected_plans)} cached scope(s)[/bold]")
     

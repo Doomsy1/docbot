@@ -244,8 +244,8 @@ full experience.
 
 #### CLI Update -- Dev A
 
-- [ ] Update `generate` command to call `generate_async()` instead of `run_async()`
-- [ ] Update `update` command to call `update_async()` instead of falling back to generate
+- [x] Update `generate` command to call `generate_async()` instead of `run_async()`
+- [x] Update `update` command to call `update_async()` instead of falling back to generate
 
 #### Verification
 
@@ -298,14 +298,14 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Models (`src/docbot/models.py`) -- Dev A
 
-- [ ] Add `DocSnapshot` model:
-  - [ ] `commit_hash: str` -- git commit at snapshot time
-  - [ ] `run_id: str` and `timestamp: str`
-  - [ ] `scope_summaries: dict[str, ScopeSummary]` -- scope_id -> { file_count, symbol_count, summary_hash }
-  - [ ] `graph_digest: str` -- hash of dependency graph edges
-  - [ ] `doc_hashes: dict[str, str]` -- doc filename -> content hash
-  - [ ] `stats: SnapshotStats` -- total files, scopes, symbols, edges
-- [ ] Add `max_snapshots: int = 10` field to `DocbotConfig`
+- [x] Add `DocSnapshot` model:
+  - [x] `commit_hash: str` -- git commit at snapshot time
+  - [x] `run_id: str` and `timestamp: str`
+  - [x] `scope_summaries: dict[str, ScopeSummary]` -- scope_id -> { file_count, symbol_count, summary_hash }
+  - [x] `graph_digest: str` -- hash of dependency graph edges
+  - [x] `doc_hashes: dict[str, str]` -- doc filename -> content hash
+  - [x] `stats: SnapshotStats` -- total files, scopes, symbols, edges
+- [x] Add `max_snapshots: int = 10` field to `DocbotConfig`
 
 #### Snapshot Management (`src/docbot/git/history.py`) -- Dev B
 
@@ -331,17 +331,17 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Models (`src/docbot/models.py`) -- Dev A
 
-- [ ] Add `ScopeModification` model:
-  - [ ] `scope_id: str`
-  - [ ] `added_files: list[str]`, `removed_files: list[str]`
-  - [ ] `added_symbols: list[str]`, `removed_symbols: list[str]`
-  - [ ] `summary_changed: bool`
-- [ ] Add `DiffReport` model:
-  - [ ] `added_scopes: list[str]` -- scope IDs that are new
-  - [ ] `removed_scopes: list[str]` -- scope IDs that no longer exist
-  - [ ] `modified_scopes: list[ScopeModification]`
-  - [ ] `graph_changes: GraphDelta` -- new edges, removed edges, changed nodes
-  - [ ] `stats_delta: StatsDelta` -- change in total files, scopes, symbols
+- [x] Add `ScopeModification` model:
+  - [x] `scope_id: str`
+  - [x] `added_files: list[str]`, `removed_files: list[str]`
+  - [x] `added_symbols: list[str]`, `removed_symbols: list[str]`
+  - [x] `summary_changed: bool`
+- [x] Add `DiffReport` model:
+  - [x] `added_scopes: list[str]` -- scope IDs that are new
+  - [x] `removed_scopes: list[str]` -- scope IDs that no longer exist
+  - [x] `modified_scopes: list[ScopeModification]`
+  - [x] `graph_changes: GraphDelta` -- new edges, removed edges, changed nodes
+  - [x] `stats_delta: StatsDelta` -- change in total files, scopes, symbols
 
 #### Diff Logic (`src/docbot/git/diff.py`) -- Dev B
 

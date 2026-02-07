@@ -1,5 +1,24 @@
 import { useEffect, useState } from 'react';
-import { IconChartBar, IconFiles, IconCode, IconBook, IconCpu } from '@tabler/icons-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { IconChartBar, IconFiles, IconCode, IconBook, IconCpu, IconChevronDown, IconChevronRight } from '@tabler/icons-react';
+
+interface ScopeSummary {
+  scope_id: string;
+  title: string;
+  file_count: number;
+  symbol_count: number;
+  languages: string[];
+}
+
+interface PublicSymbolItem {
+  name: string;
+  kind: string;
+  signature: string;
+  docstring: string | null;
+  file: string;
+  line: number;
+}
 
 interface IndexData {
   repo_path: string;
@@ -9,11 +28,59 @@ interface IndexData {
   public_api_count: number;
   entrypoints: string[];
   cross_scope_analysis: string | null;
+  scopes: ScopeSummary[];
+  public_api_by_scope: Record<string, PublicSymbolItem[]>;
+  entrypoint_groups: Record<string, string[]>;
+}
+
+interface ExpandableCardProps {
+  icon: React.ReactNode;
+  count: number;
+  label: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}
+
+function ExpandableCard({ icon, count, label, expanded, onToggle, children }: ExpandableCardProps) {
+  return (
+    <div className="bg-white border border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+      <button
+        onClick={onToggle}
+        className="w-full p-4 flex items-center gap-3 cursor-pointer hover:bg-gray-50 transition-colors"
+      >
+        {icon}
+        <div className="text-left flex-1">
+          <div className="text-2xl font-bold font-mono">{count}</div>
+          <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
+        </div>
+        {expanded
+          ? <IconChevronDown size={18} className="text-gray-400" />
+          : <IconChevronRight size={18} className="text-gray-400" />
+        }
+      </button>
+      {expanded && (
+        <div className="border-t border-gray-200 p-4 max-h-80 overflow-auto">
+          {children}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function Dashboard() {
   const [data, setData] = useState<IndexData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
+
+  const toggleCard = (card: string) => {
+    setExpandedCards(prev => {
+      const next = new Set(prev);
+      if (next.has(card)) next.delete(card);
+      else next.add(card);
+      return next;
+    });
+  };
 
   useEffect(() => {
     fetch('/api/index')
@@ -39,7 +106,7 @@ export default function Dashboard() {
   return (
     <div className="h-full overflow-auto bg-gray-50">
         <div className="max-w-4xl mx-auto p-8 space-y-8">
-            
+
             {/* Header */}
             <div className="border-b border-black pb-4">
                 <h1 className="text-3xl font-bold font-mono selection:bg-black selection:text-white">
@@ -54,27 +121,90 @@ export default function Dashboard() {
 
             {/* Stats Grid */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="bg-white border border-black p-4 flex items-center gap-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                    <IconBook size={24} className="text-blue-600" />
-                    <div>
-                        <div className="text-2xl font-bold font-mono">{data.scope_count}</div>
-                        <div className="text-xs uppercase tracking-wide text-gray-500">Scopes</div>
-                    </div>
-                </div>
-                <div className="bg-white border border-black p-4 flex items-center gap-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                    <IconCode size={24} className="text-green-600" />
-                    <div>
-                        <div className="text-2xl font-bold font-mono">{data.public_api_count}</div>
-                        <div className="text-xs uppercase tracking-wide text-gray-500">Public Symbols</div>
-                    </div>
-                </div>
-                <div className="bg-white border border-black p-4 flex items-center gap-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                    <IconFiles size={24} className="text-orange-600" />
-                    <div>
-                        <div className="text-2xl font-bold font-mono">{data.entrypoints.length}</div>
-                        <div className="text-xs uppercase tracking-wide text-gray-500">Entrypoints</div>
-                    </div>
-                </div>
+                {/* Scopes */}
+                <ExpandableCard
+                  icon={<IconBook size={24} className="text-blue-600" />}
+                  count={data.scope_count}
+                  label="Scopes"
+                  expanded={expandedCards.has('scopes')}
+                  onToggle={() => toggleCard('scopes')}
+                >
+                  <div className="space-y-2">
+                    {(data.scopes || []).map(scope => (
+                      <div key={scope.scope_id} className="flex items-start gap-2 py-1.5 border-b border-gray-100 last:border-0">
+                        <div className="flex-1 min-w-0">
+                          <div className="font-mono text-sm font-medium truncate">{scope.title}</div>
+                          <div className="text-xs text-gray-500">
+                            {scope.file_count} file{scope.file_count !== 1 ? 's' : ''}
+                            {' · '}
+                            {scope.symbol_count} symbol{scope.symbol_count !== 1 ? 's' : ''}
+                            {scope.languages.length > 0 && (
+                              <> · {scope.languages.join(', ')}</>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </ExpandableCard>
+
+                {/* Public Symbols */}
+                <ExpandableCard
+                  icon={<IconCode size={24} className="text-green-600" />}
+                  count={data.public_api_count}
+                  label="Public Symbols"
+                  expanded={expandedCards.has('symbols')}
+                  onToggle={() => toggleCard('symbols')}
+                >
+                  <div className="space-y-4">
+                    {Object.entries(data.public_api_by_scope || {}).map(([scopeTitle, symbols]) => (
+                      <div key={scopeTitle}>
+                        <div className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-1.5">{scopeTitle}</div>
+                        <div className="space-y-1">
+                          {symbols.map((sym, i) => (
+                            <div key={i} className="py-1 border-b border-gray-100 last:border-0">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`inline-block px-1 py-0.5 text-[10px] font-mono font-bold uppercase rounded ${
+                                  sym.kind === 'class' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                                }`}>
+                                  {sym.kind === 'class' ? 'cls' : 'fn'}
+                                </span>
+                                <span className="font-mono text-sm truncate">{sym.name}</span>
+                              </div>
+                              {sym.docstring && (
+                                <div className="text-xs text-gray-500 ml-7 truncate">{sym.docstring}</div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </ExpandableCard>
+
+                {/* Entrypoints */}
+                <ExpandableCard
+                  icon={<IconFiles size={24} className="text-orange-600" />}
+                  count={data.entrypoints.length}
+                  label="Entrypoints"
+                  expanded={expandedCards.has('entrypoints')}
+                  onToggle={() => toggleCard('entrypoints')}
+                >
+                  <div className="space-y-3">
+                    {Object.entries(data.entrypoint_groups || {}).map(([group, paths]) => (
+                      <div key={group}>
+                        <div className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-1">{group}/</div>
+                        <div className="space-y-0.5">
+                          {paths.map(ep => (
+                            <div key={ep} className="font-mono text-sm text-gray-700 py-0.5 truncate">
+                              {ep}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </ExpandableCard>
             </div>
 
             {/* Analysis Section */}
@@ -83,10 +213,12 @@ export default function Dashboard() {
                     <IconChartBar className="text-purple-600" />
                     <h2 className="text-lg font-bold uppercase tracking-wide">Architecture Analysis</h2>
                 </div>
-                
+
                 {data.cross_scope_analysis ? (
-                    <div className="prose prose-sm max-w-none font-sans leading-relaxed whitespace-pre-wrap">
-                        {data.cross_scope_analysis}
+                    <div className="prose prose-sm max-w-none font-sans leading-relaxed">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {data.cross_scope_analysis}
+                        </ReactMarkdown>
                     </div>
                 ) : (
                     <div className="text-gray-400 italic font-mono py-8 text-center border-2 border-dashed border-gray-200">

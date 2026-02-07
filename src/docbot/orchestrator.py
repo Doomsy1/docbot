@@ -390,3 +390,182 @@ async def run_async(
     tracker.set_state("orchestrator", AgentState.done)
     console.print(f"\n[bold green]Done![/bold green] Output in: {run_dir}")
     return run_dir
+
+
+async def generate_async(
+    docbot_root: Path,
+    config: DocbotConfig,
+    llm_client: LLMClient | None = None,
+    tracker: NoOpTracker | None = None,
+) -> Path:
+    """Run full pipeline and output to .docbot/ directory.
+    
+    This is the git-aware version of run_async that:
+    - Infers repo_path from docbot_root.parent
+    - Outputs directly to docbot_root (not a timestamped run dir)
+    - Saves plan.json and docs_index.json for later use
+    
+    Returns the docbot_root path.
+    """
+    docbot_root = docbot_root.resolve()
+    repo_path = docbot_root.parent
+    
+    if tracker is None:
+        tracker = NoOpTracker()
+    
+    # Setup extractors
+    from .extractors import setup_extractors
+    setup_extractors(llm_client=llm_client)
+    
+    using_llm = llm_client is not None
+    if using_llm:
+        console.print(f"[bold]LLM:[/bold] {llm_client.model} via OpenRouter (used at every step)")
+    else:
+        console.print("[dim]No LLM configured; using template-only mode.[/dim]")
+    
+    # Create run metadata
+    run_id = _make_run_id()
+    meta = RunMeta(
+        run_id=run_id,
+        repo_path=str(repo_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    
+    # Build tracker tree skeleton
+    tracker.add_node("orchestrator", "Orchestrator")
+    tracker.add_node("scanner", "Scanner", "orchestrator")
+    tracker.add_node("planner", "Planner", "orchestrator")
+    tracker.add_node("explorer_hub", "Explorer Hub", "orchestrator")
+    tracker.add_node("reducer", "Reducer", "orchestrator")
+    tracker.add_node("renderer", "Renderer", "orchestrator")
+    
+    tracker.set_state("orchestrator", AgentState.running)
+    
+    # 1. Scan
+    scan = await _run_scan(repo_path, tracker, mock=False)
+    
+    if not scan.source_files:
+        console.print("[yellow]No source files found. Nothing to do.[/yellow]")
+        tracker.set_state("orchestrator", AgentState.done)
+        return docbot_root
+    
+    # 2. Plan (+ LLM refinement)
+    plans = await _run_plan(scan, config.max_scopes, llm_client, tracker, mock=False, meta=meta)
+    
+    # Save plan.json to docbot root
+    plan_path = docbot_root / "plan.json"
+    plan_path.write_text(
+        json.dumps([p.model_dump() for p in plans], indent=2),
+        encoding="utf-8",
+    )
+    
+    # 3. Explore in parallel (+ LLM summaries)
+    scope_results = await _run_explore(
+        plans, repo_path, config.concurrency, config.timeout, llm_client, tracker, mock=False
+    )
+    
+    # Save per-scope results to scopes/
+    scopes_dir = docbot_root / "scopes"
+    scopes_dir.mkdir(exist_ok=True)
+    for sr in scope_results:
+        (scopes_dir / f"{sr.scope_id}.json").write_text(
+            sr.model_dump_json(indent=2), encoding="utf-8",
+        )
+    
+    succeeded = sum(1 for r in scope_results if r.error is None)
+    failed = len(scope_results) - succeeded
+    meta.succeeded = succeeded
+    meta.failed = failed
+    
+    if failed:
+        console.print(f"  [yellow]{failed} scope(s) failed.[/yellow]")
+    console.print(f"  [green]{succeeded}/{len(scope_results)} scope(s) succeeded.[/green]")
+    
+    # 4. Reduce (+ LLM cross-scope analysis + Mermaid)
+    docs_index = await _run_reduce(scope_results, str(repo_path), llm_client, tracker, mock=False)
+    
+    # Save docs_index.json to docbot root
+    index_path = docbot_root / "docs_index.json"
+    index_path.write_text(docs_index.model_dump_json(indent=2), encoding="utf-8")
+    
+    # 5. Render (+ LLM for all narrative docs)
+    docs_dir = docbot_root / "docs"
+    docs_dir.mkdir(exist_ok=True)
+    written = await _run_render(docs_index, scope_results, docs_dir, llm_client, tracker, mock=False)
+    
+    meta.finished_at = datetime.now(timezone.utc).isoformat()
+    
+    # Build scope_file_map: scope_id -> list of repo-relative file paths
+    from .project import save_state
+    from .git_utils import get_current_commit
+    from .models import ProjectState
+    
+    scope_file_map: dict[str, list[str]] = {}
+    for sr in scope_results:
+        # Normalize paths to forward slashes for consistency
+        scope_file_map[sr.scope_id] = [p.replace("\\", "/") for p in sr.paths]
+    
+    # Get current commit hash
+    current_commit = get_current_commit(repo_path)
+    
+    # Save state.json
+    state = ProjectState(
+        last_commit=current_commit,
+        last_run_id=run_id,
+        last_run_at=meta.finished_at,
+        scope_file_map=scope_file_map,
+    )
+    save_state(docbot_root, state)
+    
+    # Save RunMeta to history/
+    history_dir = docbot_root / "history"
+    history_dir.mkdir(exist_ok=True)
+    (history_dir / f"{run_id}.json").write_text(
+        meta.model_dump_json(indent=2), encoding="utf-8"
+    )
+    
+    tracker.set_state("orchestrator", AgentState.done)
+    console.print(f"\n[bold green]Done![/bold green] Documentation in: {docs_dir}")
+    return docbot_root
+
+
+async def update_async(
+    docbot_root: Path,
+    config: DocbotConfig,
+    llm_client: LLMClient | None = None,
+    tracker: NoOpTracker | None = None,
+) -> Path:
+    """Incrementally update documentation based on git changes.
+    
+    Loads state from .docbot/state.json, validates the last commit is still
+    reachable, and falls back to generate_async() if not.
+    
+    For now (Step 5), this just validates and calls generate_async().
+    Later steps will add incremental update logic.
+    
+    Returns the docbot_root path.
+    """
+    from .project import load_state
+    from .git_utils import is_commit_reachable
+    
+    docbot_root = docbot_root.resolve()
+    repo_path = docbot_root.parent
+    
+    # Load state
+    state = load_state(docbot_root)
+    
+    # Validate last_commit is reachable
+    if state.last_commit is None:
+        console.print("[yellow]No previous run found. Running full generate...[/yellow]")
+        return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    if not is_commit_reachable(repo_path, state.last_commit):
+        console.print(f"[yellow]Last commit {state.last_commit[:8]} is no longer reachable.[/yellow]")
+        console.print("[yellow]Running full generate...[/yellow]")
+        return await generate_async(docbot_root, config, llm_client, tracker)
+    
+    # State is valid, but for now (Step 5) we just call generate_async
+    # Later steps will add incremental update logic
+    console.print(f"[dim]State valid (last commit: {state.last_commit[:8]})[/dim]")
+    console.print("[yellow]Incremental update not yet implemented. Running full generate...[/yellow]")
+    return await generate_async(docbot_root, config, llm_client, tracker)

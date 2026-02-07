@@ -1,0 +1,5 @@
+model = "xiaomi/mimo-v2-flash"
+concurrency = 4
+timeout = 120.0
+max_scopes = 20
+no_llm = false

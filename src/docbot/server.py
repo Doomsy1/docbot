@@ -37,7 +37,9 @@ def _load_index() -> DocsIndex:
 
     index_path = _run_dir / "docs_index.json"
     if not index_path.exists():
-        raise HTTPException(status_code=404, detail="docs_index.json not found in run directory.")
+        raise HTTPException(
+            status_code=404, detail="docs_index.json not found in run directory."
+        )
 
     _index_cache = DocsIndex.model_validate_json(index_path.read_text(encoding="utf-8"))
     return _index_cache
@@ -64,6 +66,7 @@ def _load_search_index() -> SearchIndex:
 # ---------------------------------------------------------------------------
 # API endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/search", response_model=list[dict])
 async def search(q: str) -> list[dict]:
@@ -135,11 +138,13 @@ async def get_scope_detail(scope_id: str) -> JSONResponse:
 async def get_graph() -> JSONResponse:
     """Return scope edges and optional Mermaid graph for visualization."""
     index = _load_index()
-    return JSONResponse({
-        "scopes": [s.scope_id for s in index.scopes],
-        "scope_edges": [{"from": a, "to": b} for a, b in index.scope_edges],
-        "mermaid_graph": index.mermaid_graph or None,
-    })
+    return JSONResponse(
+        {
+            "scopes": [s.scope_id for s in index.scopes],
+            "scope_edges": [{"from": a, "to": b} for a, b in index.scope_edges],
+            "mermaid_graph": index.mermaid_graph or None,
+        }
+    )
 
 
 @app.get("/api/files/{file_path:path}")
@@ -152,14 +157,18 @@ async def get_file(file_path: str) -> JSONResponse:
     repo_root = Path(index.repo_path).resolve()
 
     if not repo_root.exists():
-        raise HTTPException(status_code=500, detail=f"Repository root not found at {repo_root}")
+        raise HTTPException(
+            status_code=500, detail=f"Repository root not found at {repo_root}"
+        )
 
     target_path = (repo_root / file_path).resolve()
 
     try:
         target_path.relative_to(repo_root)
     except ValueError as exc:
-        raise HTTPException(status_code=403, detail="File path must be within repository root.") from exc
+        raise HTTPException(
+            status_code=403, detail="File path must be within repository root."
+        ) from exc
 
     if not target_path.exists() or not target_path.is_file():
         raise HTTPException(status_code=404, detail="File not found.")
@@ -168,7 +177,9 @@ async def get_file(file_path: str) -> JSONResponse:
         content = target_path.read_text(encoding="utf-8", errors="replace")
         return JSONResponse({"content": content, "path": file_path})
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Error reading file: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Error reading file: {exc}"
+        ) from exc
 
 
 @app.get("/api/fs")
@@ -179,7 +190,9 @@ async def get_fs() -> JSONResponse:
 
     repo_root = Path(_load_index().repo_path).resolve()
     if not repo_root.exists():
-        raise HTTPException(status_code=500, detail=f"Repository root not found at {repo_root}")
+        raise HTTPException(
+            status_code=500, detail=f"Repository root not found at {repo_root}"
+        )
 
     def build_tree(path: Path) -> dict:
         name = path.name
@@ -193,7 +206,14 @@ async def get_fs() -> JSONResponse:
             for item in items:
                 if item.name.startswith(".") and item.name != ".gitignore":
                     continue
-                if item.name in ("__pycache__", "venv", "node_modules", "runs", "dist", "build"):
+                if item.name in (
+                    "__pycache__",
+                    "venv",
+                    "node_modules",
+                    "runs",
+                    "dist",
+                    "build",
+                ):
                     continue
                 if item.is_dir() and item.name.endswith(".egg-info"):
                     continue
@@ -247,17 +267,28 @@ def _build_chat_system_prompt(index: DocsIndex) -> str:
     scope_lines = []
     for s in index.scopes:
         langs = ", ".join(s.languages) if s.languages else "unknown"
-        summary = (s.summary[:200] + "...") if s.summary and len(s.summary) > 200 else (s.summary or "")
-        scope_lines.append(f"- [{s.scope_id}] {s.title} ({langs}, {len(s.paths)} files): {summary}")
+        summary = (
+            (s.summary[:200] + "...")
+            if s.summary and len(s.summary) > 200
+            else (s.summary or "")
+        )
+        scope_lines.append(
+            f"- [{s.scope_id}] {s.title} ({langs}, {len(s.paths)} files): {summary}"
+        )
     scope_summaries = "\n".join(scope_lines) if scope_lines else "(none)"
 
     api_lines = []
     for sym in index.public_api[:80]:
         doc = f" -- {sym.docstring_first_line}" if sym.docstring_first_line else ""
-        api_lines.append(f"  {sym.signature}{doc}  [{sym.citation.file}:{sym.citation.line_start}]")
+        api_lines.append(
+            f"  {sym.signature}{doc}  [{sym.citation.file}:{sym.citation.line_start}]"
+        )
     api_block = "\n".join(api_lines) if api_lines else "(none)"
 
-    env_lines = [f"  {e.name} [{e.citation.file}:{e.citation.line_start}]" for e in index.env_vars[:30]]
+    env_lines = [
+        f"  {e.name} [{e.citation.file}:{e.citation.line_start}]"
+        for e in index.env_vars[:30]
+    ]
     env_block = "\n".join(env_lines) if env_lines else "(none)"
 
     edge_lines = [f"  {a} -> {b}" for a, b in index.scope_edges[:50]]
@@ -295,7 +326,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
         return ChatResponse(answer="Please provide a query.")
 
     if _llm_client is None:
-        raise HTTPException(status_code=503, detail="LLM not configured (missing OPENROUTER_KEY).")
+        raise HTTPException(
+            status_code=503, detail="LLM not configured (missing OPENROUTER_KEY)."
+        )
 
     index = _load_index()
     results = _load_search_index().search(question, limit=10)
@@ -371,7 +404,9 @@ def _build_tour_prompt(index: DocsIndex) -> str:
 
     scope_tours = ""
     for i, s in enumerate(index.scopes[:5], start=3):
-        scope_tours += f'{i}. "{s.scope_id}-deep-dive" - Deep dive into {s.title} (3-5 steps)\n'
+        scope_tours += (
+            f'{i}. "{s.scope_id}-deep-dive" - Deep dive into {s.title} (3-5 steps)\n'
+        )
 
     tour_count = 2 + min(len(index.scopes), 5)
 
@@ -425,7 +460,9 @@ async def _generate_tours(index: DocsIndex) -> list[dict]:
             steps.append(
                 {
                     "title": s.title,
-                    "description": s.summary[:200] if s.summary else f"Scope covering {len(s.paths)} file(s).",
+                    "description": s.summary[:200]
+                    if s.summary
+                    else f"Scope covering {len(s.paths)} file(s).",
                     "citation": {"file": first_file, "line_start": 1, "line_end": 30},
                 }
             )
@@ -527,6 +564,7 @@ async def get_tour_detail(tour_id: str) -> JSONResponse:
 # Server launcher
 # ---------------------------------------------------------------------------
 
+
 def start_server(
     run_dir: Path,
     host: str = "127.0.0.1",
@@ -546,7 +584,7 @@ def start_server(
 
     here = Path(__file__).parent.resolve()
     potential_dists = [
-        here / "web_dist",                    # Bundled package
+        here / "web_dist",  # Bundled package
         here.parents[1] / "webapp" / "dist",  # Editable/source checkout
     ]
 
@@ -558,9 +596,9 @@ def start_server(
 
     if dist_dir:
         if not any(getattr(route, "name", None) == "static" for route in app.routes):
-            app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="static")
+            app.mount(
+                "/", StaticFiles(directory=str(dist_dir), html=True), name="static"
+            )
         print(f"Serving static assets from {dist_dir}")
-    else:
-        print("Warning: webapp/dist not found. Serving API only.")
 
     uvicorn.run(app, host=host, port=port)

@@ -124,6 +124,67 @@ def _resolve_run_dir(path: Path) -> Path | None:
     return None
 
 
+def _ensure_webapp_built() -> None:
+    """Build the webapp if the dist folder doesn't exist."""
+    import subprocess
+    import sys
+
+    here = Path(__file__).parent.resolve()
+    potential_dists = [
+        here / "web_dist",  # Bundled package
+        here.parents[1] / "webapp" / "dist",  # Editable/source checkout
+    ]
+
+    # Check if dist already exists
+    for p in potential_dists:
+        if p.exists() and (p / "index.html").exists():
+            return  # Already built
+
+    # Find webapp source directory
+    webapp_dir = here.parents[1] / "webapp"
+    if not (webapp_dir / "package.json").exists():
+        console.print(
+            "[yellow]Warning: webapp source not found. Skipping auto-build.[/yellow]"
+        )
+        return
+
+    # Check for node_modules
+    node_modules = webapp_dir / "node_modules"
+    if not node_modules.exists():
+        console.print("[bold]Installing webapp dependencies...[/bold]")
+        try:
+            subprocess.run(
+                ["npm", "install"],
+                cwd=str(webapp_dir),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            console.print(f"[red]Error: npm install failed:[/red] {e.stderr}")
+            sys.exit(1)
+        except FileNotFoundError:
+            console.print(
+                "[red]Error: npm not found. Please install Node.js and npm.[/red]"
+            )
+            sys.exit(1)
+
+    # Build the webapp
+    console.print("[bold]Building webapp...[/bold]")
+    try:
+        subprocess.run(
+            ["npm", "run", "build"],
+            cwd=str(webapp_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        console.print("[green]Webapp built successfully![/green]")
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Error: npm run build failed:[/red] {e.stderr}")
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -131,7 +192,9 @@ def _resolve_run_dir(path: Path) -> Path | None:
 
 @app.command()
 def init(
-    path: Optional[Path] = typer.Argument(None, help="Repository path (default: current directory)."),
+    path: Optional[Path] = typer.Argument(
+        None, help="Repository path (default: current directory)."
+    ),
 ) -> None:
     """Initialise a .docbot/ directory in a git repository."""
     from .project import init_project
@@ -153,14 +216,28 @@ def init(
 
 @app.command()
 def generate(
-    path: Optional[Path] = typer.Argument(None, help="Repository path (default: current directory)."),
-    max_scopes: Optional[int] = typer.Option(None, "--max-scopes", help="Maximum documentation scopes."),
-    concurrency: Optional[int] = typer.Option(None, "--concurrency", "-j", help="Parallel explorer workers."),
-    timeout: Optional[float] = typer.Option(None, "--timeout", "-t", help="Per-scope timeout in seconds."),
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="OpenRouter model ID."),
+    path: Optional[Path] = typer.Argument(
+        None, help="Repository path (default: current directory)."
+    ),
+    max_scopes: Optional[int] = typer.Option(
+        None, "--max-scopes", help="Maximum documentation scopes."
+    ),
+    concurrency: Optional[int] = typer.Option(
+        None, "--concurrency", "-j", help="Parallel explorer workers."
+    ),
+    timeout: Optional[float] = typer.Option(
+        None, "--timeout", "-t", help="Per-scope timeout in seconds."
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m", help="OpenRouter model ID."
+    ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
-    visualize: bool = typer.Option(False, "--visualize", "--viz", help="Open live pipeline visualization."),
-    mock_viz: bool = typer.Option(False, "--mock-viz", help="Run mock pipeline simulation."),
+    visualize: bool = typer.Option(
+        False, "--visualize", "--viz", help="Open live pipeline visualization."
+    ),
+    mock_viz: bool = typer.Option(
+        False, "--mock-viz", help="Run mock pipeline simulation."
+    ),
 ) -> None:
     """Run the full documentation pipeline, output to .docbot/."""
     from .orchestrator import run_async
@@ -186,12 +263,14 @@ def generate(
         tracker = PipelineTracker()
         _server, url = start_viz_server(tracker)
         console.print(f"[bold cyan]Mock visualization:[/bold cyan] {url}")
-        asyncio.run(run_async(
-            repo_path=project_root,
-            concurrency=effective_concurrency,
-            tracker=tracker,
-            mock=True,
-        ))
+        asyncio.run(
+            run_async(
+                repo_path=project_root,
+                concurrency=effective_concurrency,
+                tracker=tracker,
+                mock=True,
+            )
+        )
         console.print("[dim]Simulation complete. Press Enter to exit.[/dim]")
         input()
         return
@@ -213,15 +292,17 @@ def generate(
         console.print(f"[bold]LLM:[/bold] {effective_model} via OpenRouter")
 
     # Run the pipeline, outputting to .docbot/.
-    asyncio.run(run_async(
-        repo_path=project_root,
-        output_base=docbot_dir,
-        max_scopes=effective_max_scopes,
-        concurrency=effective_concurrency,
-        timeout=effective_timeout,
-        llm_client=llm_client,
-        tracker=tracker,
-    ))
+    asyncio.run(
+        run_async(
+            repo_path=project_root,
+            output_base=docbot_dir,
+            max_scopes=effective_max_scopes,
+            concurrency=effective_concurrency,
+            timeout=effective_timeout,
+            llm_client=llm_client,
+            tracker=tracker,
+        )
+    )
 
     # Update project state with the current commit.
     state = load_state(docbot_dir)
@@ -230,6 +311,7 @@ def generate(
         state.last_commit = commit
     # Build scope_file_map from the plan if it was saved.
     import json
+
     plan_path = docbot_dir / "plan.json"
     if plan_path.is_file():
         try:
@@ -238,20 +320,31 @@ def generate(
         except Exception:
             pass
     from datetime import datetime, timezone
+
     state.last_run_at = datetime.now(timezone.utc).isoformat()
     save_state(docbot_dir, state)
 
     if visualize:
-        console.print("[dim]Visualization server still running. Press Enter to exit.[/dim]")
+        console.print(
+            "[dim]Visualization server still running. Press Enter to exit.[/dim]"
+        )
         input()
 
 
 @app.command()
 def update(
-    path: Optional[Path] = typer.Argument(None, help="Repository path (default: current directory)."),
-    concurrency: Optional[int] = typer.Option(None, "--concurrency", "-j", help="Parallel explorer workers."),
-    timeout: Optional[float] = typer.Option(None, "--timeout", "-t", help="Per-scope timeout in seconds."),
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="OpenRouter model ID."),
+    path: Optional[Path] = typer.Argument(
+        None, help="Repository path (default: current directory)."
+    ),
+    concurrency: Optional[int] = typer.Option(
+        None, "--concurrency", "-j", help="Parallel explorer workers."
+    ),
+    timeout: Optional[float] = typer.Option(
+        None, "--timeout", "-t", help="Per-scope timeout in seconds."
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m", help="OpenRouter model ID."
+    ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
 ) -> None:
     """Incrementally update docs for files changed since the last documented commit."""
@@ -278,12 +371,20 @@ def update(
             "(rebase or force-push?). Running full generate instead."
         )
         # Delegate to generate.
-        generate(path=path, model=model, concurrency=concurrency, timeout=timeout, no_llm=no_llm)
+        generate(
+            path=path,
+            model=model,
+            concurrency=concurrency,
+            timeout=timeout,
+            no_llm=no_llm,
+        )
         return
 
     current_commit = get_current_commit(project_root)
     if current_commit == state.last_commit:
-        console.print("[green]Documentation is up to date.[/green] No new commits since last run.")
+        console.print(
+            "[green]Documentation is up to date.[/green] No new commits since last run."
+        )
         return
 
     changed_files = get_changed_files(project_root, state.last_commit)
@@ -324,13 +425,19 @@ def update(
 
     # TODO: Implement incremental pipeline (Phase 3.5 in CHECKLIST.md).
     # For now, fall back to a full generate when update is requested.
-    console.print("[dim]Incremental update not yet implemented -- running full generate.[/dim]")
-    generate(path=path, model=model, concurrency=concurrency, timeout=timeout, no_llm=no_llm)
+    console.print(
+        "[dim]Incremental update not yet implemented -- running full generate.[/dim]"
+    )
+    generate(
+        path=path, model=model, concurrency=concurrency, timeout=timeout, no_llm=no_llm
+    )
 
 
 @app.command()
 def status(
-    path: Optional[Path] = typer.Argument(None, help="Repository path (default: current directory)."),
+    path: Optional[Path] = typer.Argument(
+        None, help="Repository path (default: current directory)."
+    ),
 ) -> None:
     """Show the current documentation state."""
     from .git_utils import get_changed_files, get_current_commit
@@ -364,7 +471,9 @@ def status(
                         affected.add(scope_id)
 
             console.print()
-            console.print(f"[yellow]{len(changed)} file(s) changed since last run:[/yellow]")
+            console.print(
+                f"[yellow]{len(changed)} file(s) changed since last run:[/yellow]"
+            )
             for f in changed[:15]:
                 console.print(f"  {f}")
             if len(changed) > 15:
@@ -381,11 +490,17 @@ def status(
 
 @app.command()
 def serve(
-    path: Optional[Path] = typer.Argument(None, help="Path to .docbot/, run directory, or repository."),
+    path: Optional[Path] = typer.Argument(
+        None, help="Path to .docbot/, run directory, or repository."
+    ),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
     port: int = typer.Option(8000, "--port", "-p", help="Port number."),
-    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID (for chat)."),
-    no_browser: bool = typer.Option(False, "--no-browser", help="Don't auto-open browser."),
+    model: str = typer.Option(
+        DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID (for chat)."
+    ),
+    no_browser: bool = typer.Option(
+        False, "--no-browser", help="Don't auto-open browser."
+    ),
 ) -> None:
     """Launch the interactive webapp to explore documentation.
 
@@ -415,7 +530,9 @@ def serve(
         if path is not None:
             # Path was given but no docs found -- run analysis first.
             resolved = Path(path).resolve()
-            console.print(f"[bold]No docs found -- running analysis on[/bold] {resolved}")
+            console.print(
+                f"[bold]No docs found -- running analysis on[/bold] {resolved}"
+            )
             from .orchestrator import run_async
 
             llm_client = _build_llm_client(model)
@@ -431,6 +548,9 @@ def serve(
 
     llm_client = _build_llm_client(model, quiet=True)
 
+    # Ensure webapp is built before starting server
+    _ensure_webapp_built()
+
     from .server import start_server
 
     url = f"http://{host}:{port}"
@@ -440,6 +560,7 @@ def serve(
     if not no_browser:
         import threading
         import webbrowser
+
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
 
     start_server(run_dir, host=host, port=port, llm_client=llm_client)
@@ -505,7 +626,9 @@ def config(
 
 @hook_app.command("install")
 def hook_install(
-    path: Optional[Path] = typer.Argument(None, help="Repository path (default: current directory)."),
+    path: Optional[Path] = typer.Argument(
+        None, help="Repository path (default: current directory)."
+    ),
 ) -> None:
     """Install a post-commit git hook that runs 'docbot update'."""
     from .hooks import install_hook
@@ -522,7 +645,9 @@ def hook_install(
 
 @hook_app.command("uninstall")
 def hook_uninstall(
-    path: Optional[Path] = typer.Argument(None, help="Repository path (default: current directory)."),
+    path: Optional[Path] = typer.Argument(
+        None, help="Repository path (default: current directory)."
+    ),
 ) -> None:
     """Remove the docbot post-commit hook."""
     from .hooks import uninstall_hook
@@ -543,14 +668,28 @@ def hook_uninstall(
 @app.command(hidden=True)
 def run(
     repo: Path = typer.Argument(..., help="Path to the target repository."),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Base directory for run output (default: ./runs)."),
-    max_scopes: int = typer.Option(20, "--max-scopes", help="Maximum number of documentation scopes."),
-    concurrency: int = typer.Option(4, "--concurrency", "-j", help="Maximum parallel explorer workers."),
-    timeout: float = typer.Option(120.0, "--timeout", "-t", help="Per-scope timeout in seconds."),
-    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID."),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Base directory for run output (default: ./runs)."
+    ),
+    max_scopes: int = typer.Option(
+        20, "--max-scopes", help="Maximum number of documentation scopes."
+    ),
+    concurrency: int = typer.Option(
+        4, "--concurrency", "-j", help="Maximum parallel explorer workers."
+    ),
+    timeout: float = typer.Option(
+        120.0, "--timeout", "-t", help="Per-scope timeout in seconds."
+    ),
+    model: str = typer.Option(
+        DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID."
+    ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
-    visualize: bool = typer.Option(False, "--visualize", "--viz", help="Open live pipeline visualization."),
-    mock_viz: bool = typer.Option(False, "--mock-viz", help="Run mock pipeline simulation."),
+    visualize: bool = typer.Option(
+        False, "--visualize", "--viz", help="Open live pipeline visualization."
+    ),
+    mock_viz: bool = typer.Option(
+        False, "--mock-viz", help="Run mock pipeline simulation."
+    ),
 ) -> None:
     """[Legacy] Scan, explore, and generate documentation for REPO.
 
@@ -565,12 +704,14 @@ def run(
         tracker = PipelineTracker()
         _server, url = start_viz_server(tracker)
         console.print(f"[bold cyan]Mock visualization:[/bold cyan] {url}")
-        asyncio.run(run_async(
-            repo_path=repo,
-            concurrency=concurrency,
-            tracker=tracker,
-            mock=True,
-        ))
+        asyncio.run(
+            run_async(
+                repo_path=repo,
+                concurrency=concurrency,
+                tracker=tracker,
+                mock=True,
+            )
+        )
         console.print("[dim]Simulation complete. Press Enter to exit.[/dim]")
         input()
         return
@@ -593,18 +734,22 @@ def run(
     else:
         tracker = NoOpTracker()
 
-    asyncio.run(run_async(
-        repo_path=repo,
-        output_base=output,
-        max_scopes=max_scopes,
-        concurrency=concurrency,
-        timeout=timeout,
-        llm_client=llm_client,
-        tracker=tracker,
-    ))
+    asyncio.run(
+        run_async(
+            repo_path=repo,
+            output_base=output,
+            max_scopes=max_scopes,
+            concurrency=concurrency,
+            timeout=timeout,
+            llm_client=llm_client,
+            tracker=tracker,
+        )
+    )
 
     if visualize:
-        console.print("[dim]Visualization server still running. Press Enter to exit.[/dim]")
+        console.print(
+            "[dim]Visualization server still running. Press Enter to exit.[/dim]"
+        )
         input()
 
 

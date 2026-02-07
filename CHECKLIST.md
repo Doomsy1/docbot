@@ -77,7 +77,7 @@
 
 #### Exports (`src/docbot/__init__.py`)
 
-- [ ] Update exports if any public names changed
+- [x] Update exports if any public names changed
 
 #### Webapp Server Skeleton (`src/docbot/server.py` — new file)
 
@@ -126,7 +126,7 @@
 #### Tree-sitter Extractor (`src/docbot/extractors/treesitter_extractor.py`)
 
 - [x] `TreeSitterExtractor` class implementing `Extractor` protocol
-- [x] Language initialization: load correct grammar per language
+- [x] Language initialization: load correct grammar per language (tree-sitter grammars loaded for all 9 languages)
 - [x] TypeScript/JavaScript queries (regex-based fallback implemented)
   - [x] Functions (function declarations, arrow functions, method definitions)
   - [x] Classes and interfaces
@@ -325,8 +325,10 @@
 - [x] `--no-llm` behavior: tree-sitter/AST extraction still runs, LLM enrichment skipped, unsupported languages get basic file listing
 - [x] Add `serve` subcommand
   - [x] Accepts run directory or repo path
+  - [x] `--port` option (default 8000)
+  - [x] If repo path given: run analysis first, then serve
   - [x] If run directory given: serve immediately
-  - [x] Port number configuration (default 8000)
+  - [x] Auto-open browser
 
 #### Self-check before merge
 
@@ -345,15 +347,15 @@
 **Branch:** `phase2/extended-extractors`
 **Owned files:** `extractors/*`, `tests/*`
 
-- [ ] Add tree-sitter grammar: Kotlin
-- [ ] Add tree-sitter grammar: C#
-- [ ] Add tree-sitter grammar: Swift
-- [ ] Add tree-sitter grammar: Ruby
-- [ ] Write tests: `tests/test_python_extractor.py`
-- [ ] Write tests: `tests/test_treesitter_extractor.py`
-- [ ] Write tests: `tests/test_llm_extractor.py`
-- [ ] Write tests: `tests/test_scanner.py`
-- [ ] Write tests: `tests/test_explorer.py`
+- [x] Add tree-sitter grammar: Kotlin
+- [x] Add tree-sitter grammar: C#
+- [x] Add tree-sitter grammar: Swift
+- [x] Add tree-sitter grammar: Ruby
+- [x] Write tests: `tests/test_python_extractor.py`
+- [x] Write tests: `tests/test_treesitter_extractor.py`
+- [x] Write tests: `tests/test_llm_extractor.py`
+- [x] Write tests: `tests/test_scanner.py`
+- [x] Write tests: `tests/test_explorer.py`
 
 ---
 

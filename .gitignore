@@ -45,3 +45,6 @@ htmlcov/
 
 # OS
 desktop.ini
+
+# Misc
+demo-app/

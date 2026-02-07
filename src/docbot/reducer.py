@@ -46,28 +46,17 @@ ONCE. Never redefine a node with a different label or shape."""
 _MERMAID_PROMPT = """\
 Create a Mermaid architecture diagram for this {languages} repository.
 
-Repository: {repo_path}
-
-Scopes and what they do:
-{scope_block}
-
-Import-based edges: {edges_block}
-
-Entrypoints: {entrypoints}
-
 STRICT requirements:
 - Use "graph TD" (top-down layout).
-- Define each node EXACTLY ONCE with its label. Never redefine or relabel nodes.
-- Use scope_id as the node ID with a short descriptive label in brackets.
-- Show dependency arrows using --> for direct deps and -.-> for inferred ones.
-- Group related scopes with subgraphs if helpful.
-- Use classDef for styling (entrypoints get thicker borders, utilities get dashed).
-- Maximum 15 nodes total. Keep it simple and clean.
-- DO NOT repeat any node definitions, connections, or subgraph blocks.
-- DO NOT include comments explaining what you are doing (no %% lines).
-- The entire output should be under 60 lines.
+- Use simple alpha-numeric IDs (s1, s2, etc).
+- CRITICAL: Wrap all labels in double quotes (e.g. id1["Main Logic"]).
+- Return ONLY the Mermaid code. No markdown fences. No commentary.
 
-Return ONLY the Mermaid code. Start with "graph TD". No fences. No commentary."""
+Scopes:
+{scope_block}
+
+Edges: {edges_block}
+"""
 
 
 # Common source-file extensions to strip when building path-based scope lookups.

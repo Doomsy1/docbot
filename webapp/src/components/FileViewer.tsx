@@ -4,7 +4,7 @@ import { IconFile, IconFolder, IconChevronDown, IconChevronRight } from '@tabler
 interface FileNode {
   name: string;
   path: string;
-  isDir: boolean;
+  type: 'file' | 'directory';
   children?: FileNode[];
 }
 
@@ -14,7 +14,7 @@ interface FileViewerProps {
 }
 
 export default function FileViewer({ filePath, onSelectFile }: FileViewerProps) {
-  const [fs, setFs] = useState<FileNode | null>(null);
+  const [fsNodes, setFsNodes] = useState<FileNode[]>([]);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['.']));
@@ -22,7 +22,10 @@ export default function FileViewer({ filePath, onSelectFile }: FileViewerProps) 
   useEffect(() => {
     fetch('/api/fs')
       .then(res => res.json())
-      .then(setFs)
+      .then((data) => {
+        // API returns an array of top-level nodes
+        setFsNodes(Array.isArray(data) ? data : data.children ?? []);
+      })
       .catch(console.error);
   }, []);
 
@@ -47,6 +50,7 @@ export default function FileViewer({ filePath, onSelectFile }: FileViewerProps) 
   };
 
   const renderTree = (node: FileNode, depth = 0) => {
+    const isDir = node.type === 'directory';
     const isExpanded = expandedFolders.has(node.path);
     const isSelected = filePath === node.path;
 
@@ -56,11 +60,11 @@ export default function FileViewer({ filePath, onSelectFile }: FileViewerProps) 
           className={`flex items-center gap-2 px-2 py-1 cursor-pointer hover:bg-gray-100 text-sm ${isSelected ? 'bg-blue-50 border-l-2 border-blue-500' : ''}`}
           style={{ paddingLeft: `${depth * 1.5 + 0.5}rem` }}
           onClick={() => {
-            if (node.isDir) toggleFolder(node.path);
+            if (isDir) toggleFolder(node.path);
             else onSelectFile(node.path);
           }}
         >
-          {node.isDir ? (
+          {isDir ? (
             <>
               {isExpanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
               <IconFolder size={16} className="text-blue-400" />
@@ -73,7 +77,7 @@ export default function FileViewer({ filePath, onSelectFile }: FileViewerProps) 
           )}
           <span className="truncate">{node.name}</span>
         </div>
-        {node.isDir && isExpanded && node.children?.map(child => renderTree(child, depth + 1))}
+        {isDir && isExpanded && node.children?.map(child => renderTree(child, depth + 1))}
       </div>
     );
   };
@@ -86,7 +90,7 @@ export default function FileViewer({ filePath, onSelectFile }: FileViewerProps) 
           Explorer
         </div>
         <div className="py-2">
-          {fs ? renderTree(fs) : <div className="p-4 text-xs text-gray-400 animate-pulse">Loading tree...</div>}
+          {fsNodes.length > 0 ? fsNodes.map(node => renderTree(node)) : <div className="p-4 text-xs text-gray-400 animate-pulse">Loading tree...</div>}
         </div>
       </div>
 

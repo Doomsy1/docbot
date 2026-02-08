@@ -702,31 +702,46 @@ async def render_with_llm(
     """
     written: list[Path] = []
 
-    # Async wrappers for individual render functions
+    docs_dir = out_dir / "docs"
+    modules_dir = docs_dir / "modules"
+    modules_dir.mkdir(parents=True, exist_ok=True)
+
     async def _scope_task(scope: ScopeResult) -> Path:
-        # Run sync function in executor to avoid blocking
-        loop = asyncio.get_event_loop()
-        path = await loop.run_in_executor(
-            None, render_scope_doc, scope, index, out_dir, llm_client
-        )
+        if scope.error:
+            content = _render_scope_md_template(scope)
+        else:
+            try:
+                content = await _generate_scope_doc_llm(scope, llm_client)
+            except Exception as exc:
+                logger.warning("LLM scope doc for %s failed, using template: %s", scope.scope_id, exc)
+                content = _render_scope_md_template(scope)
+        path = modules_dir / f"{scope.scope_id}.generated.md"
+        path.write_text(content, encoding="utf-8")
         if on_complete:
             on_complete(f"renderer.{scope.scope_id}")
         return path
 
     async def _readme_task() -> Path:
-        loop = asyncio.get_event_loop()
-        path = await loop.run_in_executor(
-            None, render_readme, index, out_dir, llm_client
-        )
+        try:
+            content = await _generate_readme_llm(index, llm_client)
+        except Exception as exc:
+            logger.warning("LLM README failed, using template: %s", exc)
+            content = _render_readme_template(index)
+        path = out_dir / "README.generated.md"
+        path.write_text(content, encoding="utf-8")
         if on_complete:
             on_complete("renderer.readme")
         return path
 
     async def _arch_task() -> Path:
-        loop = asyncio.get_event_loop()
-        path = await loop.run_in_executor(
-            None, render_architecture, index, out_dir, llm_client
-        )
+        try:
+            content = await _generate_architecture_llm(index, llm_client)
+        except Exception as exc:
+            logger.warning("LLM architecture failed, using template: %s", exc)
+            content = _render_architecture_template(index)
+        mermaid_md = "\n\n## Dependency graph\n\n```mermaid\n" + _get_mermaid(index) + "\n```\n"
+        path = docs_dir / "architecture.generated.md"
+        path.write_text(content + mermaid_md, encoding="utf-8")
         if on_complete:
             on_complete("renderer.arch")
         return path

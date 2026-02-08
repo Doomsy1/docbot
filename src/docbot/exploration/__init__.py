@@ -80,11 +80,14 @@ async def run_agent_exploration(
 
     from langchain_openai import ChatOpenAI
 
+    is_mimo_flash = model_id == "xiaomi/mimo-v2-flash"
+
     llm = ChatOpenAI(
         model=model_id,
         api_key=api_key,
         base_url="https://openrouter.ai/api/v1",
-        temperature=0.1,
+        # MIMO is more stable for tool-use loops at lower temperature.
+        temperature=0.0 if is_mimo_flash else 0.1,
         streaming=True,
     )
 
@@ -106,6 +109,86 @@ async def run_agent_exploration(
     child_seq = 0
     delegate_counts: dict[str, int] = {}
 
+    def _mirror_event_snapshot(event: dict) -> None:
+        """Best-effort mirror of live events into web snapshot state."""
+        try:
+            from ..web import server as web_server
+            web_server._update_agent_state_snapshot(event)
+        except Exception:
+            # Snapshot mirroring is optional and must never impact exploration.
+            pass
+
+    async def _emit_event(event: dict) -> None:
+        _mirror_event_snapshot(event)
+        if event_queue:
+            await event_queue.put(event)
+
+    def _norm_target(value: str) -> str:
+        return value.strip().replace("\\", "/").strip("/")
+
+    def _scope_prefix(scope_root: str) -> str:
+        norm = _norm_target(scope_root)
+        return f"{norm}/" if norm else ""
+
+    def _target_exists(target: str) -> bool:
+        norm = _norm_target(target)
+        if not norm:
+            return False
+        return any(p == norm or p.startswith(f"{norm}/") for p in scan_files)
+
+    def _sample_scope_files(scope_files: list[str], limit: int = 6) -> list[str]:
+        # Prefer shorter and more central files first.
+        ranked = sorted(scope_files, key=lambda p: (p.count("/"), len(p), p))
+        return ranked[:limit]
+
+    async def _summarize_scope_mimo(
+        *,
+        scope_root: str,
+        purpose_text: str,
+        context_text: str,
+        scope_files: list[str],
+    ) -> str:
+        sampled = _sample_scope_files(scope_files, limit=6)
+        snippets: list[str] = []
+        for rel in sampled[:4]:
+            p = (repo_root / rel).resolve()
+            try:
+                p.relative_to(repo_root.resolve())
+            except ValueError:
+                continue
+            if not p.is_file():
+                continue
+            try:
+                txt = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            snippets.append(f"FILE: {rel}\n{txt[:1400]}")
+
+        prompt = (
+            "You are a repository analysis agent.\n"
+            f"Scope root: {scope_root or '(repo root)'}\n"
+            f"Purpose: {purpose_text}\n"
+            f"Context: {context_text[:1500] or '(none)'}\n"
+            f"Scope file count: {len(scope_files)}\n"
+            f"Sample files: {json.dumps(sampled, indent=2)}\n\n"
+            "Code snippets:\n"
+            + ("\n\n---\n\n".join(snippets) if snippets else "(none)")
+            + "\n\nReturn a concise technical summary (6-12 sentences) with concrete module/file references."
+        )
+        try:
+            resp = await llm.ainvoke([HumanMessage(content=prompt)])
+            content = getattr(resp, "content", "")
+            if isinstance(content, list):
+                content = "".join(
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in content
+                )
+            summary = str(content).strip()
+            return summary[:6000]
+        except Exception as exc:
+            logger.warning("MIMO summary fallback failed for scope '%s': %s", scope_root, exc)
+            return f"Scope {scope_root or '(repo root)'} analyzed with {len(scope_files)} files."
+
     def _select_scope_files(target: str) -> list[str]:
         norm = target.strip().replace("\\", "/").strip("/")
         if not norm or norm == ".":
@@ -113,9 +196,51 @@ async def run_agent_exploration(
         matches = [p for p in scan_files if p == norm or p.startswith(f"{norm}/")]
         return matches[:200] if matches else scan_files[:50]
 
+    def _fallback_delegation_plans(
+        *,
+        scope_root: str,
+        scope_files: list[str],
+        summary: str,
+        desired_count: int,
+    ) -> list[dict[str, str]]:
+        """Heuristic fallback when model planning fails to return valid JSON."""
+        if desired_count <= 0:
+            return []
+
+        norm_scope = _norm_target(scope_root)
+        scope_prefix = _scope_prefix(norm_scope)
+        counts: dict[str, int] = {}
+        for path in scope_files:
+            clean = path.replace("\\", "/")
+            if norm_scope:
+                if not (clean == norm_scope or clean.startswith(scope_prefix)):
+                    continue
+                relative = clean[len(scope_prefix):] if clean.startswith(scope_prefix) else ""
+            else:
+                relative = clean
+            parts = [p for p in relative.split("/") if p]
+            if not parts:
+                continue
+            key = f"{norm_scope}/{parts[0]}" if norm_scope else parts[0]
+            if key and not key.startswith(".") and key != norm_scope:
+                counts[key] = counts.get(key, 0) + 1
+        ranked = [k for k, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
+        out: list[dict[str, str]] = []
+        for target in ranked[:desired_count]:
+            out.append(
+                {
+                    "target": target,
+                    "name": f"delegate:{target}",
+                    "purpose": f"Explore {target} in detail and summarize key architecture decisions.",
+                    "context": (summary[:800] or f"Parent scope: {norm_scope or 'repo root'}"),
+                }
+            )
+        return out
+
     async def _plan_delegations(
         *,
         depth: int,
+        scope_root: str,
         scope_files: list[str],
         summary: str,
         desired_count: int,
@@ -124,17 +249,25 @@ async def run_agent_exploration(
         if desired_count <= 0 or depth >= max_depth:
             return []
 
+        norm_scope = _norm_target(scope_root)
+        scope_prefix = _scope_prefix(norm_scope)
+
         # Build candidate directories from observed file structure.
         counts: dict[str, int] = {}
         for path in scope_files:
-            parts = path.replace("\\", "/").split("/")
-            if len(parts) >= 2:
-                key = "/".join(parts[:2])
-            elif parts:
-                key = parts[0]
+            clean = path.replace("\\", "/")
+            if norm_scope:
+                if not (clean == norm_scope or clean.startswith(scope_prefix)):
+                    continue
+                relative = clean[len(scope_prefix):] if clean.startswith(scope_prefix) else ""
             else:
+                relative = clean
+            parts = [p for p in relative.split("/") if p]
+            if not parts:
                 continue
-            if key and not key.startswith("."):
+            # Choose next-level directory inside current scope.
+            key = f"{norm_scope}/{parts[0]}" if norm_scope else parts[0]
+            if key and not key.startswith(".") and key != norm_scope:
                 counts[key] = counts.get(key, 0) + 1
         candidates = [k for k, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:25]]
         if not candidates:
@@ -143,6 +276,7 @@ async def run_agent_exploration(
         prompt = (
             "You are planning child exploration delegations for a codebase analysis agent.\n"
             f"Current depth: {depth}. Max depth: {max_depth}.\n"
+            f"Current scope root: {norm_scope or '(repo root)'}\n"
             f"Choose up to {desired_count} child delegations from the candidate targets below.\n"
             "Each item must include:\n"
             '- "target": exact candidate path\n'
@@ -183,10 +317,22 @@ async def run_agent_exploration(
                         "context": str(item.get("context", summary[:500])).strip(),
                     }
                 )
-            return out
+            if out:
+                return out
+            return _fallback_delegation_plans(
+                scope_root=scope_root,
+                scope_files=scope_files,
+                summary=summary,
+                desired_count=desired_count,
+            )
         except Exception as exc:
             logger.warning("Delegation planning failed at depth %s: %s", depth, exc)
-            return []
+            return _fallback_delegation_plans(
+                scope_root=scope_root,
+                scope_files=scope_files,
+                summary=summary,
+                desired_count=desired_count,
+            )
 
     async def _run_agent(
         *,
@@ -195,34 +341,111 @@ async def run_agent_exploration(
         agent_purpose: str,
         parent_context: str,
         depth: int,
+        scope_root: str,
+        ancestor_scopes: tuple[str, ...],
         scope_files: list[str],
     ) -> str:
         nonlocal child_seq
-        if event_queue:
-            await event_queue.put(
-                {
-                    "type": "agent_spawned",
-                    "agent_id": agent_id,
-                    "parent_id": parent_id,
-                    "purpose": agent_purpose,
-                    "depth": depth,
-                }
-            )
+        await _emit_event(
+            {
+                "type": "agent_spawned",
+                "agent_id": agent_id,
+                "parent_id": parent_id,
+                "purpose": agent_purpose,
+                "depth": depth,
+                "scope_root": scope_root,
+            }
+        )
+
+        delegated_targets: set[str] = set()
+        norm_scope = _norm_target(scope_root)
+        scope_prefix = _scope_prefix(norm_scope)
+        ancestor_norm = {_norm_target(s) for s in ancestor_scopes if _norm_target(s)}
 
         async def _delegate_child(target: str, name: str, child_purpose: str, child_context: str) -> str:
             nonlocal child_seq
+            norm_target = _norm_target(target)
+            if not norm_target:
+                return "Delegation blocked: empty target."
+            if norm_target in delegated_targets:
+                return f"Delegation blocked: target '{norm_target}' already delegated by this agent."
+            if norm_target == norm_scope:
+                return f"Delegation blocked: target '{norm_target}' is this agent's own scope."
+            if norm_target in ancestor_norm:
+                return f"Delegation blocked: target '{norm_target}' is an ancestor scope."
+            if norm_scope and not norm_target.startswith(scope_prefix):
+                return (
+                    f"Delegation blocked: target '{norm_target}' is outside scope "
+                    f"'{norm_scope}'."
+                )
+            if not _target_exists(norm_target):
+                return f"Delegation blocked: target '{norm_target}' has no matching source files."
+
+            delegated_targets.add(norm_target)
             child_seq += 1
             delegate_counts[agent_id] = delegate_counts.get(agent_id, 0) + 1
             child_id = f"{agent_id}.{child_seq}"
-            child_files = _select_scope_files(target)
+            child_files = _select_scope_files(norm_target)
             return await _run_agent(
                 agent_id=child_id,
                 parent_id=agent_id,
-                agent_purpose=child_purpose or f"Explore {target}",
+                agent_purpose=child_purpose or f"Explore {norm_target}",
                 parent_context=child_context,
                 depth=depth + 1,
+                scope_root=norm_target,
+                ancestor_scopes=(*ancestor_scopes, norm_scope),
                 scope_files=child_files,
             )
+
+        def _desired_children_for_scope() -> int:
+            if depth >= max_depth:
+                return 0
+            file_count = len(scope_files)
+            if file_count < 15:
+                return 0
+            if depth == 0:
+                if file_count >= 100:
+                    return 3
+                if file_count >= 40:
+                    return 2
+                return 1
+            if depth == 1:
+                if file_count >= 60:
+                    return 3
+                if file_count >= 25:
+                    return 2
+                return 1
+            return 0
+
+        if is_mimo_flash:
+            summary = await _summarize_scope_mimo(
+                scope_root=scope_root,
+                purpose_text=agent_purpose,
+                context_text=parent_context,
+                scope_files=scope_files,
+            )
+
+            desired_children = _desired_children_for_scope()
+            if desired_children > 0:
+                plans = await _plan_delegations(
+                    depth=depth,
+                    scope_root=scope_root,
+                    scope_files=scope_files,
+                    summary=summary,
+                    desired_count=desired_children,
+                )
+                for plan in plans:
+                    await _delegate_child(
+                        plan["target"],
+                        plan["name"],
+                        plan["purpose"],
+                        plan["context"][:2000],
+                    )
+
+            await _emit_event(
+                {"type": "agent_finished", "agent_id": agent_id, "summary": summary}
+            )
+            return summary
 
         tools = create_tools(
             repo_root=repo_root,
@@ -259,6 +482,8 @@ async def run_agent_exploration(
             "a concise final summary in your final response."
         )
 
+        recursion_limit = 50 if is_mimo_flash else 80
+
         try:
             for attempt in range(2):
                 graph = build_graph(
@@ -271,6 +496,12 @@ async def run_agent_exploration(
                     f"Assigned scope file count: {len(scope_files)}.\n"
                     f"Max delegation depth: {max_depth}. Current depth: {depth}."
                 )
+                if depth < max_depth and len(scope_files) >= 30:
+                    initial_message += (
+                        "\nDelegation policy: this is a broad scope. "
+                        "Delegate at least two distinct child targets before finishing. "
+                        "Do not delegate outside your current scope."
+                    )
                 if parent_id is None and depth < max_depth:
                     top_targets = sorted(
                         {
@@ -303,7 +534,7 @@ async def run_agent_exploration(
                         "max_depth": max_depth,
                         "summary": "",
                     },
-                    config={"callbacks": callbacks, "recursion_limit": 80},
+                    config={"callbacks": callbacks, "recursion_limit": recursion_limit},
                 )
                 messages = result.get("messages", [])
                 summary = _extract_finish_summary(messages).strip()
@@ -318,16 +549,43 @@ async def run_agent_exploration(
                     agent_id, attempt + 1,
                 )
 
+            if is_mimo_flash:
+                summary = await _summarize_scope_mimo(
+                    scope_root=scope_root,
+                    purpose_text=agent_purpose,
+                    context_text=parent_context,
+                    scope_files=scope_files,
+                )
+                await _emit_event(
+                    {"type": "agent_finished", "agent_id": agent_id, "summary": summary}
+                )
+                return summary
+
             raise RuntimeError(
                 f"Agent {agent_id} did not satisfy required actions "
                 f"(summary policy) after retry."
             )
         except Exception as exc:
-            logger.error("Agent exploration failed for %s: %s", agent_id, exc)
-            if event_queue:
-                await event_queue.put(
-                    {"type": "agent_error", "agent_id": agent_id, "error": str(exc)}
+            if is_mimo_flash:
+                logger.warning(
+                    "Agent exploration graph path failed for %s (MIMO fallback): %s",
+                    agent_id,
+                    exc,
                 )
+                summary = await _summarize_scope_mimo(
+                    scope_root=scope_root,
+                    purpose_text=agent_purpose,
+                    context_text=parent_context,
+                    scope_files=scope_files,
+                )
+                await _emit_event(
+                    {"type": "agent_finished", "agent_id": agent_id, "summary": summary}
+                )
+                return summary
+            logger.error("Agent exploration failed for %s: %s", agent_id, exc)
+            await _emit_event(
+                {"type": "agent_error", "agent_id": agent_id, "error": str(exc)}
+            )
             return ""
 
     root_summary = await _run_agent(
@@ -336,17 +594,26 @@ async def run_agent_exploration(
         agent_purpose=purpose,
         parent_context=context_packet,
         depth=0,
+        scope_root="",
+        ancestor_scopes=tuple(),
         scope_files=scan_files[:200],
     )
 
     # Model-driven delegation planning fallback:
     # if root did not delegate enough, ask the model to pick child scopes.
+    if is_mimo_flash:
+        return store
+
     large_repo = len(scan_files) >= 80
-    desired_root_children = 2 if large_repo else 1
+    # Shape-based delegation budget:
+    # - top-level buckets and breadth under each bucket imply multiple child agents.
+    # - for this repo shape (119 files, 33 dirs), target ~8-12 agents total.
+    desired_root_children = 3 if large_repo else 1
     root_existing_children = delegate_counts.get(root_id, 0)
     if max_depth > 0 and root_existing_children < desired_root_children:
         plans = await _plan_delegations(
             depth=0,
+            scope_root="",
             scope_files=scan_files[:200],
             summary=root_summary,
             desired_count=desired_root_children - root_existing_children,
@@ -354,13 +621,16 @@ async def run_agent_exploration(
         for plan in plans:
             child_seq += 1
             child_id = f"{root_id}.model{child_seq}"
-            child_scope_files = _select_scope_files(plan["target"])
+            child_target = _norm_target(plan["target"])
+            child_scope_files = _select_scope_files(child_target)
             child_summary = await _run_agent(
                 agent_id=child_id,
                 parent_id=root_id,
                 agent_purpose=plan["purpose"],
                 parent_context=plan["context"][:2000],
                 depth=1,
+                scope_root=child_target,
+                ancestor_scopes=("",),
                 scope_files=child_scope_files,
             )
 
@@ -368,19 +638,23 @@ async def run_agent_exploration(
             if max_depth > 1 and large_repo:
                 sub_plans = await _plan_delegations(
                     depth=1,
+                    scope_root=child_target,
                     scope_files=child_scope_files,
                     summary=child_summary or root_summary,
-                    desired_count=1,
+                    desired_count=2,
                 )
                 for sub in sub_plans:
                     child_seq += 1
+                    sub_target = _norm_target(sub["target"])
                     await _run_agent(
                         agent_id=f"{child_id}.model{child_seq}",
                         parent_id=child_id,
                         agent_purpose=sub["purpose"],
                         parent_context=sub["context"][:2000],
                         depth=2,
-                        scope_files=_select_scope_files(sub["target"]),
+                        scope_root=sub_target,
+                        ancestor_scopes=("", child_target),
+                        scope_files=_select_scope_files(sub_target),
                     )
 
     return store

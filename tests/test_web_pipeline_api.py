@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from docbot.models import DocsIndex
+from docbot.exploration.store import NotepadStore
 from docbot.pipeline.tracker import PipelineTracker
 from docbot.web import server
 
@@ -121,3 +123,24 @@ def test_pipeline_api_falls_back_to_live_tracker_when_no_saved_events(tmp_path: 
     payload = response.json()
     assert payload["run_id"] == "live-run"
     assert len(payload["events"]) >= 1
+
+
+def test_notepad_store_mirrors_snapshot_without_sse_consumer() -> None:
+    server._agent_state_snapshot = {"agents": {}, "notepads": {}}
+    store = NotepadStore(event_queue=None)
+
+    store.write("architecture.overview", "Layered architecture", author="root")
+
+    assert "architecture.overview" in server._agent_state_snapshot["notepads"]
+    entries = server._agent_state_snapshot["notepads"]["architecture.overview"]
+    assert entries and entries[0]["content"] == "Layered architecture"
+
+
+def test_set_live_event_queue_resets_stale_snapshot() -> None:
+    server._agent_state_snapshot = {
+        "agents": {"root": {"agent_id": "root"}},
+        "notepads": {"x": [{"content": "old", "author": "root"}]},
+    }
+    server._set_live_event_queue(asyncio.Queue())
+
+    assert server._agent_state_snapshot == {"agents": {}, "notepads": {}}

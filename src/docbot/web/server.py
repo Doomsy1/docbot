@@ -58,8 +58,11 @@ def ensure_static_assets_mounted() -> None:
 
 def _set_live_event_queue(queue: asyncio.Queue | None) -> None:
     """Set the live event queue (called from CLI before starting server)."""
-    global _live_event_queue
+    global _live_event_queue, _agent_state_snapshot
     _live_event_queue = queue
+    if queue is not None:
+        # New live run: clear stale state from prior sessions.
+        _agent_state_snapshot = {"agents": {}, "notepads": {}}
 
 
 def _set_live_pipeline_tracker(tracker: PipelineTracker | None) -> None:

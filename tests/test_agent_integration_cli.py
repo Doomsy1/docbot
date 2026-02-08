@@ -39,7 +39,7 @@ def test_run_async_agents_emits_child_delegation_events(tmp_path: Path) -> None:
     repo = _integration_repo()
     queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
     tracker = PipelineTracker()
-    llm = LLMClient(api_key=os.environ["OPENROUTER_KEY"], model="openai/gpt-oss-20b")
+    llm = LLMClient(api_key=os.environ["OPENROUTER_KEY"], model="xiaomi/mimo-v2-flash")
 
     run_dir = asyncio.run(
         run_async(

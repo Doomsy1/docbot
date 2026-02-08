@@ -63,6 +63,11 @@ class NotepadStore:
         try/except.  If the queue is full the event is silently dropped --
         visualization events are non-critical.
         """
+        try:
+            from ..web import server as web_server
+            web_server._update_agent_state_snapshot(event)
+        except Exception:
+            pass
         if self._event_queue is None:
             return
         try:

@@ -226,13 +226,18 @@ class DocbotConfig(BaseModel):
     no_llm: bool = False
     """Skip LLM enrichment; extraction still runs."""
 
-    use_agents: bool = False
-    """Enable recursive agent exploration (more thorough but slower/costlier)."""
+    use_agents: bool = True
+    """Enable recursive agent exploration (default-on)."""
 
     agent_depth: int = 2
     """Maximum subagent recursion depth (1=file agents only, 2=file+symbol agents)."""
     agent_scope_max_parallel: int = 8
     """Maximum concurrent subagents for a single scope tree."""
+
+    agent_max_depth: int = 8
+    """Maximum delegation depth for LangGraph exploration agents."""
+    agent_model: str | None = None
+    """Optional separate model for exploration agents (defaults to main model)."""
 
     llm_backoff_enabled: bool = True
     """Enable automatic retry/backoff for transient LLM failures."""

@@ -14,7 +14,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from .explorer import enrich_scope_with_llm, explore_scope
 from ..extractors import setup_extractors
 from ..llm import LLMClient
-from ..models import DocsIndex, RunMeta, ScopePlan, ScopeResult
+from ..models import DocbotConfig, DocsIndex, RunMeta, ScopePlan, ScopeResult
 from .planner import build_plan, refine_plan_with_llm
 from .reducer import reduce, reduce_with_llm
 from .renderer import render, render_with_llm
@@ -40,17 +40,12 @@ async def _explore_one(
     tracker: NoOpTracker | None = None,
     node_id: str = "",
     _work_fn=None,
-    use_agents: bool = False,
-    agent_depth: int = 2,
 ) -> ScopeResult:
     """Run a single scope exploration under concurrency + timeout control.
 
     When *_work_fn* is provided (an async callable accepting a ScopePlan and
     returning a ScopeResult), it replaces the real explore_scope + LLM call.
     This lets ``--mock-viz`` reuse the semaphore/timeout/tracker logic.
-    
-    When *use_agents* is True, uses recursive agent exploration instead of
-    the simpler enrich_scope_with_llm.
     """
     if tracker and node_id:
         tracker.set_state(node_id, AgentState.waiting, "awaiting semaphore")
@@ -66,16 +61,12 @@ async def _explore_one(
                     timeout=timeout,
                 )
                 if llm_client and result.error is None:
-                    if use_agents:
-                        from .explorer import explore_scope_with_agents
-                        # Re-run with agents (includes extraction + agent loop)
-                        result = await explore_scope_with_agents(
-                            plan, repo_root, llm_client, agent_depth
-                        )
-                    else:
-                        result = await enrich_scope_with_llm(result, repo_root, llm_client)
+                    if tracker and node_id:
+                        tracker.set_state(node_id, AgentState.running, "llm summary")
+                    result = await enrich_scope_with_llm(result, repo_root, llm_client)
             if tracker and node_id:
-                tracker.set_state(node_id, AgentState.done)
+                detail = "llm summary complete" if llm_client and result.error is None else "ok"
+                tracker.set_state(node_id, AgentState.done, detail)
             return result
         except asyncio.TimeoutError:
             if tracker and node_id:
@@ -106,7 +97,7 @@ async def _run_scan(
     console.print(f"[bold]Scanning[/bold] {repo_path} ...")
     tracker.set_state("scanner", AgentState.running)
     if mock:
-        from ..viz import mock_viz
+        from . import mock as mock_viz
         await asyncio.sleep(1.5)
         scan = mock_viz.mock_scan(repo_path)
     else:
@@ -141,7 +132,7 @@ async def _run_plan(
     console.print("[bold]Planning[/bold] scopes ...")
     tracker.set_state("planner", AgentState.running)
     if mock:
-        from ..viz import mock_viz
+        from . import mock as mock_viz
         await asyncio.sleep(2.0)
         plans = mock_viz.mock_plans()
     else:
@@ -164,8 +155,6 @@ async def _run_explore(
     llm_client: LLMClient | None,
     tracker: NoOpTracker,
     mock: bool = False,
-    use_agents: bool = False,
-    agent_depth: int = 2,
 ) -> list[ScopeResult]:
     """Stage 3: Explore scopes in parallel."""
     using_llm = llm_client is not None
@@ -185,21 +174,17 @@ async def _run_explore(
         console=console,
     ) as progress:
         label = "Exploring scopes"
-        if use_agents:
-            label += " (agent mode)"
-        elif using_llm:
+        if using_llm:
             label += " (+ LLM summaries)"
         task = progress.add_task(label, total=len(plans))
 
         async def _run_and_track(plan: ScopePlan) -> ScopeResult:
-            from ..viz import mock_viz
+            from . import mock as mock_viz
             nid = f"explorer.{plan.scope_id}"
             result = await _explore_one(
                 plan, repo_path, sem, timeout, llm_client,
                 tracker=tracker, node_id=nid,
                 _work_fn=mock_viz.mock_explore_work if mock else None,
-                use_agents=use_agents,
-                agent_depth=agent_depth,
             )
             progress.advance(task)
             return result
@@ -229,7 +214,7 @@ async def _run_reduce(
         tracker.set_state("reducer.analysis", AgentState.running)
         tracker.set_state("reducer.mermaid", AgentState.running)
         if mock:
-            from ..viz import mock_viz
+            from . import mock as mock_viz
             await asyncio.sleep(2.5)
             docs_index = mock_viz.mock_docs_index(scope_results, repo_path)
         else:
@@ -303,6 +288,7 @@ async def run_async(
     mock: bool = False,
     use_agents: bool = False,
     agent_depth: int = 2,
+    event_queue: asyncio.Queue | None = None,
 ) -> Path:
     """Full pipeline: scan -> plan -> explore -> reduce -> render.
 
@@ -317,9 +303,9 @@ async def run_async(
     state transitions are driven by the same code paths used for real runs.
     """
     if mock:
-        from ..viz import mock_viz
+        from . import mock as mock_viz
         import tempfile
-        await asyncio.sleep(3.0)  # let the browser load D3 from CDN
+        await asyncio.sleep(1.0)  # brief pause to let webapp connect
         using_llm = True  # so we exercise the full tracker tree
         timeout = mock_viz.MOCK_TIMEOUT
         run_dir = Path(tempfile.mkdtemp(prefix="docbot_mock_"))
@@ -329,6 +315,8 @@ async def run_async(
         if output_base is None:
             output_base = Path.cwd() / "runs"
         run_id = _make_run_id()
+        tracker = tracker or NoOpTracker()
+        tracker.set_run_id(run_id)
         run_dir = output_base / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         using_llm = llm_client is not None
@@ -352,8 +340,13 @@ async def run_async(
     # -- Build tracker tree skeleton --
     tracker.add_node("orchestrator", "Orchestrator")
     tracker.add_node("scanner", "Scanner", "orchestrator")
-    tracker.add_node("planner", "Planner", "orchestrator")
-    tracker.add_node("explorer_hub", "Explorer Hub", "orchestrator")
+    if use_agents and llm_client:
+        tracker.add_node("standard_track", "Standard Track", "orchestrator")
+        tracker.add_node("planner", "Planner", "standard_track")
+        tracker.add_node("explorer_hub", "Explorer Hub", "standard_track")
+    else:
+        tracker.add_node("planner", "Planner", "orchestrator")
+        tracker.add_node("explorer_hub", "Explorer Hub", "orchestrator")
     tracker.add_node("reducer", "Reducer", "orchestrator")
     tracker.add_node("renderer", "Renderer", "orchestrator")
 
@@ -367,8 +360,34 @@ async def run_async(
         tracker.set_state("orchestrator", AgentState.done)
         return run_dir
 
-    # 2. Plan (+ LLM refinement)
-    plans = await _run_plan(scan, max_scopes, llm_client, tracker, mock, meta if not mock else None)
+    if use_agents and llm_client:
+        console.print(f"  [bold cyan]Agent mode enabled[/bold cyan] (max_depth={agent_depth})")
+        tracker.set_state("standard_track", AgentState.running)
+        cfg = DocbotConfig(
+            max_scopes=max_scopes,
+            concurrency=concurrency,
+            timeout=timeout,
+            use_agents=True,
+            agent_depth=agent_depth,
+            agent_max_depth=agent_depth,
+            no_llm=False,
+        )
+        (plans, scope_results), notepad_store = await asyncio.gather(
+            _standard_track(scan, repo_path, cfg, llm_client, tracker, meta if not mock else None),
+            _agent_track(scan, repo_path, cfg, tracker, event_queue),
+        )
+        tracker.set_state("standard_track", AgentState.done)
+        scope_results = _merge_agent_findings(scope_results, notepad_store)
+        if not mock:
+            _persist_notepad(notepad_store, run_dir)
+    else:
+        # 2. Plan (+ LLM refinement)
+        plans = await _run_plan(scan, max_scopes, llm_client, tracker, mock, meta if not mock else None)
+
+        # 3. Explore in parallel (+ LLM summaries)
+        scope_results = await _run_explore(
+            plans, repo_path, concurrency, timeout, llm_client, tracker, mock,
+        )
 
     if not mock:
         plan_path = run_dir / "plan.json"
@@ -376,15 +395,6 @@ async def run_async(
             json.dumps([p.model_dump() for p in plans], indent=2),
             encoding="utf-8",
         )
-
-    # 3. Explore in parallel (+ LLM summaries or agent mode)
-    if use_agents and llm_client and not mock:
-        console.print(f"  [bold cyan]Agent mode enabled[/bold cyan] (depth={agent_depth})")
-    scope_results = await _run_explore(
-        plans, repo_path, concurrency, timeout, llm_client, tracker, mock,
-        use_agents=use_agents,
-        agent_depth=agent_depth,
-    )
 
     if not mock:
         scopes_dir = run_dir / "scopes"
@@ -417,10 +427,100 @@ async def run_async(
     if not mock:
         meta.finished_at = datetime.now(timezone.utc).isoformat()
         (run_dir / "run_meta.json").write_text(meta.model_dump_json(indent=2), encoding="utf-8")
+        (run_dir / "pipeline_events.json").write_text(
+            json.dumps(tracker.export_events(), indent=2), encoding="utf-8"
+        )
 
     tracker.set_state("orchestrator", AgentState.done)
     console.print(f"\n[bold green]Done![/bold green] Output in: {run_dir}")
     return run_dir
+
+
+async def _standard_track(
+    scan,
+    repo_path: Path,
+    config: DocbotConfig,
+    llm_client: LLMClient | None,
+    tracker: NoOpTracker,
+    meta: RunMeta | None = None,
+) -> tuple[list[ScopePlan], list[ScopeResult]]:
+    """Standard pipeline track: PLAN -> EXPLORE (extraction + LLM enrichment)."""
+    plans = await _run_plan(scan, config.max_scopes, llm_client, tracker, mock=False, meta=meta)
+    scope_results = await _run_explore(
+        plans, repo_path, config.concurrency, config.timeout, llm_client, tracker,
+        mock=False,
+    )
+    return plans, scope_results
+
+
+async def _agent_track(
+    scan,
+    repo_path: Path,
+    config: DocbotConfig,
+    tracker: NoOpTracker,
+    event_queue: asyncio.Queue | None = None,
+):
+    """Agent exploration track -- starts immediately after scan, no planner."""
+    from ..exploration import run_agent_exploration
+
+    tracker.add_node("agent_track", "Agent Exploration", "orchestrator")
+    tracker.set_state("agent_track", AgentState.running)
+    console.print("[bold cyan]Agent exploration started[/bold cyan] (parallel with standard track)")
+
+    try:
+        notepad_store = await run_agent_exploration(
+            repo_root=repo_path,
+            scan_result=scan,
+            config=config,
+            event_queue=event_queue,
+        )
+        tracker.set_state("agent_track", AgentState.done, "exploration complete")
+        console.print("[green]Agent exploration complete.[/green]")
+        return notepad_store
+    except Exception:
+        tracker.set_state("agent_track", AgentState.error, "exploration failed")
+        console.print("[yellow]Agent exploration failed; continuing with standard results.[/yellow]")
+        from ..exploration.store import NotepadStore
+        return NotepadStore()
+
+
+def _merge_agent_findings(
+    scope_results: list[ScopeResult],
+    notepad_store,
+) -> list[ScopeResult]:
+    """Enrich scope summaries with relevant notepad findings from agent exploration.
+
+    For each scope, finds notepad topics that match by directory prefix or
+    file paths, and appends the notepad content to the scope's summary.
+    """
+    notepad_context = notepad_store.to_context_string(max_chars=6000)
+    if not notepad_context or notepad_context == "(notepad empty)":
+        return scope_results
+
+    enriched: list[ScopeResult] = []
+    for sr in scope_results:
+        # Append agent findings to the scope summary.
+        new_summary = sr.summary or ""
+        if new_summary:
+            new_summary += "\n\n"
+        new_summary += "--- Agent Exploration Findings ---\n"
+        new_summary += notepad_context
+
+        enriched.append(sr.model_copy(update={"summary": new_summary}))
+
+    return enriched
+
+
+def _persist_notepad(store, docbot_root: Path) -> None:
+    """Serialize agent notepad findings to .docbot/notepads/."""
+    notepads_dir = docbot_root / "notepads"
+    notepads_dir.mkdir(exist_ok=True)
+    data = store.serialize()
+    if data:
+        (notepads_dir / "all_topics.json").write_text(
+            json.dumps(data, indent=2), encoding="utf-8"
+        )
+        console.print(f"[dim]Saved {len(data)} notepad topic(s) to {notepads_dir}[/dim]")
 
 
 async def generate_async(
@@ -428,6 +528,7 @@ async def generate_async(
     config: DocbotConfig,
     llm_client: LLMClient | None = None,
     tracker: NoOpTracker | None = None,
+    event_queue: asyncio.Queue | None = None,
 ) -> Path:
     """Run full pipeline and output to .docbot/ directory.
     
@@ -466,41 +567,57 @@ async def generate_async(
     # Build tracker tree skeleton
     tracker.add_node("orchestrator", "Orchestrator")
     tracker.add_node("scanner", "Scanner", "orchestrator")
-    tracker.add_node("planner", "Planner", "orchestrator")
-    tracker.add_node("explorer_hub", "Explorer Hub", "orchestrator")
+    tracker.add_node("standard_track", "Standard Track", "orchestrator")
+    tracker.add_node("planner", "Planner", "standard_track")
+    tracker.add_node("explorer_hub", "Explorer Hub", "standard_track")
     tracker.add_node("reducer", "Reducer", "orchestrator")
     tracker.add_node("renderer", "Renderer", "orchestrator")
-    
+
     tracker.set_state("orchestrator", AgentState.running)
-    
+
     # 1. Scan
     scan = await _run_scan(repo_path, tracker, mock=False)
-    
+
     if not scan.source_files:
         console.print("[yellow]No source files found. Nothing to do.[/yellow]")
         tracker.set_state("orchestrator", AgentState.done)
         return docbot_root
-    
-    # 2. Plan (+ LLM refinement)
-    plans = await _run_plan(scan, config.max_scopes, llm_client, tracker, mock=False, meta=meta)
-    
+
+    # 2. After scan, run standard and agent tracks in parallel (if agents enabled)
+    notepad_store = None
+    if config.use_agents and llm_client:
+        console.print(f"  [bold cyan]Agent mode enabled[/bold cyan] (max_depth={config.agent_max_depth})")
+        tracker.set_state("standard_track", AgentState.running)
+
+        (plans, scope_results), notepad_store = await asyncio.gather(
+            _standard_track(scan, repo_path, config, llm_client, tracker, meta),
+            _agent_track(scan, repo_path, config, tracker, event_queue),
+        )
+
+        tracker.set_state("standard_track", AgentState.done)
+
+        # Merge agent findings into scope results.
+        scope_results = _merge_agent_findings(scope_results, notepad_store)
+
+        # Persist notepad data.
+        _persist_notepad(notepad_store, docbot_root)
+    else:
+        # Standard-only track (no agents).
+        tracker.set_state("standard_track", AgentState.running)
+        plans = await _run_plan(scan, config.max_scopes, llm_client, tracker, mock=False, meta=meta)
+        scope_results = await _run_explore(
+            plans, repo_path, config.concurrency, config.timeout, llm_client, tracker,
+            mock=False,
+        )
+        tracker.set_state("standard_track", AgentState.done)
+
     # Save plan.json to docbot root
     plan_path = docbot_root / "plan.json"
     plan_path.write_text(
         json.dumps([p.model_dump() for p in plans], indent=2),
         encoding="utf-8",
     )
-    
-    # 3. Explore in parallel (+ LLM summaries or agent mode)
-    if config.use_agents and llm_client:
-        console.print(f"  [bold cyan]Agent mode enabled[/bold cyan] (depth={config.agent_depth})")
-    scope_results = await _run_explore(
-        plans, repo_path, config.concurrency, config.timeout, llm_client, tracker,
-        mock=False,
-        use_agents=config.use_agents,
-        agent_depth=config.agent_depth,
-    )
-    
+
     # Save per-scope results to scopes/
     scopes_dir = docbot_root / "scopes"
     scopes_dir.mkdir(exist_ok=True)
@@ -573,8 +690,8 @@ async def generate_async(
     run_history_dir = docbot_root / "history" / run_id
     run_history_dir.mkdir(exist_ok=True, parents=True)
     
-    # Save tracker snapshot (will be replaced with export_events() once Dev C implements it)
-    pipeline_events = tracker.snapshot()
+    # Save full pipeline event stream for replay.
+    pipeline_events = tracker.export_events()
     (run_history_dir / "pipeline_events.json").write_text(
         json.dumps(pipeline_events, indent=2), encoding="utf-8"
     )
@@ -751,8 +868,6 @@ async def update_async(
     affected_results = await _run_explore(
         affected_plans, repo_path, config.concurrency, config.timeout, llm_client, tracker,
         mock=False,
-        use_agents=config.use_agents,
-        agent_depth=config.agent_depth,
     )
     
     # Save updated scope results
@@ -836,8 +951,8 @@ async def update_async(
     run_history_dir = docbot_root / "history" / run_id
     run_history_dir.mkdir(exist_ok=True, parents=True)
     
-    # Save tracker snapshot (will be replaced with export_events() once Dev C implements it)
-    pipeline_events = tracker.snapshot()
+    # Save full pipeline event stream for replay.
+    pipeline_events = tracker.export_events()
     (run_history_dir / "pipeline_events.json").write_text(
         json.dumps(pipeline_events, indent=2), encoding="utf-8"
     )

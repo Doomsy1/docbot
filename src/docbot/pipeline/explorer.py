@@ -226,34 +226,4 @@ async def enrich_scope_with_llm(
     return result
 
 
-async def explore_scope_with_agents(
-    plan: ScopePlan,
-    repo_root: Path,
-    llm_client: object,  # docbot.llm.LLMClient
-    max_depth: int = 2,
-) -> ScopeResult:
-    """Agent-based exploration for a scope.
-    
-    This is a more thorough alternative to enrich_scope_with_llm that uses
-    recursive agents with tools to analyze code in depth.
-    
-    Args:
-        plan: The scope plan to explore
-        repo_root: Path to repository root
-        llm_client: LLM client for agent calls
-        max_depth: Maximum subagent depth (1=file agents, 2=symbol agents)
-    
-    Returns:
-        ScopeResult with agent-generated summary and findings
-    """
-    from ..llm import LLMClient
-    from .agents import run_scope_agent
-    
-    assert isinstance(llm_client, LLMClient)
-    
-    # First do regular extraction (sync)
-    result = explore_scope(plan, repo_root)
-    
-    # Then run agent exploration
-    return await run_scope_agent(plan, result, repo_root, llm_client, max_depth)
 

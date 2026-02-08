@@ -922,6 +922,14 @@ Given project priority (foundational features first, then vision features), exec
 
 **Phase 3 -- Git-Integrated CLI** [IN PROGRESS] 14. CLI restructure + project module + models (3.1-3.4) [DONE] 15. Git utilities (3.6) [DONE] 16. Git hooks (3.8) [DONE] 17. Scanner update (3.9) [DONE] 18. Incremental update logic (3.5) + orchestrator refactor (3.7) 19. Renderer refactor (individual render functions) 20. Src package reorganization (3.14) 21. Documentation snapshots & history (3.10) 22. Before/after comparison -- `docbot diff` (3.11) 23. Git lifecycle integration -- post-merge hooks (3.12) 24. Change-aware webapp -- API endpoints + UI (3.13) 25. Pipeline visualization replay (3.15)
 
+**Cross-cutting -- LangGraph Agent Exploration** [COMPLETE]
+- Replaced custom `agents/` system with LangGraph-based `exploration/` package
+- Recursive generalized agent with shared notepad (NotepadStore)
+- Parallel standard + agent tracks in orchestrator (via `--agents` flag)
+- SSE streaming (`/api/agent-stream`) + React Force Graph live visualization
+- `--serve` flag on `generate` for live webapp during pipeline
+- See `docs/AGENT_ARCHITECTURE.md` and `docs/MIGRATION_NOTES.md` for details
+
 ---
 
 ## Verification

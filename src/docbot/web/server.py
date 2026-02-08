@@ -2614,7 +2614,7 @@ async def diff_chat(req: DiffChatRequest):
 
     if _llm_client is None:
         raise HTTPException(
-            status_code=503, detail="LLM not configured (missing OPENROUTER_KEY)."
+            status_code=503, detail="LLM not configured (missing BACKBOARD_API_KEY)."
         )
 
     # Format diff context for the LLM

@@ -2928,7 +2928,25 @@ def get_history():
     if not docbot_dir.exists():
         return []
     
-    snapshots = list_snapshots(docbot_dir)
+    snapshots = list_snapshots(docbot_dir, dedupe=False)
+
+    # Dashboard-level dedupe: collapse runs that are identical in user-visible
+    # architecture shape and top-level metrics.
+    collapsed = []
+    seen_keys: set[tuple[str, int, int, int, str]] = set()
+    for s in snapshots:
+        key = (
+            s.commit_hash,
+            s.stats.total_scopes,
+            s.stats.total_symbols,
+            s.stats.total_edges,
+            s.graph_digest,
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        collapsed.append(s)
+
     return [
         {
             "run_id": s.run_id,
@@ -2939,7 +2957,7 @@ def get_history():
             "symbol_count": s.stats.total_symbols,
             "entrypoint_count": 0,  # Not tracked in snapshot stats
         }
-        for s in snapshots
+        for s in collapsed
     ]
 
 

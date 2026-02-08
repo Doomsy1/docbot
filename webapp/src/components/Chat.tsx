@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { IconSend, IconLoader2, IconQuote } from '@tabler/icons-react';
+import { IconSend, IconLoader2, IconQuote, IconSparkles } from '@tabler/icons-react';
 import Mermaid from './Mermaid';
 
 interface Citation {
@@ -24,36 +24,72 @@ interface ChatProps {
 export default function Chat({ onSelectFile }: ChatProps) {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([
-    { id: '1', sender: 'bot', text: 'Hello! I am docbot. Ask me anything about this codebase, e.g., "What does the server do?" or "How do I add a new API endpoint?"' }
+    { id: '1', sender: 'bot', text: 'Hello! I am docbot. Ask me anything about this codebase.' }
   ]);
   const [loading, setLoading] = useState(false);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Generate suggested questions from index data
+  useEffect(() => {
+    fetch('/api/index')
+      .then(r => r.json())
+      .then(data => {
+        const qs: string[] = [];
+        qs.push('What is the overall architecture of this project?');
+        if (data.scopes?.length > 0) {
+          const scope = data.scopes[Math.floor(Math.random() * data.scopes.length)];
+          qs.push(`What does the ${scope.title} scope do?`);
+        }
+        if (data.entrypoints?.length > 0) {
+          qs.push('What are the main entrypoints and how do they work?');
+        }
+        if (data.public_api_count > 0) {
+          const scopeKeys = Object.keys(data.public_api_by_scope || {});
+          if (scopeKeys.length > 0) {
+            const key = scopeKeys[Math.floor(Math.random() * scopeKeys.length)];
+            qs.push(`What are the key functions in ${key}?`);
+          }
+        }
+        qs.push('How do the different modules depend on each other?');
+        setSuggestions(qs.slice(0, 4));
+      })
+      .catch(() => {
+        setSuggestions([
+          'What is the overall architecture of this project?',
+          'What are the main entrypoints?',
+          'How do the modules depend on each other?',
+        ]);
+      });
+  }, []);
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, suggestions]);
 
-  const send = async () => {
-    if (!input.trim() || loading) return;
-    
-    const userMsg: Message = { id: Date.now().toString(), sender: 'user', text: input };
+  const send = async (overrideText?: string) => {
+    const text = overrideText ?? input;
+    if (!text.trim() || loading) return;
+
+    const userMsg: Message = { id: Date.now().toString(), sender: 'user', text };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
+    setSuggestions([]); // Hide suggestions after first question
     setLoading(true);
 
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: input })
+        body: JSON.stringify({ query: text })
       });
-      
+
       if (!res.ok) throw new Error("Chat failed");
-      
+
       const data = await res.json();
-      
+
       const botMsg: Message = {
         id: (Date.now() + 1).toString(),
         sender: 'bot',
@@ -61,8 +97,15 @@ export default function Chat({ onSelectFile }: ChatProps) {
         citations: data.citations
       };
       setMessages(prev => [...prev, botMsg]);
+      // Update suggestions from server response
+      if (data.suggestions?.length > 0) {
+        setSuggestions(data.suggestions);
+      } else {
+        setSuggestions([]);
+      }
     } catch (e) {
       setMessages(prev => [...prev, { id: Date.now().toString(), sender: 'bot', text: 'Sorry, I encountered an error while processing your request.' }]);
+      setSuggestions([]);
     } finally {
       setLoading(false);
     }
@@ -140,6 +183,26 @@ export default function Chat({ onSelectFile }: ChatProps) {
             </div>
           </div>
         )}
+        {/* Suggested questions */}
+        {suggestions.length > 0 && !loading && (
+          <div className="space-y-2 pt-2">
+            <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-400">
+              <IconSparkles size={10} />
+              {messages.length <= 1 ? 'Suggested questions' : 'Follow-up questions'}
+            </div>
+            <div className="flex flex-col gap-1.5">
+              {suggestions.map((q, i) => (
+                <button
+                  key={i}
+                  onClick={() => send(q)}
+                  className="text-left text-sm font-mono px-3 py-2 border border-gray-200 bg-white hover:border-black hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all text-gray-700"
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Input Area */}
@@ -153,13 +216,12 @@ export default function Chat({ onSelectFile }: ChatProps) {
             placeholder="Ask about the architecture, logic, or specific files..."
             disabled={loading}
           />
-          <button 
-            onClick={send}
+          <button
+            onClick={() => send()}
             disabled={loading || !input.trim()}
-            className="px-6 py-3 border border-black bg-white hover:bg-black hover:text-white transition-all font-bold uppercase text-xs flex items-center gap-2 disabled:opacity-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
+            className="p-3 border border-black bg-white hover:bg-black hover:text-white transition-all disabled:opacity-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
           >
-            {loading ? <IconLoader2 className="animate-spin" size={16} /> : <IconSend size={16} />}
-            Ask
+            {loading ? <IconLoader2 className="animate-spin" size={18} /> : <IconSend size={18} />}
           </button>
         </div>
       </div>

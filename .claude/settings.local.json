@@ -5,7 +5,14 @@
       "Bash(taskkill:*)",
       "Bash(curl:*)",
       "Bash(python -c:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run build:*)",
+      "Bash(ls:*)",
+      "Bash(node -e:*)",
+      "Bash(npx vite build:*)",
+      "Bash(timeout 10 npx vite:*)",
+      "Bash(git add:*)"
     ]
   }
 }

@@ -20,6 +20,27 @@ from ..models import (
 )
 
 
+def _snapshot_signature(snapshot: DocSnapshot) -> str:
+    """Stable content signature for detecting no-op duplicate snapshots."""
+    payload = {
+        "commit_hash": snapshot.commit_hash,
+        "scope_summaries": {
+            sid: summary.model_dump()
+            for sid, summary in sorted(snapshot.scope_summaries.items())
+        },
+        "graph_digest": snapshot.graph_digest,
+        "doc_hashes": dict(sorted(snapshot.doc_hashes.items())),
+        "stats": snapshot.stats.model_dump(),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:20]
+
+
+def _is_duplicate_snapshot(newer: DocSnapshot, older: DocSnapshot) -> bool:
+    """Return True when two snapshots represent the same documentation state."""
+    return _snapshot_signature(newer) == _snapshot_signature(older)
+
+
 def _compute_graph_digest(docs_index: DocsIndex) -> str:
     """Compute a hash of the dependency graph edges for change detection."""
     if not docs_index.scope_edges:
@@ -95,7 +116,7 @@ def save_snapshot(
     scope_results: list[ScopeResult],
     run_id: str,
     commit: str,
-) -> None:
+) -> bool:
     """Save a documentation snapshot to history.
     
     Creates:
@@ -108,6 +129,8 @@ def save_snapshot(
         scope_results: List of scope results from the pipeline
         run_id: Unique run identifier
         commit: Git commit hash at snapshot time
+    Returns:
+        True if a snapshot was written, False if skipped as a duplicate.
     """
     history_dir = docbot_dir / "history"
     history_dir.mkdir(exist_ok=True)
@@ -128,6 +151,11 @@ def save_snapshot(
         doc_hashes=doc_hashes,
         stats=stats,
     )
+
+    # Skip no-op duplicate snapshots (same commit + same generated content state).
+    existing = list_snapshots(docbot_dir, dedupe=False)
+    if existing and _is_duplicate_snapshot(snapshot, existing[0]):
+        return False
     
     # Save metadata
     metadata_path = history_dir / f"{run_id}.json"
@@ -140,6 +168,7 @@ def save_snapshot(
     for sr in scope_results:
         scope_file = scope_dir / f"{sr.scope_id}.json"
         scope_file.write_text(sr.model_dump_json(indent=2), encoding="utf-8")
+    return True
 
 
 def load_snapshot(docbot_dir: Path, run_id: str) -> DocSnapshot | None:
@@ -163,7 +192,7 @@ def load_snapshot(docbot_dir: Path, run_id: str) -> DocSnapshot | None:
         return None
 
 
-def list_snapshots(docbot_dir: Path) -> list[DocSnapshot]:
+def list_snapshots(docbot_dir: Path, *, dedupe: bool = True) -> list[DocSnapshot]:
     """List all available snapshots, sorted by timestamp (newest first).
     
     Args:
@@ -191,8 +220,17 @@ def list_snapshots(docbot_dir: Path) -> list[DocSnapshot]:
     
     # Sort by timestamp, newest first
     snapshots.sort(key=lambda s: s.timestamp, reverse=True)
-    
-    return snapshots
+
+    if not dedupe:
+        return snapshots
+
+    # Hide consecutive no-op duplicates for a cleaner history timeline.
+    unique: list[DocSnapshot] = []
+    for snap in snapshots:
+        if unique and _is_duplicate_snapshot(unique[-1], snap):
+            continue
+        unique.append(snap)
+    return unique
 
 
 def prune_snapshots(docbot_dir: Path, max_count: int) -> int:

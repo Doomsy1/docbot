@@ -693,7 +693,7 @@ async def render_with_llm(
     on_complete: callable | None = None,
 ) -> list[Path]:
     """Write all docs with LLM at every step, in parallel. Falls back to templates on failure.
-    
+
     Args:
         index: The documentation index
         out_dir: Output directory
@@ -707,6 +707,7 @@ async def render_with_llm(
     modules_dir.mkdir(parents=True, exist_ok=True)
 
     async def _scope_task(scope: ScopeResult) -> Path:
+        path = modules_dir / f"{scope.scope_id}.generated.md"
         if scope.error:
             content = _render_scope_md_template(scope)
         else:
@@ -715,33 +716,32 @@ async def render_with_llm(
             except Exception as exc:
                 logger.warning("LLM scope doc for %s failed, using template: %s", scope.scope_id, exc)
                 content = _render_scope_md_template(scope)
-        path = modules_dir / f"{scope.scope_id}.generated.md"
-        path.write_text(content, encoding="utf-8")
+        await asyncio.to_thread(path.write_text, content, "utf-8")
         if on_complete:
             on_complete(f"renderer.{scope.scope_id}")
         return path
 
     async def _readme_task() -> Path:
+        path = out_dir / "README.generated.md"
         try:
             content = await _generate_readme_llm(index, llm_client)
         except Exception as exc:
             logger.warning("LLM README failed, using template: %s", exc)
             content = _render_readme_template(index)
-        path = out_dir / "README.generated.md"
-        path.write_text(content, encoding="utf-8")
+        await asyncio.to_thread(path.write_text, content, "utf-8")
         if on_complete:
             on_complete("renderer.readme")
         return path
 
     async def _arch_task() -> Path:
+        path = docs_dir / "architecture.generated.md"
         try:
             content = await _generate_architecture_llm(index, llm_client)
         except Exception as exc:
             logger.warning("LLM architecture failed, using template: %s", exc)
             content = _render_architecture_template(index)
         mermaid_md = "\n\n## Dependency graph\n\n```mermaid\n" + _get_mermaid(index) + "\n```\n"
-        path = docs_dir / "architecture.generated.md"
-        path.write_text(content + mermaid_md, encoding="utf-8")
+        await asyncio.to_thread(path.write_text, content + mermaid_md, "utf-8")
         if on_complete:
             on_complete("renderer.arch")
         return path

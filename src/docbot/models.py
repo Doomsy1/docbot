@@ -118,6 +118,10 @@ class ScopeResult(BaseModel):
     open_questions: list[str] = Field(default_factory=list)
     languages: list[str] = Field(default_factory=list)
 
+    # Per-file extraction data (repo-relative path -> FileExtraction).
+    # Preserves file-level detail alongside the merged flat lists above.
+    file_extractions: dict[str, FileExtraction] = Field(default_factory=dict)
+
     # If exploration failed, store the reason here.
     error: str | None = None
 
@@ -192,8 +196,8 @@ class DocbotConfig(BaseModel):
     Precedence: CLI flag > config.toml > default.
     """
 
-    model: str = "openai/gpt-oss-20b"
-    """OpenRouter model ID for LLM calls."""
+    model: str = "openai/gpt-4o-mini"
+    """Model ID (provider/model_name) for Backboard API calls."""
 
     concurrency: int = 4
     """Maximum parallel explorer workers."""

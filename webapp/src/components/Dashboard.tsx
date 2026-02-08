@@ -101,26 +101,21 @@ const SERVICE_TYPE_LABELS: Record<string, string> = {
 };
 
 const SERVICE_DESCRIPTIONS: Record<string, string> = {
-  // Databases
   ext_mongodb: 'MongoDB is a NoSQL document database used for storing and querying application data as flexible JSON-like documents. Scopes using it likely handle data persistence, CRUD operations, and query logic.',
   ext_postgres: 'PostgreSQL is a relational database used for structured data storage with SQL queries, transactions, and strong consistency guarantees. Scopes using it handle core data models and business logic.',
   ext_redis: 'Redis is an in-memory key-value store commonly used for caching, session management, rate limiting, and pub/sub messaging to improve application performance.',
   ext_mysql: 'MySQL is a relational database used for structured data storage with SQL. Scopes using it manage persistent application state, user records, and transactional data.',
-  // Cloud / storage
   ext_firebase: 'Firebase is a Google-backed platform providing real-time databases, authentication, hosting, and cloud functions. Scopes using it typically manage user auth, real-time data sync, or push notifications.',
   ext_supabase: 'Supabase is an open-source Firebase alternative built on PostgreSQL, providing a database, auth, real-time subscriptions, and storage APIs.',
   ext_aws_s3: 'AWS S3 (Simple Storage Service) is used for storing and serving files like images, videos, documents, and backups. Scopes using it handle file uploads, asset management, or static content.',
   ext_digitalocean: 'DigitalOcean Spaces or infrastructure is used for cloud hosting, object storage, or compute resources.',
   ext_gcs: 'Google Cloud Storage is used for storing and serving files, media assets, and data blobs in the Google Cloud ecosystem.',
-  // AI / LLM
   ext_openai: 'OpenAI provides GPT language models and APIs for text generation, embeddings, image generation, and other AI capabilities. Scopes using it handle AI-powered features like chat, summarization, or content generation.',
   ext_gemini: 'Google Gemini is a multimodal AI model used for text generation, reasoning, image understanding, and other intelligent processing tasks. Scopes using it integrate AI-driven analysis or generation features.',
   ext_anthropic: 'Anthropic provides the Claude family of AI models for text generation, analysis, and reasoning. Scopes using it power AI chat, content generation, or automated analysis features.',
-  ext_openrouter: 'OpenRouter is an API gateway that provides unified access to multiple LLM providers (OpenAI, Anthropic, Google, etc.). Scopes using it make LLM calls for text generation or analysis.',
-  // Auth
+  ext_openrouter: 'Backboard.io is a unified API with persistent memory/RAG that provides access to multiple LLM providers (OpenAI, Anthropic, Google, etc.). Scopes using it make LLM calls for text generation or analysis.',
   ext_auth0: 'Auth0 is an identity platform for authentication and authorization, handling user login, SSO, MFA, and access control.',
   ext_clerk: 'Clerk is a user authentication and management platform providing sign-in/sign-up flows, session management, and user profiles.',
-  // Messaging / APIs
   ext_stripe: 'Stripe is a payment processing platform used for handling credit card payments, subscriptions, invoices, and financial transactions.',
   ext_twilio: 'Twilio provides communication APIs for sending SMS messages, making phone calls, and handling real-time messaging in applications.',
   ext_sendgrid: 'SendGrid is an email delivery service used for sending transactional emails, marketing campaigns, and email notifications.',
@@ -139,7 +134,6 @@ export default function Dashboard() {
   const [expandedServices, setExpandedServices] = useState<Set<string>>(new Set());
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [historyData, setHistoryData] = useState<HistorySnapshot[] | null>(null);
-  // LLM-generated per-service per-scope usage descriptions: { ext_mongodb: { entrypoints: "...", ... }, ... }
   const [serviceDetails, setServiceDetails] = useState<Record<string, Record<string, string>>>({});
   const [serviceDetailsLoading, setServiceDetailsLoading] = useState(false);
 
@@ -155,7 +149,6 @@ export default function Dashboard() {
       .then(d => {
         if (d.scopes) {
           setGraphData(d);
-          // Fetch LLM-generated service usage descriptions
           if (d.external_nodes?.length > 0) {
             setServiceDetailsLoading(true);
             fetch('/api/service-details')
@@ -216,9 +209,9 @@ export default function Dashboard() {
 
   // Build external services → scope mapping with import details
   const serviceUsage = useMemo(() => {
-    if (!graphData) return [];
+    if (!graphData || !graphData.external_nodes) return [];
     return graphData.external_nodes.map(node => {
-      const edges = graphData.external_edges.filter(e => e.to === node.id);
+      const edges = (graphData.external_edges || []).filter(e => e.to === node.id);
       const usedBy = edges.map(e => {
         const scope = graphData.scopes.find(s => s.scope_id === e.from);
         return {
@@ -233,7 +226,7 @@ export default function Dashboard() {
 
   // Build Mermaid diagram for scope dependencies
   const scopeDepsMermaid = useMemo(() => {
-    if (!graphData || graphData.scope_edges.length === 0) return null;
+    if (!graphData || !graphData.scope_edges || graphData.scope_edges.length === 0) return null;
     const lines = ['graph LR'];
     const seen = new Set<string>();
     for (const edge of graphData.scope_edges) {
@@ -278,7 +271,7 @@ export default function Dashboard() {
                 </h1>
                 <div className="flex items-center gap-4 text-sm text-gray-500 mt-2 font-mono">
                     <span>Generated: {new Date(data.generated_at).toLocaleString()}</span>
-                    <span>·</span>
+                    <span>&middot;</span>
                     <span className="uppercase">{data.languages.join(', ') || 'Unknown'}</span>
                 </div>
             </div>
@@ -330,7 +323,7 @@ export default function Dashboard() {
                 ) : (
                     <div className="text-gray-400 italic font-mono py-8 text-center border-2 border-dashed border-gray-200">
                         No architecture analysis found.<br/>
-                        Run docbot with an OPENROUTER_KEY to generate one.
+                        Run docbot with a BACKBOARD_API_KEY to generate one.
                     </div>
                 )}
             </div>
@@ -368,7 +361,7 @@ export default function Dashboard() {
                                         <div className="flex-1 min-w-0">
                                             <div className="font-mono text-sm font-bold">{svc.title}</div>
                                             <div className="text-xs text-gray-500 mt-0.5">
-                                                {typeLabel} · used by {svc.usedBy.length} scope{svc.usedBy.length !== 1 ? 's' : ''}
+                                                {typeLabel} &middot; used by {svc.usedBy.length} scope{svc.usedBy.length !== 1 ? 's' : ''}
                                             </div>
                                         </div>
                                         <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${colors.badge}`}>
@@ -449,7 +442,6 @@ export default function Dashboard() {
                         Past docbot runs showing how the codebase has evolved over time.
                     </p>
                     <div className="relative">
-                        {/* Timeline line */}
                         <div className="absolute left-[15px] top-4 bottom-4 w-px bg-gray-200" />
                         <div className="space-y-4">
                             {historyData.map((snap, i) => (
@@ -520,10 +512,10 @@ export default function Dashboard() {
                                         <div className="font-mono text-sm font-bold">{scope.title}</div>
                                         <div className="text-xs text-gray-500 mt-0.5">
                                             {scope.file_count} file{scope.file_count !== 1 ? 's' : ''}
-                                            {' · '}
+                                            {' \u00b7 '}
                                             {scope.symbol_count} symbol{scope.symbol_count !== 1 ? 's' : ''}
                                             {scope.languages.length > 0 && (
-                                                <> · {scope.languages.join(', ')}</>
+                                                <> &middot; {scope.languages.join(', ')}</>
                                             )}
                                         </div>
                                     </div>

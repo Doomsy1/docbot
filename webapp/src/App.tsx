@@ -5,11 +5,11 @@ import FileViewer from './components/FileViewer';
 import Dashboard from './components/Dashboard';
 import TourViewer from './components/TourViewer';
 import ArchitectureDev from './components/ArchitectureDev';
-import Pipeline from './components/Pipeline';
-import AgentExplorer from './features/exploration/AgentExplorer';
+import DynamicGraphChat from './components/DynamicGraphChat';
+import DiffViewer from './components/DiffViewer';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'pipeline' | 'exploration' | 'dashboard' | 'graph' | 'files' | 'tours' | 'dev-arch'>('pipeline');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph' | 'files' | 'tours' | 'dev-arch' | 'explore' | 'diff'>('dashboard');
   const [selectedFile, setSelectedFile] = useState<string | undefined>();
 
   const selectFile = (path: string) => {
@@ -22,18 +22,6 @@ export default function App() {
       <header className="border-b border-black p-4 flex justify-between items-center">
         <h1 className="text-xl font-bold tracking-tight">docbot</h1>
         <div className="flex gap-4 text-sm font-medium">
-          <button
-            onClick={() => setActiveTab('pipeline')}
-            className={`hover:underline ${activeTab === 'pipeline' ? 'underline decoration-2' : ''}`}
-          >
-            Pipeline
-          </button>
-          <button
-            onClick={() => setActiveTab('exploration')}
-            className={`hover:underline ${activeTab === 'exploration' ? 'underline decoration-2' : ''}`}
-          >
-            Exploration
-          </button>
           <button
             onClick={() => setActiveTab('dashboard')}
             className={`hover:underline ${activeTab === 'dashboard' ? 'underline decoration-2' : ''}`}
@@ -64,14 +52,23 @@ export default function App() {
           >
             Dev Arch
           </button>
+          <button
+            onClick={() => setActiveTab('explore')}
+            className={`hover:underline ${activeTab === 'explore' ? 'underline decoration-2' : ''}`}
+          >
+            Explore
+          </button>
+          <button
+            onClick={() => setActiveTab('diff')}
+            className={`hover:underline ${activeTab === 'diff' ? 'underline decoration-2' : ''}`}
+          >
+            Diff
+          </button>
         </div>
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Main content area */}
         <main className="flex-1 overflow-hidden relative">
-          {activeTab === 'pipeline' && <Pipeline />}
-          {activeTab === 'exploration' && <AgentExplorer />}
           {activeTab === 'dashboard' && <Dashboard />}
           {activeTab === 'tours' && (
             <TourViewer onSelectFile={selectFile} />
@@ -88,12 +85,14 @@ export default function App() {
             </div>
           )}
           {activeTab === 'dev-arch' && <ArchitectureDev />}
+          {activeTab === 'explore' && <DynamicGraphChat />}
+          {activeTab === 'diff' && <DiffViewer />}
         </main>
-
-        {/* Chat sidebar - always visible */}
-        <div className="w-[570px] shrink-0 border-l border-black h-full">
-          <Chat onSelectFile={selectFile} />
-        </div>
+        {activeTab !== 'explore' && activeTab !== 'diff' && (
+          <div className="w-[570px] shrink-0 border-l border-black h-full">
+            <Chat onSelectFile={selectFile} />
+          </div>
+        )}
       </div>
     </div>
   )

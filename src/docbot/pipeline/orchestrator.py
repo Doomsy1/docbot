@@ -321,7 +321,7 @@ async def run_async(
         run_dir.mkdir(parents=True, exist_ok=True)
         using_llm = llm_client is not None
         if using_llm:
-            console.print(f"[bold]LLM:[/bold] {llm_client.model} via OpenRouter (used at every step)")
+            console.print(f"[bold]LLM:[/bold] {llm_client.model} via Backboard (used at every step)")
         else:
             console.print("[dim]No LLM configured; using template-only mode.[/dim]")
         # Register extractors (Python AST, tree-sitter, LLM fallback).
@@ -551,7 +551,7 @@ async def generate_async(
     
     using_llm = llm_client is not None
     if using_llm:
-        console.print(f"[bold]LLM:[/bold] {llm_client.model} via OpenRouter (used at every step)")
+        console.print(f"[bold]LLM:[/bold] {llm_client.model} via Backboard (used at every step)")
     else:
         console.print("[dim]No LLM configured; using template-only mode.[/dim]")
     

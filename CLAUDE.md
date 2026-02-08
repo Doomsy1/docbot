@@ -8,13 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install (editable mode)
 uv pip install -e .
 
-# Git-integrated workflow (requires OPENROUTER_KEY in .env or environment)
+# Git-integrated workflow (requires BACKBOARD_API_KEY in .env or environment)
 docbot init /path/to/repo
 docbot generate                        # full pipeline, output to .docbot/
 docbot serve                           # launch interactive webapp
 
 # Key flags on generate
-docbot generate -j 8 -t 180 -m openai/gpt-oss-20b
+docbot generate -j 8 -t 180 -m openai/gpt-4o-mini
 docbot generate --no-llm               # template-only mode (no LLM calls)
 docbot generate --agents               # enable LangGraph agent exploration (parallel with standard)
 docbot generate --agents --serve       # agents + live webapp visualization
@@ -23,11 +23,11 @@ docbot generate --agents --serve -p 9000  # custom port for live webapp
 # Other commands
 docbot update                          # incremental update (changed files only)
 docbot status                          # show doc state vs. current git HEAD
-docbot config model openai/gpt-oss-20b # view/set config
+docbot config model openai/gpt-4o-mini # view/set config
 docbot hook install                    # auto-update on git commit
 ```
 
-Requires Python 3.11+. Configuration: `.env` file with `OPENROUTER_KEY=sk-or-...` (searched in cwd and parent directories).
+Requires Python 3.11+. Configuration: `.env` file with `BACKBOARD_API_KEY=...` (searched in cwd and parent directories).
 
 ## Tests
 
@@ -69,7 +69,7 @@ SCAN -> PLAN -> EXPLORE (parallel) -> REDUCE -> RENDER (parallel)
 
 **Legacy agent system** (`agents/`) -- deprecated, retained for reference. Superseded by `exploration/`.
 
-**LLM client** (`llm.py`) -- minimal async wrapper around OpenRouter using only stdlib `urllib.request` + `asyncio.to_thread()`. Includes automatic retry with exponential backoff (default 4 retries), adaptive concurrency reduction during sustained failures, and a global concurrency semaphore (default 6 workers).
+**LLM client** (`llm.py`) -- minimal async wrapper around Backboard.io using only stdlib `urllib.request` + `asyncio.to_thread()`. Includes automatic retry with exponential backoff (default 4 retries), adaptive concurrency reduction during sustained failures, and a global concurrency semaphore (default 6 workers).
 
 **Git integration** (`project.py`, `git_utils.py`, `hooks.py`) -- `.docbot/` project directory management, git diff tracking for incremental updates, post-commit hook support. `ProjectState` tracks `scope_perf_map` to inform future cost estimates from prior runs.
 

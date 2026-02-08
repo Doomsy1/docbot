@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
+import os
+import re
+import time
+from pathlib import Path, PurePosixPath
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..llm import LLMClient
 from ..models import Citation, DocsIndex
-from ..pipeline.tracker import PipelineTracker
 from .search import SearchIndex
 
 logger = logging.getLogger(__name__)
@@ -27,48 +30,8 @@ _search_index_cache: SearchIndex | None = None
 _llm_client: LLMClient | None = None
 _tours_cache: list[dict] | None = None
 _service_details_cache: dict | None = None
-
-# Live agent event queue -- set when running with --serve --agents.
-_live_event_queue: asyncio.Queue | None = None
-_live_pipeline_tracker: PipelineTracker | None = None
-# Snapshot of current agent states for late-joining clients.
-_agent_state_snapshot: dict = {"agents": {}, "notepads": {}}
-
-
-def ensure_static_assets_mounted() -> None:
-    """Mount built webapp assets on '/' if available and not already mounted."""
-    from fastapi.staticfiles import StaticFiles
-
-    here = Path(__file__).parent.resolve()
-    potential_dists = [
-        here / "web_dist",  # Bundled package
-        here.parents[2] / "webapp" / "dist",  # Editable/source checkout
-    ]
-
-    dist_dir = None
-    for p in potential_dists:
-        if p.exists() and (p / "index.html").exists():
-            dist_dir = p
-            break
-
-    if dist_dir and not any(getattr(route, "name", None) == "static" for route in app.routes):
-        app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="static")
-        print(f"Serving static assets from {dist_dir}")
-
-
-def _set_live_event_queue(queue: asyncio.Queue | None) -> None:
-    """Set the live event queue (called from CLI before starting server)."""
-    global _live_event_queue, _agent_state_snapshot
-    _live_event_queue = queue
-    if queue is not None:
-        # New live run: clear stale state from prior sessions.
-        _agent_state_snapshot = {"agents": {}, "notepads": {}}
-
-
-def _set_live_pipeline_tracker(tracker: PipelineTracker | None) -> None:
-    """Set live pipeline tracker for in-memory /api/pipeline fallback."""
-    global _live_pipeline_tracker
-    _live_pipeline_tracker = tracker
+_explore_graph_cache: dict | None = None
+_explore_suggestions_cache: dict | None = None
 
 
 def _load_index() -> DocsIndex:
@@ -108,90 +71,1221 @@ def _load_search_index() -> SearchIndex:
     return _search_index_cache
 
 
-def _get_docbot_dir() -> Path:
-    """Get the .docbot directory from the run directory.
+def _scope_group(scope) -> str:
+    """Classify a scope into a coarse UI group."""
+    group = "core"
+    if scope.paths:
+        first = scope.paths[0].replace("\\", "/")
+        if first.startswith("webapp/") or first.startswith("frontend/"):
+            group = "frontend"
+        elif first.startswith("services/") or first.startswith("backend/"):
+            group = "backend"
+        elif first.startswith("tests/") or "test" in scope.scope_id:
+            group = "testing"
+        elif first.startswith("scripts/"):
+            group = "scripts"
+    return group
 
-    First checks if _run_dir itself IS a .docbot/ directory, then falls back
-    to looking for .docbot/ inside the analyzed repo root.
-    """
-    if _run_dir is None:
-        raise HTTPException(status_code=503, detail="No run directory configured.")
 
-    # If _run_dir IS the .docbot directory already (git-integrated layout).
-    if _run_dir.name == ".docbot":
-        return _run_dir
+def _normalize_query_tokens(text: str) -> set[str]:
+    """Lowercase + tokenize an arbitrary user query."""
+    return set(re.findall(r"[a-z0-9_./-]+", text.lower()))
 
-    # Try to find .docbot/ via the analyzed repo root.
-    try:
-        index = _load_index()
-        repo_root = Path(index.repo_path).resolve()
-        docbot_dir = repo_root / ".docbot"
-        if docbot_dir.exists():
-            return docbot_dir
-    except HTTPException:
-        pass
 
-    raise HTTPException(
-        status_code=404, detail=".docbot directory not found."
+def _looks_like_llm_error_text(text: str | None) -> bool:
+    """Detect stale LLM error blobs accidentally persisted into docs artifacts."""
+    if not text:
+        return False
+    t = text.strip().lower()
+    if not t:
+        return False
+    return (
+        t.startswith("llm error:")
+        or "model '" in t and "is not supported" in t
+        or "supported models:" in t
     )
 
 
-def _load_pipeline_events(run_id: str | None = None) -> dict:
-    """Load saved pipeline events for a run (or the latest run).
+def _clean_llm_generated_text(text: str | None) -> str:
+    """Return empty string when a stored text is actually an LLM failure."""
+    if _looks_like_llm_error_text(text):
+        return ""
+    return (text or "").strip()
 
-    Searches in multiple locations:
-    1. .docbot/history/<run_id>/pipeline_events.json (git-integrated layout)
-    2. _run_dir/pipeline_events.json (legacy run directory layout)
-    """
-    events_path: Path | None = None
-    selected_run_id = run_id
 
-    # Try .docbot/ layout first.
-    try:
-        docbot_dir = _get_docbot_dir()
-        from ..git.project import load_state
-        state = load_state(docbot_dir)
-        if not selected_run_id:
-            selected_run_id = state.last_run_id
-        if selected_run_id:
-            candidate = docbot_dir / "history" / selected_run_id / "pipeline_events.json"
-            if candidate.exists():
-                events_path = candidate
-    except (HTTPException, Exception):
-        pass
+def _infer_graph_view(query: str) -> str:
+    """Infer target graph depth from the user query."""
+    q = query.lower()
+    explicit_file_level = any(
+        k in q
+        for k in (
+            "file level",
+            "file-level",
+            "files only",
+            "on a file level",
+            "per file",
+            "file graph",
+            "script files",
+            "two script files",
+        )
+    )
+    high_level = (
+        "high level" in q
+        or "overview" in q
+        or "big picture" in q
+        or "architecture" in q
+        or "how it fits" in q
+    )
+    entity_level = any(
+        k in q
+        for k in (
+            "entity",
+            "entities",
+            "symbol",
+            "symbols",
+            "function",
+            "method",
+            "class",
+        )
+    )
+    file_level = any(
+        k in q
+        for k in (
+            "file",
+            "line",
+            "implementation",
+            "deep detail",
+            "specific code",
+            "debug",
+        )
+    )
+    module_level = any(
+        k in q
+        for k in (
+            "module",
+            "directory",
+            "package",
+            "service",
+            "component",
+            "backend part",
+            "subsystem",
+        )
+    )
+    if explicit_file_level:
+        return "file"
+    if entity_level:
+        return "entity"
+    if file_level:
+        return "file"
+    if high_level and not module_level:
+        return "scope"
+    if module_level:
+        return "module"
+    return "module"
 
-    # Fallback: check the run directory itself (legacy layout).
-    if events_path is None and _run_dir is not None:
-        candidate = _run_dir / "pipeline_events.json"
-        if candidate.exists():
-            events_path = candidate
-            if not selected_run_id:
-                selected_run_id = _run_dir.name
 
-    if events_path is None:
-        raise HTTPException(
-            status_code=404,
-            detail="No pipeline events found. Run 'docbot generate' first.",
+def _has_explicit_file_intent(query: str) -> bool:
+    q = query.lower()
+    return any(
+        k in q
+        for k in (
+            "file level",
+            "file-level",
+            "files only",
+            "on a file level",
+            "per file",
+            "file graph",
+            "script files",
+            "two script files",
+        )
+    )
+
+
+def _infer_scope_filter(index: DocsIndex, query: str) -> set[str] | None:
+    """Infer a scope filter from the query, or None for all scopes."""
+    q = query.lower()
+    tokens = _normalize_query_tokens(query)
+
+    if "entire" in q or "whole codebase" in q or "all scopes" in q or "everything" in q:
+        return None
+
+    scopes_by_id = {s.scope_id: s for s in index.scopes}
+    selected: set[str] = set()
+
+    # Direct scope-id/title mention.
+    for s in index.scopes:
+        sid = s.scope_id.lower()
+        title = s.title.lower()
+        if sid in q or title in q:
+            selected.add(s.scope_id)
+            continue
+        title_tokens = _normalize_query_tokens(title)
+        if title_tokens and len(title_tokens.intersection(tokens)) >= max(1, min(2, len(title_tokens))):
+            selected.add(s.scope_id)
+
+    # Group hints.
+    wanted_groups: set[str] = set()
+    if any(k in q for k in ("backend", "api", "server", "service")):
+        wanted_groups.add("backend")
+    if any(k in q for k in ("frontend", "ui", "client", "webapp")):
+        wanted_groups.add("frontend")
+    if any(k in q for k in ("test", "testing", "qa")):
+        wanted_groups.add("testing")
+    if any(k in q for k in ("script", "cli", "tooling")):
+        wanted_groups.add("scripts")
+
+    if wanted_groups:
+        for sid, s in scopes_by_id.items():
+            if _scope_group(s) in wanted_groups:
+                selected.add(sid)
+
+    return selected or None
+
+
+def _can_fast_route(query: str) -> bool:
+    """Whether heuristics are explicit enough to skip LLM routing."""
+    q = query.lower()
+    explicit_depth = any(
+        k in q
+        for k in (
+            "high level",
+            "overview",
+            "architecture",
+            "module",
+            "directory",
+            "service",
+            "file",
+            "line",
+            "entity",
+            "symbol",
+            "function",
+            "method",
+            "class",
+            "implementation",
+            "in detail",
+            "specific",
+        )
+    )
+    explicit_scope = any(
+        k in q for k in ("backend", "frontend", "tests", "testing", "scripts", "whole project", "entire")
+    )
+    return explicit_depth or explicit_scope
+
+
+def _file_to_scope_map(index: DocsIndex) -> dict[str, str]:
+    """Map repo-relative file path -> scope_id."""
+    out: dict[str, str] = {}
+    for s in index.scopes:
+        for p in s.paths:
+            out[p] = s.scope_id
+    return out
+
+
+def _build_graph_rag_context(index: DocsIndex, query: str, *, max_scopes: int = 12) -> str:
+    """Build compact local-RAG context for graph routing decisions."""
+    file_to_scope = _file_to_scope_map(index)
+    scope_by_id = {s.scope_id: s for s in index.scopes}
+    scope_scores: dict[str, int] = {s.scope_id: 0 for s in index.scopes}
+
+    hits = _load_search_index().search(query, limit=14)
+    hit_lines: list[str] = []
+    for h in hits:
+        file = h.citation.file
+        sid = file_to_scope.get(file)
+        if sid:
+            scope_scores[sid] = scope_scores.get(sid, 0) + 2
+        hit_lines.append(
+            f"- {h.match_context} @ {h.citation.file}:{h.citation.line_start} (score={h.score:.2f})"
         )
 
-    try:
-        payload = json.loads(events_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Invalid pipeline_events.json for run '{selected_run_id}'.",
-        ) from exc
+    query_tokens = _normalize_query_tokens(query)
+    for s in index.scopes:
+        text = f"{s.scope_id} {s.title}".lower()
+        if any(tok in text for tok in query_tokens):
+            scope_scores[s.scope_id] = scope_scores.get(s.scope_id, 0) + 3
 
-    # Backward compatibility: older runs saved a plain snapshot shape.
-    if "events" not in payload and "nodes" in payload:
-        payload = {
-            "run_id": selected_run_id or "unknown",
-            "events": [],
-            "snapshot": payload,
+    ranked_scopes = sorted(
+        index.scopes,
+        key=lambda s: (scope_scores.get(s.scope_id, 0), len(s.paths)),
+        reverse=True,
+    )[:max_scopes]
+
+    scope_lines: list[str] = []
+    for s in ranked_scopes:
+        group = _scope_group(s)
+        langs = ", ".join(s.languages[:3]) if s.languages else "unknown"
+        summary = (s.summary or "").replace("\n", " ").strip()
+        if len(summary) > 140:
+            summary = summary[:137] + "..."
+        scope_lines.append(
+            f"- id={s.scope_id} | title={s.title} | group={group} | files={len(s.paths)} | langs={langs} | score={scope_scores.get(s.scope_id, 0)} | summary={summary or '(none)'}"
+        )
+
+    return (
+        "Top scope candidates:\n"
+        + ("\n".join(scope_lines) if scope_lines else "(none)")
+        + "\n\nTop semantic hits:\n"
+        + ("\n".join(hit_lines) if hit_lines else "(none)")
+    )
+
+
+def _match_scope_ids(index: DocsIndex, requested_ids: list[str]) -> set[str]:
+    """Resolve requested scope identifiers/titles to known scope_ids."""
+    if not requested_ids:
+        return set()
+    scopes = index.scopes
+    by_id = {s.scope_id.lower(): s.scope_id for s in scopes}
+    by_title = {s.title.lower(): s.scope_id for s in scopes}
+    resolved: set[str] = set()
+
+    for raw in requested_ids:
+        key = raw.strip().lower()
+        if not key:
+            continue
+        if key in by_id:
+            resolved.add(by_id[key])
+            continue
+        if key in by_title:
+            resolved.add(by_title[key])
+            continue
+        # Soft matching by containment in id/title.
+        for s in scopes:
+            sid = s.scope_id.lower()
+            title = s.title.lower()
+            if key in sid or sid in key or key in title or title in key:
+                resolved.add(s.scope_id)
+                break
+    return resolved
+
+
+async def _route_graph_with_llm(index: DocsIndex, query: str) -> tuple[str, set[str] | None, str]:
+    """LLM-based routing for graph view and scope filters using local RAG context."""
+    if _llm_client is None:
+        view = _infer_graph_view(query)
+        return view, _infer_scope_filter(index, query), "Heuristic routing (LLM unavailable)."
+
+    rag_context = _build_graph_rag_context(index, query)
+    allowed_ids = [s.scope_id for s in index.scopes]
+    prompt = f"""You are routing a graph UI for code exploration.
+
+User query:
+{query}
+
+Available scope IDs:
+{", ".join(allowed_ids)}
+
+Context:
+{rag_context}
+
+Return JSON only with this schema:
+{{
+  "view": "scope" | "module" | "file" | "entity",
+  "scope_mode": "all" | "filtered",
+  "scope_ids": ["scope_id_or_title", "..."],
+  "reason": "short explanation"
+}}
+
+Rules:
+- Choose "scope" for big-picture architecture.
+- Choose "module" for component/directory/service-level exploration.
+- Choose "file" for implementation-level/debugging.
+- Choose "entity" for function/class/method-level relationships.
+- If user asks whole project, use scope_mode="all".
+- If user asks backend/frontend/tests/scripts or specific subsystem, use scope_mode="filtered" and include relevant scope IDs.
+- Keep reason under 18 words.
+"""
+    try:
+        # Keep routing fast; fall back if model is slow/unavailable.
+        raw = await asyncio.wait_for(_llm_client.ask(prompt, json_mode=True), timeout=7.0)
+        data = json.loads(raw)
+        view = data.get("view", "module")
+        if view not in {"scope", "module", "file", "entity"}:
+            view = "module"
+        scope_mode = data.get("scope_mode", "filtered")
+        requested = data.get("scope_ids") or []
+        if not isinstance(requested, list):
+            requested = []
+        matched = _match_scope_ids(index, [str(x) for x in requested])
+        if scope_mode == "all":
+            scope_filter = None
+        else:
+            scope_filter = matched or _infer_scope_filter(index, query)
+        reason = str(data.get("reason") or "LLM-routed using docbot local context.")
+        return view, scope_filter, reason
+    except Exception as exc:
+        logger.warning("Graph LLM routing failed, falling back to heuristics: %s", exc)
+        view = _infer_graph_view(query)
+        return view, _infer_scope_filter(index, query), "Heuristic fallback (LLM route timed out/failed)."
+
+
+def _build_scope_graph(index: DocsIndex, include_scopes: set[str] | None = None) -> dict:
+    """Build scope-level graph payload."""
+    scopes_meta = []
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        scopes_meta.append(
+            {
+                "scope_id": s.scope_id,
+                "title": s.title,
+                "file_count": len(s.paths),
+                "symbol_count": len(s.public_api),
+                "languages": s.languages,
+                "group": _scope_group(s),
+                "summary": s.summary,
+                "description": (
+                    s.summary
+                    or f"{s.title} contains {len(s.paths)} files across {', '.join(s.languages) if s.languages else 'unknown languages'}."
+                ),
+            }
+        )
+    edge_items = []
+    for a, b in index.scope_edges:
+        if include_scopes is not None and (a not in include_scopes or b not in include_scopes):
+            continue
+        edge_items.append({"from": a, "to": b})
+    return {
+        "scopes": scopes_meta,
+        "scope_edges": edge_items,
+        "mermaid_graph": index.mermaid_graph or None,
+    }
+
+
+def _build_file_graph(index: DocsIndex, include_scopes: set[str] | None = None) -> dict:
+    """Build file-level graph payload."""
+    path_to_file: dict[str, str] = {}
+    prefix_to_file: dict[str, str] = {}
+    source_exts = frozenset(
+        {
+            ".py",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".go",
+            ".rs",
+            ".java",
+            ".kt",
+            ".cs",
+            ".swift",
+            ".rb",
+            ".cpp",
+            ".c",
+            ".h",
+            ".hpp",
         }
-    payload.setdefault("run_id", selected_run_id or "unknown")
-    payload.setdefault("events", [])
-    return payload
+    )
+    lang_exts: dict[str, str] = {
+        ".py": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".go": "go",
+        ".rs": "rust",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".cs": "csharp",
+        ".swift": "swift",
+        ".rb": "ruby",
+        ".cpp": "cpp",
+        ".c": "c",
+        ".h": "c",
+        ".hpp": "cpp",
+    }
+
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        for p in s.paths:
+            stem, _ext = os.path.splitext(p)
+            path_to_file[stem] = p
+            path_to_file[PurePosixPath(stem).name] = p
+            parts = PurePosixPath(p).parts
+            for i in range(1, len(parts) + 1):
+                segment = list(parts[:i])
+                base, ext2 = os.path.splitext(segment[-1])
+                if ext2 in source_exts:
+                    segment[-1] = base
+                prefix_to_file[".".join(segment)] = p
+
+    file_nodes: list[dict] = []
+    file_edges: list[dict] = []
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        group = _scope_group(s)
+        for p in s.paths:
+            ext = os.path.splitext(p)[1].lower()
+            language = lang_exts.get(ext, "unknown")
+            fe = s.file_extractions.get(p)
+            file_nodes.append(
+                {
+                    "id": p,
+                    "path": p,
+                    "scope_id": s.scope_id,
+                    "scope_title": s.title,
+                    "symbol_count": len(fe.symbols) if fe else 0,
+                    "import_count": len(fe.imports) if fe else 0,
+                    "language": language,
+                    "group": group,
+                    "description": (
+                        f"File {p} in {s.title}. "
+                        f"Contains {len(fe.symbols) if fe else 0} entities and {len(fe.imports) if fe else 0} imports."
+                    ),
+                }
+            )
+            if fe:
+                for imp in fe.imports:
+                    target_file = _resolve_import_to_file(imp, path_to_file, prefix_to_file, source_exts)
+                    if target_file and target_file != p:
+                        file_edges.append({"from": p, "to": target_file})
+
+    scope_groups = []
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        scope_groups.append(
+            {
+                "scope_id": s.scope_id,
+                "title": s.title,
+                "file_count": len(s.paths),
+                "group": _scope_group(s),
+            }
+        )
+    scope_edges = []
+    for a, b in index.scope_edges:
+        if include_scopes is not None and (a not in include_scopes or b not in include_scopes):
+            continue
+        scope_edges.append({"from": a, "to": b})
+
+    return {
+        "file_nodes": file_nodes,
+        "file_edges": file_edges,
+        "scope_groups": scope_groups,
+        "scope_edges": scope_edges,
+    }
+
+
+def _build_module_graph(index: DocsIndex, include_scopes: set[str] | None = None) -> dict:
+    """Build module-level graph payload (directory nodes + weighted edges)."""
+    path_to_file: dict[str, str] = {}
+    prefix_to_file: dict[str, str] = {}
+    source_exts = frozenset(
+        {
+            ".py",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".go",
+            ".rs",
+            ".java",
+            ".kt",
+            ".cs",
+            ".swift",
+            ".rb",
+            ".cpp",
+            ".c",
+            ".h",
+            ".hpp",
+        }
+    )
+    lang_exts: dict[str, str] = {
+        ".py": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".go": "go",
+        ".rs": "rust",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".cs": "csharp",
+        ".swift": "swift",
+        ".rb": "ruby",
+        ".cpp": "cpp",
+        ".c": "c",
+        ".h": "c",
+        ".hpp": "cpp",
+    }
+
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        for p in s.paths:
+            stem, _ext = os.path.splitext(p)
+            path_to_file[stem] = p
+            path_to_file[PurePosixPath(stem).name] = p
+            parts = PurePosixPath(p).parts
+            for i in range(1, len(parts) + 1):
+                segment = list(parts[:i])
+                base, ext2 = os.path.splitext(segment[-1])
+                if ext2 in source_exts:
+                    segment[-1] = base
+                prefix_to_file[".".join(segment)] = p
+
+    file_to_module: dict[str, str] = {}
+    module_stats: dict[str, dict] = {}
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        group = _scope_group(s)
+        for p in s.paths:
+            module_id = os.path.dirname(p).replace("\\", "/") or "."
+            file_to_module[p] = module_id
+            fe = s.file_extractions.get(p)
+            symbol_count = len(fe.symbols) if fe else 0
+            import_count = len(fe.imports) if fe else 0
+            language = lang_exts.get(os.path.splitext(p)[1].lower(), "unknown")
+            if module_id not in module_stats:
+                module_stats[module_id] = {
+                    "id": module_id,
+                    "label": os.path.basename(module_id) if module_id != "." else "(root)",
+                    "scope_id": s.scope_id,
+                    "scope_title": s.title,
+                    "file_count": 0,
+                    "symbol_count": 0,
+                    "import_count": 0,
+                    "languages": set(),
+                    "group": group,
+                    "paths": [],
+                    "symbol_names": set(),
+                }
+            st = module_stats[module_id]
+            st["file_count"] += 1
+            st["symbol_count"] += symbol_count
+            st["import_count"] += import_count
+            st["paths"].append(p)
+            if language != "unknown":
+                st["languages"].add(language)
+            if fe:
+                for sym in fe.symbols[:12]:
+                    st["symbol_names"].add(sym.name)
+
+    module_nodes = []
+    for m in module_stats.values():
+        symbol_preview = ", ".join(sorted(m["symbol_names"])[:4]) or "no named entities extracted"
+        module_nodes.append(
+            {
+                "id": m["id"],
+                "label": m["label"],
+                "scope_id": m["scope_id"],
+                "scope_title": m["scope_title"],
+                "file_count": m["file_count"],
+                "symbol_count": m["symbol_count"],
+                "import_count": m["import_count"],
+                "languages": sorted(m["languages"]),
+                "group": m["group"],
+                "description": (
+                    f"Module {m['id']} in {m['scope_title']}. "
+                    f"Contains {m['file_count']} files, {m['symbol_count']} entities, {m['import_count']} imports. "
+                    f"Examples: {symbol_preview}."
+                ),
+            }
+        )
+
+    edge_counts: dict[tuple[str, str], int] = {}
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        for p in s.paths:
+            fe = s.file_extractions.get(p)
+            if not fe:
+                continue
+            src_module = file_to_module.get(p)
+            if not src_module:
+                continue
+            for imp in fe.imports:
+                target_file = _resolve_import_to_file(imp, path_to_file, prefix_to_file, source_exts)
+                if not target_file or target_file == p:
+                    continue
+                dst_module = file_to_module.get(target_file)
+                if not dst_module or dst_module == src_module:
+                    continue
+                key = (src_module, dst_module)
+                edge_counts[key] = edge_counts.get(key, 0) + 1
+    module_edges = [{"from": a, "to": b, "weight": w} for (a, b), w in edge_counts.items()]
+
+    scope_groups = []
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        scope_groups.append(
+            {
+                "scope_id": s.scope_id,
+                "title": s.title,
+                "file_count": len(s.paths),
+                "group": _scope_group(s),
+            }
+        )
+    return {
+        "module_nodes": module_nodes,
+        "module_edges": module_edges,
+        "scope_groups": scope_groups,
+    }
+
+
+def _build_entity_graph(
+    index: DocsIndex,
+    include_scopes: set[str] | None = None,
+    *,
+    query: str | None = None,
+    connected_only: bool = True,
+) -> dict:
+    """Build entity-level graph payload from extracted symbols and import-derived dependencies."""
+    source_exts = frozenset(
+        {
+            ".py",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".go",
+            ".rs",
+            ".java",
+            ".kt",
+            ".cs",
+            ".swift",
+            ".rb",
+            ".cpp",
+            ".c",
+            ".h",
+            ".hpp",
+        }
+    )
+    lang_exts: dict[str, str] = {
+        ".py": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".go": "go",
+        ".rs": "rust",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".cs": "csharp",
+        ".swift": "swift",
+        ".rb": "ruby",
+        ".cpp": "cpp",
+        ".c": "c",
+        ".h": "c",
+        ".hpp": "cpp",
+    }
+
+    path_to_file: dict[str, str] = {}
+    prefix_to_file: dict[str, str] = {}
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        for p in s.paths:
+            stem, _ext = os.path.splitext(p)
+            path_to_file[stem] = p
+            path_to_file[PurePosixPath(stem).name] = p
+            parts = PurePosixPath(p).parts
+            for i in range(1, len(parts) + 1):
+                segment = list(parts[:i])
+                base, ext2 = os.path.splitext(segment[-1])
+                if ext2 in source_exts:
+                    segment[-1] = base
+                prefix_to_file[".".join(segment)] = p
+
+    # Build entity nodes.
+    entity_nodes: list[dict] = []
+    file_entities: dict[str, list[str]] = {}
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        group = _scope_group(s)
+        for p in s.paths:
+            fe = s.file_extractions.get(p)
+            language = lang_exts.get(os.path.splitext(p)[1].lower(), "unknown")
+            if not fe or not fe.symbols:
+                continue
+            kept_symbol_ids: list[str] = []
+            for sym in fe.symbols[:8]:
+                eid = f"{sym.citation.file}:{sym.citation.line_start}:{sym.name}"
+                kept_symbol_ids.append(eid)
+                entity_nodes.append(
+                    {
+                        "id": eid,
+                        "name": sym.name,
+                        "kind": sym.kind,
+                        "signature": sym.signature,
+                        "file": sym.citation.file,
+                        "line_start": sym.citation.line_start,
+                        "scope_id": s.scope_id,
+                        "scope_title": s.title,
+                        "module_id": os.path.dirname(sym.citation.file).replace("\\", "/") or ".",
+                        "language": language,
+                        "group": group,
+                        "description": (
+                            sym.docstring_first_line
+                            or f"{sym.kind.title()} `{sym.name}` defined in {sym.citation.file}:{sym.citation.line_start}."
+                        ),
+                    }
+                )
+            if kept_symbol_ids:
+                file_entities[p] = kept_symbol_ids
+
+    # Cap node count for browser performance before edge construction.
+    max_nodes = 260
+    if len(entity_nodes) > max_nodes:
+        kept_ids = {n["id"] for n in entity_nodes[:max_nodes]}
+        entity_nodes = entity_nodes[:max_nodes]
+        file_entities = {k: [eid for eid in v if eid in kept_ids] for k, v in file_entities.items()}
+
+    # Build entity edges by lifting file import dependencies.
+    edge_counts: dict[tuple[str, str], int] = {}
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        for p in s.paths:
+            fe = s.file_extractions.get(p)
+            if not fe:
+                continue
+            src_entities = file_entities.get(p, [])
+            if not src_entities:
+                continue
+            for imp in fe.imports:
+                target_file = _resolve_import_to_file(imp, path_to_file, prefix_to_file, source_exts)
+                if not target_file or target_file == p:
+                    continue
+                dst_entities = file_entities.get(target_file, [])
+                if not dst_entities:
+                    continue
+                for src_eid in src_entities[:3]:
+                    for dst_eid in dst_entities[:3]:
+                        key = (src_eid, dst_eid)
+                        edge_counts[key] = edge_counts.get(key, 0) + 1
+
+    entity_edges = [{"from": a, "to": b, "weight": w} for (a, b), w in edge_counts.items()]
+
+    # Keep connected entities by default for readability; preserve query matches if provided.
+    if connected_only and entity_nodes:
+        connected_ids: set[str] = set()
+        for e in entity_edges:
+            connected_ids.add(e["from"])
+            connected_ids.add(e["to"])
+
+        query_tokens = _normalize_query_tokens(query or "")
+        query_ids: set[str] = set()
+        if query_tokens:
+            for n in entity_nodes:
+                hay = f"{n['name']} {n['signature']} {n['file']} {n['module_id']}".lower()
+                if any(tok in hay for tok in query_tokens):
+                    query_ids.add(n["id"])
+
+        keep_ids = connected_ids | query_ids
+        if keep_ids:
+            entity_nodes = [n for n in entity_nodes if n["id"] in keep_ids]
+            keep_set = {n["id"] for n in entity_nodes}
+            entity_edges = [e for e in entity_edges if e["from"] in keep_set and e["to"] in keep_set]
+
+    # Final cap after filtering (keeps densest part by edge participation).
+    if len(entity_nodes) > 140:
+        degree: dict[str, int] = {}
+        for e in entity_edges:
+            degree[e["from"]] = degree.get(e["from"], 0) + 1
+            degree[e["to"]] = degree.get(e["to"], 0) + 1
+        ranked_ids = [n["id"] for n in sorted(entity_nodes, key=lambda n: degree.get(n["id"], 0), reverse=True)]
+        keep_ids = set(ranked_ids[:140])
+        entity_nodes = [n for n in entity_nodes if n["id"] in keep_ids]
+        entity_edges = [e for e in entity_edges if e["from"] in keep_ids and e["to"] in keep_ids]
+
+    scope_groups = []
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        scope_groups.append(
+            {
+                "scope_id": s.scope_id,
+                "title": s.title,
+                "file_count": len(s.paths),
+                "group": _scope_group(s),
+            }
+        )
+
+    return {
+        "entity_nodes": entity_nodes,
+        "entity_edges": entity_edges,
+        "scope_groups": scope_groups,
+    }
+
+
+def _excerpt_for_file(file_path: str, *, line_start: int | None = None, radius: int = 5) -> str | None:
+    """Return a small code excerpt for hover cards."""
+    index = _load_index()
+    repo_root = Path(index.repo_path).resolve()
+    target = (repo_root / file_path).resolve()
+    try:
+        target.relative_to(repo_root)
+    except ValueError:
+        return None
+    if not target.exists() or not target.is_file():
+        return None
+    try:
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return None
+    if not lines:
+        return None
+    if line_start is None:
+        line_start = 1
+    start = max(1, line_start - radius)
+    end = min(len(lines), line_start + radius)
+    excerpt = "\n".join(f"{i:>4} | {lines[i - 1]}" for i in range(start, end + 1))
+    return excerpt[:2000]
+
+
+def _build_explore_catalog(index: DocsIndex) -> dict:
+    """Build and cache full graph primitives used by adaptive mixed-depth rendering."""
+    global _explore_graph_cache
+    cache_key = f"{index.repo_path}:{index.generated_at}:{len(index.scopes)}"
+    if _explore_graph_cache and _explore_graph_cache.get("key") == cache_key:
+        return _explore_graph_cache["data"]
+
+    source_exts = frozenset(
+        {
+            ".py",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".go",
+            ".rs",
+            ".java",
+            ".kt",
+            ".cs",
+            ".swift",
+            ".rb",
+            ".cpp",
+            ".c",
+            ".h",
+            ".hpp",
+        }
+    )
+
+    scopes: dict[str, dict] = {}
+    modules: dict[str, dict] = {}
+    files: dict[str, dict] = {}
+    entities: dict[str, dict] = {}
+    file_to_scope: dict[str, str] = {}
+    file_to_module: dict[str, str] = {}
+    file_entities: dict[str, list[str]] = {}
+
+    path_to_file: dict[str, str] = {}
+    prefix_to_file: dict[str, str] = {}
+    for s in index.scopes:
+        scopes[s.scope_id] = {
+            "id": f"scope:{s.scope_id}",
+            "scope_id": s.scope_id,
+            "label": s.title,
+            "kind": "scope",
+            "group": _scope_group(s),
+            "file_count": len(s.paths),
+            "entity_count": sum(len(s.file_extractions.get(p).symbols) if s.file_extractions.get(p) else 0 for p in s.paths),
+            "description": s.summary or f"{s.title} scope",
+            "preview": None,
+        }
+        for p in s.paths:
+            stem, _ext = os.path.splitext(p)
+            path_to_file[stem] = p
+            path_to_file[PurePosixPath(stem).name] = p
+            parts = PurePosixPath(p).parts
+            for i in range(1, len(parts) + 1):
+                segment = list(parts[:i])
+                base, ext2 = os.path.splitext(segment[-1])
+                if ext2 in source_exts:
+                    segment[-1] = base
+                prefix_to_file[".".join(segment)] = p
+
+    for s in index.scopes:
+        group = _scope_group(s)
+        for p in s.paths:
+            module_path = os.path.dirname(p).replace("\\", "/") or "."
+            module_key = f"module:{s.scope_id}:{module_path}"
+            file_key = f"file:{p}"
+            file_to_scope[p] = s.scope_id
+            file_to_module[p] = module_key
+            fe = s.file_extractions.get(p)
+            symbols = fe.symbols if fe else []
+            imports = fe.imports if fe else []
+
+            if module_key not in modules:
+                modules[module_key] = {
+                    "id": module_key,
+                    "module_path": module_path,
+                    "scope_id": s.scope_id,
+                    "kind": "module",
+                    "label": os.path.basename(module_path) if module_path != "." else "(root)",
+                    "group": group,
+                    "file_count": 0,
+                    "entity_count": 0,
+                    "import_count": 0,
+                    "description": f"{module_path} module in {s.title}",
+                    "preview": None,
+                }
+            modules[module_key]["file_count"] += 1
+            modules[module_key]["entity_count"] += len(symbols)
+            modules[module_key]["import_count"] += len(imports)
+
+            files[file_key] = {
+                "id": file_key,
+                "file_path": p,
+                "scope_id": s.scope_id,
+                "module_id": module_key,
+                "kind": "file",
+                "label": os.path.basename(p),
+                "group": group,
+                "file_count": 1,
+                "entity_count": len(symbols),
+                "import_count": len(imports),
+                "description": f"{p} with {len(symbols)} entities and {len(imports)} imports",
+                "preview": _excerpt_for_file(p, line_start=1, radius=6),
+            }
+
+            entity_ids: list[str] = []
+            for sym in symbols[:16]:
+                entity_key = f"entity:{sym.citation.file}:{sym.citation.line_start}:{sym.name}"
+                entity_ids.append(entity_key)
+                entities[entity_key] = {
+                    "id": entity_key,
+                    "entity_name": sym.name,
+                    "entity_kind": sym.kind,
+                    "line_start": sym.citation.line_start,
+                    "file_path": sym.citation.file,
+                    "scope_id": s.scope_id,
+                    "module_id": module_key,
+                    "kind": "entity",
+                    "label": sym.name,
+                    "group": group,
+                    "file_count": 1,
+                    "entity_count": 1,
+                    "import_count": 0,
+                    "description": sym.docstring_first_line or f"{sym.kind} in {sym.citation.file}:{sym.citation.line_start}",
+                    "preview": _excerpt_for_file(sym.citation.file, line_start=sym.citation.line_start, radius=7),
+                }
+            file_entities[p] = entity_ids
+
+    scope_edges = [{"from": f"scope:{a}", "to": f"scope:{b}", "kind": "scope_dep", "weight": 1} for a, b in index.scope_edges]
+    module_edge_counts: dict[tuple[str, str], int] = {}
+    file_edges: list[dict] = []
+    entity_cross_counts: dict[tuple[str, str], int] = {}
+    entity_intra_edges: list[dict] = []
+
+    for s in index.scopes:
+        for p in s.paths:
+            fe = s.file_extractions.get(p)
+            if not fe:
+                continue
+            src_file_key = f"file:{p}"
+            src_module_key = file_to_module.get(p)
+            for imp in fe.imports:
+                target_file = _resolve_import_to_file(imp, path_to_file, prefix_to_file, source_exts)
+                if not target_file or target_file == p:
+                    continue
+                dst_file_key = f"file:{target_file}"
+                dst_module_key = file_to_module.get(target_file)
+                if src_module_key and dst_module_key and src_module_key != dst_module_key:
+                    k = (src_module_key, dst_module_key)
+                    module_edge_counts[k] = module_edge_counts.get(k, 0) + 1
+                file_edges.append(
+                    {
+                        "from": src_file_key,
+                        "to": dst_file_key,
+                        "kind": "file_dep",
+                        "weight": 1,
+                    }
+                )
+                src_entities = file_entities.get(p, [])[:3]
+                dst_entities = file_entities.get(target_file, [])[:3]
+                for a in src_entities:
+                    for b in dst_entities:
+                        k2 = (a, b)
+                        entity_cross_counts[k2] = entity_cross_counts.get(k2, 0) + 1
+
+            # in-file relationship chain for visual distinction
+            eids = file_entities.get(p, [])
+            for i in range(len(eids) - 1):
+                entity_intra_edges.append(
+                    {
+                        "from": eids[i],
+                        "to": eids[i + 1],
+                        "kind": "entity_intra_file",
+                        "weight": 1,
+                    }
+                )
+
+    module_edges = [{"from": a, "to": b, "kind": "module_dep", "weight": w} for (a, b), w in module_edge_counts.items()]
+    entity_edges = (
+        [{"from": a, "to": b, "kind": "entity_cross_file", "weight": w} for (a, b), w in entity_cross_counts.items()]
+        + entity_intra_edges
+    )
+
+    out = {
+        "scopes": scopes,
+        "modules": modules,
+        "files": files,
+        "entities": entities,
+        "file_to_scope": file_to_scope,
+        "file_to_module": file_to_module,
+        "file_entities": file_entities,
+        "scope_edges": scope_edges,
+        "module_edges": module_edges,
+        "file_edges": file_edges,
+        "entity_edges": entity_edges,
+    }
+    _explore_graph_cache = {"key": cache_key, "data": out}
+    return out
+
+
+def _collect_one_hop_entities(catalog: dict, focused_file_path: str, *, limit: int = 120) -> set[str]:
+    """Keep focused file entities plus 1-hop neighbors."""
+    focus_ids = set(catalog["file_entities"].get(focused_file_path, []))
+    if not focus_ids:
+        return set()
+    keep = set(focus_ids)
+    for e in catalog["entity_edges"]:
+        a = e["from"]
+        b = e["to"]
+        if a in focus_ids or b in focus_ids:
+            keep.add(a)
+            keep.add(b)
+        if len(keep) >= limit:
+            break
+    return keep
+
+
+def _resolve_view_depth(view: str) -> int:
+    return {"scope": 0, "module": 1, "file": 2, "entity": 3}.get(view, 0)
+
+
+def _build_explore_scene(
+    index: DocsIndex,
+    *,
+    view: str,
+    focus_scope_id: str | None,
+    focus_module_id: str | None,
+    focus_file_id: str | None,
+    highlighted_node_id: str | None = None,
+) -> dict:
+    """Build a single-canvas mixed-depth graph scene."""
+    catalog = _build_explore_catalog(index)
+    depth = _resolve_view_depth(view)
+
+    nodes: dict[str, dict] = {}
+    visible_module_ids: set[str] = set()
+    visible_file_ids: set[str] = set()
+    visible_entity_ids: set[str] = set()
+
+    # scope baseline
+    for sid, s in catalog["scopes"].items():
+        if depth >= 1 and focus_scope_id and sid == focus_scope_id:
+            continue
+        nodes[s["id"]] = dict(s)
+
+    # scope -> module expansion
+    if depth >= 1 and focus_scope_id:
+        for mid, m in catalog["modules"].items():
+            if m["scope_id"] != focus_scope_id:
+                continue
+            if depth >= 2 and focus_module_id and mid == focus_module_id:
+                continue
+            nodes[mid] = dict(m)
+            visible_module_ids.add(mid)
+
+    # module -> file expansion
+    if depth >= 2 and focus_module_id:
+        for fid, f in catalog["files"].items():
+            if f["module_id"] != focus_module_id:
+                continue
+            if depth >= 3 and focus_file_id and fid == focus_file_id:
+                continue
+            nodes[fid] = dict(f)
+            visible_file_ids.add(fid)
+
+    # file -> entity expansion
+    if depth >= 3 and focus_file_id:
+        file_path = focus_file_id.removeprefix("file:")
+        keep_entity_ids = _collect_one_hop_entities(catalog, file_path)
+        for eid in keep_entity_ids:
+            en = catalog["entities"].get(eid)
+            if not en:
+                continue
+            nodes[eid] = dict(en)
+            visible_entity_ids.add(eid)
+
+    def rep_for_file(file_path: str) -> str | None:
+        fid = f"file:{file_path}"
+        mid = catalog["file_to_module"].get(file_path)
+        sid = catalog["file_to_scope"].get(file_path)
+        if depth >= 3 and focus_file_id and fid == focus_file_id:
+            return None  # represented by entity nodes
+        if depth >= 2 and focus_module_id and mid == focus_module_id:
+            return fid if fid in nodes else None
+        if depth >= 1 and focus_scope_id and sid == focus_scope_id:
+            return mid if mid in nodes else None
+        return f"scope:{sid}" if sid else None
+
+    edges: dict[str, dict] = {}
+
+    def add_edge(frm: str, to: str, kind: str, weight: int = 1):
+        if frm == to or frm not in nodes or to not in nodes:
+            return
+        key = f"{frm}|{to}|{kind}"
+        if key not in edges:
+            edges[key] = {"id": key, "from": frm, "to": to, "kind": kind, "weight": weight, "directed": True}
+        else:
+            edges[key]["weight"] += weight
+
+    # Mixed-level dependency edges mapped from file dependencies.
+    for e in catalog["file_edges"]:
+        src_fp = e["from"].removeprefix("file:")
+        dst_fp = e["to"].removeprefix("file:")
+        a = rep_for_file(src_fp)
+        b = rep_for_file(dst_fp)
+        if not a or not b:
+            continue
+        mapped_kind = "dep"
+        if a.startswith("scope:") and b.startswith("scope:"):
+            mapped_kind = "scope_dep"
+        elif a.startswith("module:") or b.startswith("module:"):
+            mapped_kind = "module_dep"
+        elif a.startswith("file:") or b.startswith("file:"):
+            mapped_kind = "file_dep"
+        add_edge(a, b, mapped_kind, 1)
+
+    # Focused entity edges.
+    if depth >= 3 and visible_entity_ids:
+        for e in catalog["entity_edges"]:
+            a = e["from"]
+            b = e["to"]
+            if a in visible_entity_ids and b in visible_entity_ids:
+                add_edge(a, b, e["kind"], e.get("weight", 1))
+
+    node_list = [jsonable_encoder(v) for v in nodes.values()]
+    edge_list = [jsonable_encoder(v) for v in edges.values()]
+
+    return {
+        "state": {
+            "view": view,
+            "focus_scope_id": focus_scope_id,
+            "focus_module_id": focus_module_id,
+            "focus_file_id": focus_file_id,
+        },
+        "nodes": node_list,
+        "edges": edge_list,
+        "highlighted_node_id": highlighted_node_id,
+        "metrics": {
+            "node_count": len(node_list),
+            "edge_count": len(edge_list),
+            "scope_nodes": sum(1 for n in node_list if n.get("kind") == "scope"),
+            "module_nodes": sum(1 for n in node_list if n.get("kind") == "module"),
+            "file_nodes": sum(1 for n in node_list if n.get("kind") == "file"),
+            "entity_nodes": sum(1 for n in node_list if n.get("kind") == "entity"),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +1362,7 @@ async def get_index() -> JSONResponse:
             "entrypoints": index.entrypoints,
             "env_var_count": len(index.env_vars),
             "public_api_count": len(index.public_api),
-            "cross_scope_analysis": index.cross_scope_analysis or None,
+            "cross_scope_analysis": _clean_llm_generated_text(index.cross_scope_analysis) or None,
             "scopes": scopes_summary,
             "public_api_by_scope": public_api_by_scope,
             "entrypoint_groups": entrypoint_groups,
@@ -282,6 +1376,7 @@ async def get_scopes() -> JSONResponse:
     index = _load_index()
     scopes = []
     for s in index.scopes:
+        clean_summary = _clean_llm_generated_text(s.summary)
         scopes.append(
             {
                 "scope_id": s.scope_id,
@@ -291,7 +1386,7 @@ async def get_scopes() -> JSONResponse:
                 "symbol_count": len(s.public_api),
                 "env_var_count": len(s.env_vars),
                 "error": s.error,
-                "summary": s.summary[:300] if s.summary else None,
+                "summary": clean_summary[:300] if clean_summary else None,
             }
         )
     return JSONResponse({"scopes": scopes})
@@ -307,177 +1402,856 @@ async def get_scope_detail(scope_id: str) -> JSONResponse:
     raise HTTPException(status_code=404, detail=f"Scope '{scope_id}' not found.")
 
 
-# Known external service patterns detected from env vars and imports.
-_EXTERNAL_SERVICES: dict[str, dict] = {
-    # Databases
-    "mongodb": {"title": "MongoDB", "icon": "db",
-                "env_keywords": ["mongo", "mongodb"],
-                "import_keywords": ["pymongo", "motor", "mongoengine", "mongoclient"]},
-    "postgres": {"title": "PostgreSQL", "icon": "db",
-                 "env_keywords": ["postgres", "pghost", "pg_", "database_url"],
-                 "import_keywords": ["psycopg", "asyncpg", "sqlalchemy"]},
-    "redis": {"title": "Redis", "icon": "db",
-              "env_keywords": ["redis"],
-              "import_keywords": ["redis", "aioredis"]},
-    "mysql": {"title": "MySQL", "icon": "db",
-              "env_keywords": ["mysql"],
-              "import_keywords": ["mysql", "pymysql", "aiomysql"]},
-    "firebase": {"title": "Firebase", "icon": "cloud",
-                 "env_keywords": ["firebase"],
-                 "import_keywords": ["firebase", "firebase_admin"]},
-    "supabase": {"title": "Supabase", "icon": "cloud",
-                 "env_keywords": ["supabase"],
-                 "import_keywords": ["supabase"]},
-    # Cloud / storage
-    "aws_s3": {"title": "AWS S3", "icon": "cloud",
-               "env_keywords": ["aws_", "s3_", "s3bucket"],
-               "import_keywords": ["boto3", "botocore", "s3"]},
-    "digitalocean": {"title": "DigitalOcean", "icon": "cloud",
-                     "env_keywords": ["digitalocean", "do_space", "spaces"],
-                     "import_keywords": ["digitalocean"]},
-    "gcs": {"title": "Google Cloud Storage", "icon": "cloud",
-            "env_keywords": ["gcs_", "google_cloud", "gcloud"],
-            "import_keywords": ["google.cloud.storage"]},
-    # AI / LLM
-    "openai": {"title": "OpenAI", "icon": "ai",
-               "env_keywords": ["openai"],
-               "import_keywords": ["openai"]},
-    "gemini": {"title": "Google Gemini", "icon": "ai",
-               "env_keywords": ["gemini", "google_ai"],
-               "import_keywords": ["google.generativeai", "genai", "gemini"]},
-    "anthropic": {"title": "Anthropic", "icon": "ai",
-                  "env_keywords": ["anthropic", "claude"],
-                  "import_keywords": ["anthropic"]},
-    "openrouter": {"title": "OpenRouter", "icon": "ai",
-                   "env_keywords": ["openrouter"],
-                   "import_keywords": ["openrouter"]},
-    # Auth
-    "auth0": {"title": "Auth0", "icon": "auth",
-              "env_keywords": ["auth0"],
-              "import_keywords": ["auth0"]},
-    "clerk": {"title": "Clerk", "icon": "auth",
-              "env_keywords": ["clerk"],
-              "import_keywords": ["clerk"]},
-    # Messaging / APIs
-    "stripe": {"title": "Stripe", "icon": "api",
-               "env_keywords": ["stripe"],
-               "import_keywords": ["stripe"]},
-    "twilio": {"title": "Twilio", "icon": "api",
-               "env_keywords": ["twilio"],
-               "import_keywords": ["twilio"]},
-    "sendgrid": {"title": "SendGrid", "icon": "api",
-                 "env_keywords": ["sendgrid"],
-                 "import_keywords": ["sendgrid"]},
-    "selenium": {"title": "Selenium", "icon": "api",
-                 "env_keywords": ["selenium"],
-                 "import_keywords": ["selenium"]},
-    "playwright": {"title": "Playwright", "icon": "api",
-                   "env_keywords": ["playwright"],
-                   "import_keywords": ["playwright"]},
-    "ffmpeg": {"title": "FFmpeg", "icon": "api",
-               "env_keywords": ["ffmpeg"],
-               "import_keywords": ["ffmpeg", "ffprobe", "moviepy"]},
-    "greenhouse": {"title": "Greenhouse", "icon": "api",
-                   "env_keywords": ["greenhouse"],
-                   "import_keywords": ["greenhouse"]},
-}
-
-
-def _detect_external_services(index: "DocsIndex") -> tuple[list[dict], list[dict]]:
-    """Detect external services from env vars and imports across all scopes.
-
-    Returns (external_nodes, external_edges).
-    """
-    # Collect all env var names and imports per scope
-    scope_env: dict[str, set[str]] = {}
-    scope_imp: dict[str, set[str]] = {}
-    for s in index.scopes:
-        env_names = {e.name.lower() for e in s.env_vars}
-        imp_names = {i.lower() for i in s.imports}
-        scope_env[s.scope_id] = env_names
-        scope_imp[s.scope_id] = imp_names
-
-    # Also check global env vars
-    global_env = {e.name.lower() for e in index.env_vars}
-
-    # service_id -> { scope_id -> set of matched imports }
-    found_services: dict[str, dict[str, set[str]]] = {}
-
-    for svc_id, svc in _EXTERNAL_SERVICES.items():
-        imp_kws = svc["import_keywords"]
-
-        for s in index.scopes:
-            matched_imports: set[str] = set()
-            # Use original-case imports for display
-            orig_imports = {i.lower(): i for i in s.imports}
-            for imp_lower, imp_orig in orig_imports.items():
-                if any(kw in imp_lower for kw in imp_kws):
-                    matched_imports.add(imp_orig)
-            if matched_imports:
-                found_services.setdefault(svc_id, {})[s.scope_id] = matched_imports
-
-    external_nodes = []
-    external_edges = []
-    for svc_id, scope_map in found_services.items():
-        svc = _EXTERNAL_SERVICES[svc_id]
-        # Collect all matched imports across scopes for the node
-        all_imports = sorted({imp for imps in scope_map.values() for imp in imps})
-        external_nodes.append({
-            "id": f"ext_{svc_id}",
-            "title": svc["title"],
-            "icon": svc["icon"],
-            "matched_imports": all_imports,
-        })
-        for sid, matched in scope_map.items():
-            external_edges.append({
-                "from": sid,
-                "to": f"ext_{svc_id}",
-                "imports": sorted(matched),
-            })
-
-    return external_nodes, external_edges
-
-
 @app.get("/api/graph")
 async def get_graph() -> JSONResponse:
     """Return scope edges and scope metadata for visualization."""
     index = _load_index()
+    return JSONResponse(_build_scope_graph(index))
 
-    scopes_meta = []
-    for s in index.scopes:
-        # Determine a logical group from the first file path
-        group = "core"
-        if s.paths:
-            first = s.paths[0].replace("\\", "/")
-            if first.startswith("webapp/") or first.startswith("frontend/"):
-                group = "frontend"
-            elif first.startswith("services/") or first.startswith("backend/"):
-                group = "backend"
-            elif first.startswith("tests/") or "test" in s.scope_id:
-                group = "testing"
-            elif first.startswith("scripts/"):
-                group = "scripts"
-        scopes_meta.append(
+
+@app.get("/api/graph/detailed")
+async def get_graph_detailed() -> JSONResponse:
+    """Return file-level graph data: file nodes grouped by scope, file-to-file edges."""
+    index = _load_index()
+    return JSONResponse(_build_file_graph(index))
+
+
+@app.get("/api/graph/modules")
+async def get_graph_modules() -> JSONResponse:
+    """Return module-level graph data: directory-based nodes grouped by scope, module-to-module edges."""
+    index = _load_index()
+    return JSONResponse(_build_module_graph(index))
+
+
+@app.get("/api/graph/entities")
+async def get_graph_entities() -> JSONResponse:
+    """Return entity-level graph data: symbol nodes and import-derived entity edges."""
+    index = _load_index()
+    return JSONResponse(_build_entity_graph(index, connected_only=True))
+
+
+class DynamicGraphRequest(BaseModel):
+    query: str
+    view: str | None = None
+    scope_filter: list[str] | None = None
+
+
+@app.post("/api/graph/dynamic")
+async def get_graph_dynamic(req: DynamicGraphRequest) -> JSONResponse:
+    """Return an adaptive graph payload based on query intent (depth + scope)."""
+    index = _load_index()
+    query = (req.query or "").strip()
+    forced_view = (req.view or "").strip().lower() or None
+    if forced_view not in {"scope", "module", "file", "entity"}:
+        forced_view = None
+    forced_scope_filter = None
+    if req.scope_filter is not None:
+        forced_scope_filter = _match_scope_ids(index, [str(x) for x in req.scope_filter if str(x).strip()])
+
+    explicit_file_intent = _has_explicit_file_intent(query)
+    if not query:
+        default_view = forced_view or "module"
+        default_scopes = forced_scope_filter if forced_scope_filter is not None else None
+        if default_view == "scope":
+            default_graph = _build_scope_graph(index, default_scopes)
+        elif default_view == "file":
+            default_graph = _build_file_graph(index, default_scopes)
+        elif default_view == "entity":
+            default_graph = _build_entity_graph(index, default_scopes, query="", connected_only=True)
+        else:
+            default_graph = _build_module_graph(index, default_scopes)
+        return JSONResponse(
             {
-                "scope_id": s.scope_id,
-                "title": s.title,
-                "file_count": len(s.paths),
-                "symbol_count": len(s.public_api),
-                "languages": s.languages,
-                "group": group,
+                "view": default_view,
+                "reason": "No query provided; default graph view.",
+                "router": "forced" if (forced_view or forced_scope_filter is not None) else "default",
+                "scope_filter": sorted(default_scopes) if default_scopes else [],
+                "graph": default_graph,
             }
         )
 
-    external_nodes, external_edges = _detect_external_services(index)
+    if forced_view is not None or forced_scope_filter is not None:
+        view = forced_view or _infer_graph_view(query)
+        scope_filter = forced_scope_filter
+        route_reason = "Forced route from client drilldown."
+        router_name = "forced"
+    elif _can_fast_route(query):
+        view = _infer_graph_view(query)
+        scope_filter = _infer_scope_filter(index, query)
+        route_reason = "Fast heuristic route (explicit depth/scope intent)."
+        router_name = "heuristic-fast"
+    else:
+        view, scope_filter, route_reason = await _route_graph_with_llm(index, query)
+        router_name = "llm" if _llm_client is not None else "heuristic"
+    if view == "scope":
+        graph_payload = _build_scope_graph(index, scope_filter)
+        # A single scope node is usually not informative; auto-expand depth.
+        if len(graph_payload.get("scopes", [])) <= 1:
+            view = "module"
+            graph_payload = _build_module_graph(index, scope_filter)
+    elif view == "entity":
+        graph_payload = _build_entity_graph(index, scope_filter, query=query, connected_only=True)
+    elif view == "file":
+        graph_payload = _build_file_graph(index, scope_filter)
+    else:
+        graph_payload = _build_module_graph(index, scope_filter)
 
-    return JSONResponse(
-        {
-            "scopes": scopes_meta,
-            "scope_edges": [{"from": a, "to": b} for a, b in index.scope_edges],
-            "external_nodes": external_nodes,
-            "external_edges": external_edges,
-        }
+    # If module view is still too sparse, expand to file-level.
+    if view == "module" and len(graph_payload.get("module_nodes", [])) <= 2:
+        view = "file"
+        graph_payload = _build_file_graph(index, scope_filter)
+    if view == "file" and len(graph_payload.get("file_nodes", [])) == 0:
+        view = "entity"
+        graph_payload = _build_entity_graph(index, scope_filter, query=query, connected_only=True)
+    if view == "entity" and explicit_file_intent:
+        view = "file"
+        graph_payload = _build_file_graph(index, scope_filter)
+    if view == "entity" and len(graph_payload.get("entity_nodes", [])) <= 1:
+        view = "file"
+        graph_payload = _build_file_graph(index, scope_filter)
+
+    context_graph = None
+    composite_mode = "single"
+    if scope_filter and view in {"module", "file", "entity"}:
+        context_graph = _build_scope_graph(index, None)
+        composite_mode = "focus+context"
+
+    reason_bits = [route_reason, f"graph={view}"]
+    if scope_filter:
+        reason_bits.append(f"filtered={len(scope_filter)} scope(s)")
+    else:
+        reason_bits.append("filtered=all")
+
+    payload = {
+        "view": view,
+        "reason": "; ".join(reason_bits) + ".",
+        "router": router_name,
+        "scope_filter": sorted(scope_filter) if scope_filter else [],
+        "graph": graph_payload,
+        "context_graph": context_graph,
+        "composite_mode": composite_mode,
+    }
+    return JSONResponse(jsonable_encoder(payload))
+
+
+class ExploreState(BaseModel):
+    view: str = "scope"
+    focus_scope_id: str | None = None
+    focus_module_id: str | None = None
+    focus_file_id: str | None = None
+
+
+class ExploreRequest(BaseModel):
+    query: str
+    state: ExploreState | None = None
+
+
+class GraphTransitionRequest(BaseModel):
+    state: ExploreState
+    node_id: str
+    node_kind: str
+
+
+def _pick_focus_scope_id(index: DocsIndex, scope_filter: set[str] | None, query: str) -> str | None:
+    """Pick the most relevant scope to expand for mixed-depth scenes."""
+    candidates = [s for s in index.scopes if scope_filter is None or s.scope_id in scope_filter]
+    if not candidates:
+        return None
+    q = query.lower()
+    tokens = _normalize_query_tokens(query)
+
+    def score_scope(s) -> tuple[int, int]:
+        sid = s.scope_id.lower()
+        title = s.title.lower()
+        group = _scope_group(s)
+        score = 0
+        if sid in q or title in q:
+            score += 6
+        if any(tok and (tok in sid or tok in title) for tok in tokens):
+            score += 3
+        if "service" in q and ("service" in sid or "service" in title):
+            score += 5
+        if "backend" in q and group == "backend":
+            score += 4
+        if "frontend" in q and group == "frontend":
+            score += 4
+        if "script" in q and group == "scripts":
+            score += 4
+        return score, len(s.paths)
+
+    best = max(candidates, key=score_scope)
+    return best.scope_id
+
+
+def _pick_backend_services_scope(index: DocsIndex) -> str | None:
+    """Pick a backend scope that best represents service-level architecture."""
+    candidates = [s for s in index.scopes if _scope_group(s) == "backend"]
+    if not candidates:
+        return None
+
+    def score(s) -> tuple[int, int]:
+        sid = s.scope_id.lower()
+        title = s.title.lower()
+        serviceish = 1 if ("service" in sid or "service" in title) else 0
+        return serviceish, len(s.paths)
+
+    return max(candidates, key=score).scope_id
+
+
+def _pick_focus_module_id(catalog: dict, scope_id: str | None, query: str) -> str | None:
+    if not scope_id:
+        return None
+    q = query.lower()
+    tokens = _normalize_query_tokens(query)
+    candidates = [m for m in catalog["modules"].values() if m["scope_id"] == scope_id]
+    if not candidates:
+        return None
+
+    def score_module(m: dict) -> tuple[int, int, int]:
+        mp = str(m["module_path"]).lower()
+        label = str(m["label"]).lower()
+        score = 0
+        if mp in q or label in q:
+            score += 6
+        if any(tok and (tok in mp or tok in label) for tok in tokens):
+            score += 3
+        if "service" in q and "service" in mp:
+            score += 4
+        return score, int(m.get("entity_count", 0)), int(m.get("file_count", 0))
+
+    return max(candidates, key=score_module)["id"]
+
+
+def _heuristic_explore_plan(
+    index: DocsIndex,
+    catalog: dict,
+    query: str,
+    prev_state: ExploreState,
+) -> tuple[str, str | None, str | None, str | None, str]:
+    """Deterministic fallback route for /api/explore when LLM output is unavailable."""
+    view = _infer_graph_view(query)
+    scope_filter = _infer_scope_filter(index, query)
+    focus_scope_id = _pick_focus_scope_id(index, scope_filter, query)
+    focus_module_id = _pick_focus_module_id(catalog, focus_scope_id, query)
+    focus_file_id = _match_file_id(catalog, query, focus_module_id) or _match_file_id(catalog, query, None)
+
+    if view == "scope":
+        focus_scope_id = None
+        focus_module_id = None
+        focus_file_id = None
+    elif view == "module":
+        focus_module_id = None
+        focus_file_id = None
+    elif view == "file":
+        if focus_file_id and not focus_module_id:
+            focus_module_id = catalog["files"][focus_file_id]["module_id"]
+        if focus_module_id and not focus_scope_id:
+            focus_scope_id = catalog["modules"][focus_module_id]["scope_id"]
+        focus_file_id = None
+    else:  # entity
+        if not focus_file_id:
+            # Fall back to file-level detail when no concrete file target exists.
+            view = "file"
+            focus_file_id = None
+        else:
+            if not focus_module_id:
+                focus_module_id = catalog["files"][focus_file_id]["module_id"]
+            if not focus_scope_id:
+                focus_scope_id = catalog["files"][focus_file_id]["scope_id"]
+
+    # Keep continuity if heuristic cannot identify anything specific.
+    if view in {"module", "file", "entity"} and not focus_scope_id:
+        focus_scope_id = prev_state.focus_scope_id
+    if view in {"file", "entity"} and not focus_module_id:
+        focus_module_id = prev_state.focus_module_id
+
+    reason = "Heuristic fallback route (LLM unavailable/malformed)."
+    return view, focus_scope_id, focus_module_id, focus_file_id, reason
+
+
+def _heuristic_fallback_answer(index: DocsIndex, query: str, *, max_items: int = 4) -> str:
+    """Short answer when LLM output is unavailable."""
+    hits = _load_search_index().search(query, limit=max_items)
+    if not hits:
+        return "Could not use the LLM for this turn. Graph still updated using heuristic routing."
+    lines = ["LLM failed this turn, but here are likely relevant files:"]
+    used: set[str] = set()
+    for h in hits:
+        key = f"{h.citation.file}:{h.citation.line_start}"
+        if key in used:
+            continue
+        used.add(key)
+        lines.append(f"- `{key}`")
+    return "\n".join(lines[: max_items + 1])
+
+
+def _low_signal_answer(answer: str) -> bool:
+    """Detect vague answers that should be replaced by deterministic summaries."""
+    text = (answer or "").strip()
+    if not text:
+        return True
+    lower = text.lower()
+    generic_phrases = (
+        "organized into various modules",
+        "supporting scalability and maintainability",
+        "different purposes",
+        "structured approach",
+        "various modules serving",
     )
+    has_file_refs = ("/" in text and "." in text) or ("`" in text and ":" in text)
+    if any(p in lower for p in generic_phrases) and not has_file_refs:
+        return True
+    return len(text.split()) < 28
+
+
+def _targeted_backend_answer(index: DocsIndex, query: str, *, max_items: int = 6) -> str:
+    """Generate a concise, code-grounded fallback answer for service/backend queries."""
+    hits = _load_search_index().search(query, limit=14)
+    scope_hits: dict[str, list[str]] = {}
+    file_to_scope = _file_to_scope_map(index)
+    for h in hits:
+        sid = file_to_scope.get(h.citation.file, "")
+        if not sid:
+            continue
+        scope_hits.setdefault(sid, [])
+        key = f"{h.citation.file}:{h.citation.line_start}"
+        if key not in scope_hits[sid]:
+            scope_hits[sid].append(key)
+
+    ranked = sorted(
+        index.scopes,
+        key=lambda s: (
+            1 if _scope_group(s) == "backend" else 0,
+            len(scope_hits.get(s.scope_id, [])),
+            len(s.paths),
+        ),
+        reverse=True,
+    )
+    picks = [s for s in ranked if _scope_group(s) == "backend"][:max_items]
+    if not picks:
+        return _heuristic_fallback_answer(index, query, max_items=4)
+
+    lines = ["## Backend Systems"]
+    for s in picks:
+        refs = scope_hits.get(s.scope_id, [])[:2]
+        ref_txt = f" ({', '.join(f'`{r}`' for r in refs)})" if refs else ""
+        summary = _clean_llm_generated_text(s.summary)
+        if summary:
+            summary = summary.split(".")[0].strip()
+        else:
+            langs = ", ".join(s.languages) if s.languages else "unknown"
+            summary = f"{len(s.paths)} files, {len(s.public_api)} symbols ({langs})"
+        lines.append(f"- **{s.title}**: {summary}{ref_txt}")
+    return "\n".join(lines)
+
+
+def _match_module_id(catalog: dict, raw: str | None, scope_id: str | None) -> str | None:
+    if not raw:
+        return None
+    key = raw.strip().lower()
+    modules = catalog["modules"]
+    for mid, m in modules.items():
+        if scope_id and m["scope_id"] != scope_id:
+            continue
+        if key == mid.lower() or key == m["module_path"].lower() or key == m["label"].lower():
+            return mid
+        if key in mid.lower() or key in m["module_path"].lower():
+            return mid
+    return None
+
+
+def _match_file_id(catalog: dict, raw: str | None, module_id: str | None = None) -> str | None:
+    if not raw:
+        return None
+    key = raw.strip().lower()
+    for fid, f in catalog["files"].items():
+        if module_id and f["module_id"] != module_id:
+            continue
+        fp = f["file_path"].lower()
+        if key == fid.lower() or key == fp or key == os.path.basename(fp):
+            return fid
+        if key in fp:
+            return fid
+    return None
+
+
+def _build_explore_system_prompt(index: DocsIndex) -> str:
+    return (
+        "You are a codebase exploration copilot. "
+        "Return concise, high-signal markdown and an exact graph routing plan. "
+        "Do not over-explain. Prefer concrete architecture relationships with file references."
+    )
+
+
+def _build_explore_user_prompt(
+    index: DocsIndex,
+    query: str,
+    *,
+    state: ExploreState | None,
+) -> str:
+    catalog = _build_explore_catalog(index)
+    hits = _load_search_index().search(query, limit=10)
+    hit_lines = []
+    for h in hits:
+        hit_lines.append(f"- {h.citation.file}:{h.citation.line_start} :: {h.match_context}")
+    if not hit_lines:
+        hit_lines.append("- (no semantic hits)")
+
+    scope_lines = []
+    for s in index.scopes:
+        scope_lines.append(f"- {s.scope_id}: {s.title} ({len(s.paths)} files)")
+
+    module_lines = []
+    for m in list(catalog["modules"].values())[:80]:
+        module_lines.append(f"- {m['id']} [{m['scope_id']}]")
+
+    file_lines = []
+    for f in list(catalog["files"].values())[:160]:
+        file_lines.append(f"- file:{f['file_path']} [{f['scope_id']}] [{f['module_id']}]")
+
+    state_block = json.dumps(state.model_dump() if state else ExploreState().model_dump())
+    return f"""
+User query:
+{query}
+
+Current graph state:
+{state_block}
+
+Available scopes:
+{chr(10).join(scope_lines)}
+
+Available modules (ids):
+{chr(10).join(module_lines)}
+
+Available files (ids):
+{chr(10).join(file_lines)}
+
+Relevant code hits:
+{chr(10).join(hit_lines)}
+
+Return JSON ONLY:
+{{
+  "answer_markdown": "short but useful response",
+  "graph": {{
+    "view": "scope|module|file|entity",
+    "focus_scope_id": "scope id or null",
+    "focus_module_id": "module id or null",
+    "focus_file_id": "file:<path> or null",
+    "highlighted_node_id": "node id or null",
+    "reason": "brief routing explanation"
+  }}
+}}
+
+Rules:
+- Default to scope view only when user asks big-picture architecture.
+- For flow questions, prefer module view.
+- Only use entity view if user explicitly asks for functions/classes/entities.
+- Keep answer concise and skimmable.
+- Trust the user's requested focus area; keep scope tight.
+- Include concrete repo file references (e.g. `services/x/app/main.py`) in the answer.
+- Preferred format:
+  1) What it is (1-2 lines)
+  2) Key systems (3-6 bullets)
+  3) Where to inspect (2-4 file references)
+"""
+
+
+def _default_explore_suggestions(index: DocsIndex, *, max_items: int = 3) -> list[str]:
+    """Deterministic fallback suggestions when LLM suggestions fail."""
+    ranked_scopes = sorted(
+        index.scopes,
+        key=lambda s: (
+            1 if _scope_group(s) == "backend" else 0,
+            len(s.paths),
+        ),
+        reverse=True,
+    )
+    suggestions: list[str] = []
+    if ranked_scopes:
+        top = ranked_scopes[0]
+        suggestions.append(f"Give me a high-level architecture overview of `{top.title}`.")
+    if len(ranked_scopes) > 1:
+        suggestions.append(
+            f"Explain the end-to-end flow between `{ranked_scopes[0].title}` and `{ranked_scopes[1].title}`."
+        )
+    suggestions.append("Show me the most important backend services and where to inspect them.")
+    return suggestions[:max_items]
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """Parse json_mode output, tolerating fences and surrounding prose."""
+    txt = (raw or "").strip()
+    if txt.startswith("```"):
+        txt = re.sub(r"^```(?:json)?\s*", "", txt)
+        txt = re.sub(r"\s*```$", "", txt)
+    try:
+        parsed = json.loads(txt)
+    except Exception:
+        # Attempt to salvage first JSON object from mixed output.
+        start = txt.find("{")
+        end = txt.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            parsed = json.loads(txt[start : end + 1])
+        else:
+            raise
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM JSON payload is not an object.")
+    return parsed
+
+
+def _sanitize_suggestions(raw: object, *, max_items: int = 3) -> list[str]:
+    """Normalize suggestions to short, unique question strings."""
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        text = re.sub(r"\s+", " ", text)
+        if len(text) > 140:
+            text = text[:137].rstrip() + "..."
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+@app.get("/api/explore/suggestions")
+async def explore_suggestions() -> JSONResponse:
+    """Return 3 project-specific suggested questions for Explore chat."""
+    global _explore_suggestions_cache
+    index = _load_index()
+    cache_key = f"{index.repo_path}:{index.generated_at}:{len(index.scopes)}"
+    if _explore_suggestions_cache and _explore_suggestions_cache.get("key") == cache_key:
+        return JSONResponse(_explore_suggestions_cache["data"])
+
+    fallback = _default_explore_suggestions(index, max_items=3)
+    scope_lines = [f"- {s.scope_id}: {s.title} ({len(s.paths)} files)" for s in index.scopes[:20]]
+    prompt = (
+        "Generate exactly 3 short, clickable suggested user questions for exploring this codebase.\n"
+        "Focus on architecture understanding, key service flows, and practical drill-downs.\n"
+        "Each suggestion should be under 110 characters and phrased as a direct question.\n\n"
+        f"Scopes:\n{chr(10).join(scope_lines)}\n\n"
+        'Return JSON only: {"suggestions": ["...","...","..."]}'
+    )
+
+    t0 = time.perf_counter()
+    suggestions = fallback
+    router = "fallback"
+    reason = "Deterministic fallback suggestions."
+    if _llm_client is not None:
+        try:
+            llm_raw = await asyncio.wait_for(
+                _llm_client.chat(
+                    [
+                        {"role": "system", "content": "You create concise, high-signal onboarding prompts for codebase exploration."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    json_mode=True,
+                ),
+                timeout=6.0,
+            )
+            parsed = _parse_llm_json(llm_raw)
+            parsed_suggestions = _sanitize_suggestions(parsed.get("suggestions"), max_items=3)
+            if len(parsed_suggestions) == 3:
+                suggestions = parsed_suggestions
+                router = "llm"
+                reason = "Backboard-generated project-aware suggestions."
+        except Exception as exc:
+            logger.info("Explore suggestions fallback due to LLM error: %s", exc)
+
+    payload = {
+        "suggestions": suggestions,
+        "router": router,
+        "reason": reason,
+        "latency_ms": int((time.perf_counter() - t0) * 1000),
+    }
+    _explore_suggestions_cache = {"key": cache_key, "data": payload}
+    return JSONResponse(payload)
+
+
+@app.post("/api/explore")
+async def explore(req: ExploreRequest) -> JSONResponse:
+    """One-call endpoint: LLM answer + graph routing plan + built graph scene."""
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required.")
+    if _llm_client is None:
+        raise HTTPException(status_code=503, detail="LLM not configured (missing BACKBOARD_API_KEY).")
+
+    index = _load_index()
+    prev_state = req.state or ExploreState()
+    catalog = _build_explore_catalog(index)
+
+    t0 = time.perf_counter()
+    llm_raw = ""
+    try:
+        llm_raw = await asyncio.wait_for(
+            _llm_client.chat(
+                [
+                    {"role": "system", "content": _build_explore_system_prompt(index)},
+                    {"role": "user", "content": _build_explore_user_prompt(index, query, state=prev_state)},
+                ],
+                json_mode=True,
+            ),
+            timeout=14.0,
+        )
+        raw_text = llm_raw.strip()
+        if raw_text.startswith("```"):
+            raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+            raw_text = re.sub(r"\s*```$", "", raw_text)
+        data = json.loads(raw_text)
+        answer = str(data.get("answer_markdown") or "").strip() or "No answer generated."
+        g = data.get("graph") or {}
+        view = str(g.get("view") or "scope").strip().lower()
+        if view not in {"scope", "module", "file", "entity"}:
+            view = prev_state.view
+
+        focus_scope = _match_scope_ids(index, [str(g.get("focus_scope_id") or "")])
+        focus_scope_id = sorted(focus_scope)[0] if focus_scope else prev_state.focus_scope_id
+        if view == "scope":
+            # If LLM provides a focused scope while requesting scope view,
+            # expand one level to modules so the graph actually changes.
+            if focus_scope_id:
+                view = "module"
+            else:
+                focus_scope_id = None
+
+        focus_module_id = _match_module_id(catalog, str(g.get("focus_module_id") or ""), focus_scope_id)
+        if view in {"scope", "module"}:
+            focus_module_id = None if view == "scope" else focus_module_id
+
+        focus_file_id = _match_file_id(catalog, str(g.get("focus_file_id") or ""), focus_module_id)
+        if view != "entity":
+            focus_file_id = None if view in {"scope", "module"} else focus_file_id
+
+        # ensure coherent focus chain
+        if focus_module_id and not focus_scope_id:
+            focus_scope_id = catalog["modules"][focus_module_id]["scope_id"]
+        if focus_file_id and not focus_module_id:
+            focus_module_id = catalog["files"][focus_file_id]["module_id"]
+        if focus_module_id and not focus_scope_id:
+            focus_scope_id = catalog["modules"][focus_module_id]["scope_id"]
+
+        # If LLM returns vague focus ids (e.g., "services"), recover deterministically.
+        if view in {"module", "file", "entity"} and not focus_scope_id:
+            inferred_scope_filter = _infer_scope_filter(index, query)
+            focus_scope_id = _pick_focus_scope_id(index, inferred_scope_filter, query) or prev_state.focus_scope_id
+        if view in {"file", "entity"} and not focus_module_id and focus_scope_id:
+            focus_module_id = _pick_focus_module_id(catalog, focus_scope_id, query) or prev_state.focus_module_id
+
+        route_reason = str(g.get("reason") or "LLM route")
+        ql = query.lower()
+        if (
+            view == "scope"
+            and not any(k in ql for k in ("architecture", "overview", "big picture", "high level"))
+            and any(k in ql for k in ("service", "services", "backend", "flow", "worker", ".py"))
+        ):
+            view = "module"
+            if not focus_scope_id:
+                focus_scope_id = _pick_focus_scope_id(index, _infer_scope_filter(index, query), query)
+            focus_module_id = None
+            focus_file_id = None
+            route_reason = "LLM route adjusted to module view for actionable service-level intent."
+
+        # Guarantee meaningful graph motion when user asks backend/service overviews.
+        if view == "scope" and any(k in ql for k in ("backend", "service", "systems", "subsystem")):
+            view = "module"
+            if not focus_scope_id:
+                focus_scope_id = _pick_focus_scope_id(index, _infer_scope_filter(index, query), query)
+            route_reason = "Expanded to module view for backend/service overview."
+
+        # For backend services overviews, bias toward a richer services scope.
+        if "backend" in ql and "service" in ql:
+            preferred_scope = _pick_backend_services_scope(index)
+            if preferred_scope:
+                focus_scope_id = preferred_scope
+                view = "module"
+                focus_module_id = None
+                focus_file_id = None
+                route_reason = "Focused module view on backend services scope."
+
+        if _low_signal_answer(answer):
+            answer = _targeted_backend_answer(index, query)
+
+        highlighted_node_id = str(g.get("highlighted_node_id") or "") or None
+        scene = _build_explore_scene(
+            index,
+            view=view,
+            focus_scope_id=focus_scope_id,
+            focus_module_id=focus_module_id,
+            focus_file_id=focus_file_id,
+            highlighted_node_id=highlighted_node_id,
+        )
+        elapsed = int((time.perf_counter() - t0) * 1000)
+        return JSONResponse(
+            jsonable_encoder(
+                {
+                    "answer_markdown": answer,
+                    "scene": scene,
+                    "routing": {
+                        "router": "llm",
+                        "reason": route_reason,
+                        "latency_ms": elapsed,
+                        "query": query,
+                    },
+                    "debug": {
+                        "llm_raw_excerpt": llm_raw[:1200],
+                        "catalog_scopes": len(catalog["scopes"]),
+                        "catalog_modules": len(catalog["modules"]),
+                        "catalog_files": len(catalog["files"]),
+                        "catalog_entities": len(catalog["entities"]),
+                    },
+                }
+            )
+        )
+    except Exception as exc:
+        logger.warning("Explore failed; applying heuristic fallback: %s", exc)
+        view, focus_scope_id, focus_module_id, focus_file_id, reason = _heuristic_explore_plan(
+            index, catalog, query, prev_state
+        )
+        scene = _build_explore_scene(
+            index,
+            view=view,
+            focus_scope_id=focus_scope_id,
+            focus_module_id=focus_module_id,
+            focus_file_id=focus_file_id,
+        )
+        ql = query.lower()
+        raw_fallback = llm_raw.strip()
+        if raw_fallback and not _looks_like_llm_error_text(raw_fallback):
+            answer = _truncate_words(_make_scannable_markdown(raw_fallback), 220)
+        elif any(k in ql for k in ("backend", "service", "services", "worker", "flow")):
+            answer = _targeted_backend_answer(index, query)
+        else:
+            answer = _heuristic_fallback_answer(index, query)
+        return JSONResponse(
+            jsonable_encoder(
+                {
+                    "answer_markdown": answer,
+                    "scene": scene,
+                    "routing": {
+                        "router": "heuristic-fallback",
+                        "reason": reason,
+                        "latency_ms": int((time.perf_counter() - t0) * 1000),
+                        "query": query,
+                    },
+                    "debug": {"error": str(exc), "llm_raw_excerpt": llm_raw[:1200]},
+                }
+            )
+        )
+
+
+@app.post("/api/graph/transition")
+async def graph_transition(req: GraphTransitionRequest) -> JSONResponse:
+    """Deterministic click transitions: scope->module->file->entity."""
+    index = _load_index()
+    catalog = _build_explore_catalog(index)
+    state = req.state
+    node_id = req.node_id
+    node_kind = req.node_kind
+
+    view = state.view
+    focus_scope_id = state.focus_scope_id
+    focus_module_id = state.focus_module_id
+    focus_file_id = state.focus_file_id
+    reason = "No transition."
+
+    if node_kind == "scope":
+        sid = node_id.removeprefix("scope:")
+        if sid in catalog["scopes"]:
+            view = "module"
+            focus_scope_id = sid
+            focus_module_id = None
+            focus_file_id = None
+            reason = f"Scope {sid} expanded to modules."
+    elif node_kind == "module":
+        if node_id in catalog["modules"]:
+            view = "file"
+            focus_module_id = node_id
+            focus_scope_id = catalog["modules"][node_id]["scope_id"]
+            focus_file_id = None
+            reason = f"Module {catalog['modules'][node_id]['module_path']} expanded to files."
+    elif node_kind == "file":
+        if node_id in catalog["files"]:
+            view = "entity"
+            focus_file_id = node_id
+            focus_module_id = catalog["files"][node_id]["module_id"]
+            focus_scope_id = catalog["files"][node_id]["scope_id"]
+            reason = f"File {catalog['files'][node_id]['file_path']} expanded to entities."
+    elif node_kind == "entity":
+        reason = "Entity is deepest level."
+
+    scene = _build_explore_scene(
+        index,
+        view=view,
+        focus_scope_id=focus_scope_id,
+        focus_module_id=focus_module_id,
+        focus_file_id=focus_file_id,
+        highlighted_node_id=node_id,
+    )
+    return JSONResponse(
+        jsonable_encoder(
+            {
+                "scene": scene,
+                "routing": {"router": "transition", "reason": reason, "latency_ms": 0},
+            }
+        )
+    )
+
+
+@app.get("/api/graph/initial")
+async def graph_initial() -> JSONResponse:
+    """Initial graph state: full-scope overview with physics-ready node payload."""
+    index = _load_index()
+    scene = _build_explore_scene(
+        index,
+        view="scope",
+        focus_scope_id=None,
+        focus_module_id=None,
+        focus_file_id=None,
+    )
+    return JSONResponse(
+        jsonable_encoder(
+            {
+                "scene": scene,
+                "routing": {"router": "default", "reason": "Initial high-level scope view.", "latency_ms": 0},
+            }
+        )
+    )
+
+
+def _resolve_import_to_file(
+    imp: str,
+    path_to_file: dict[str, str],
+    prefix_to_file: dict[str, str],
+    source_exts: frozenset[str],
+) -> str | None:
+    """Resolve an import string to a repo-relative file path, or None."""
+    # Strategy 1: path-based matching
+    normalised = imp.lstrip("./").replace("\\", "/")
+    stem, ext = os.path.splitext(normalised)
+    if ext in source_exts:
+        normalised = stem
+    target = path_to_file.get(normalised)
+    if target:
+        return target
+
+    # Strategy 2: dotted-prefix matching
+    parts = imp.split(".")
+    for i in range(len(parts), 0, -1):
+        candidate = ".".join(parts[:i])
+        target = prefix_to_file.get(candidate)
+        if target:
+            return target
+
+    return None
 
 
 @app.get("/api/service-details")
@@ -494,12 +2268,10 @@ async def get_service_details() -> JSONResponse:
         _service_details_cache = {}
         return JSONResponse({})
 
-    # Build scope summary lookup
     scope_summaries: dict[str, str] = {}
     for s in index.scopes:
-        scope_summaries[s.scope_id] = s.summary or s.title
+        scope_summaries[s.scope_id] = _clean_llm_generated_text(s.summary) or s.title
 
-    # Build per-service context for the LLM prompt
     service_contexts: list[str] = []
     for node in external_nodes:
         edges = [e for e in external_edges if e["to"] == node["id"]]
@@ -527,7 +2299,6 @@ async def get_service_details() -> JSONResponse:
     )
 
     if _llm_client is None:
-        # Fallback: no LLM available
         _service_details_cache = {}
         return JSONResponse({})
 
@@ -657,16 +2428,18 @@ Cross-scope analysis:
 """
 
 
-def _build_chat_system_prompt(index: DocsIndex, diff_report: dict | None = None) -> str:
+def _build_chat_system_prompt(index: DocsIndex) -> str:
     """Build the system prompt for chat from the DocsIndex."""
     scope_lines = []
     for s in index.scopes:
         langs = ", ".join(s.languages) if s.languages else "unknown"
-        summary = (
-            (s.summary[:200] + "...")
-            if s.summary and len(s.summary) > 200
-            else (s.summary or "")
-        )
+        clean_summary = _clean_llm_generated_text(s.summary)
+        if clean_summary and len(clean_summary) > 200:
+            summary = clean_summary[:200] + "..."
+        elif clean_summary:
+            summary = clean_summary
+        else:
+            summary = f"{len(s.paths)} files; {len(s.public_api)} public symbols."
         scope_lines.append(
             f"- [{s.scope_id}] {s.title} ({langs}, {len(s.paths)} files): {summary}"
         )
@@ -689,83 +2462,152 @@ def _build_chat_system_prompt(index: DocsIndex, diff_report: dict | None = None)
     edge_lines = [f"  {a} -> {b}" for a, b in index.scope_edges[:50]]
     edge_block = "\n".join(edge_lines) if edge_lines else "(none)"
 
-    # Add recent changes section if available
-    changes_section = ""
-    if diff_report:
-        changes_lines = []
-        if diff_report.get("added_scopes"):
-            changes_lines.append(
-                f"Added scopes: {', '.join(diff_report['added_scopes'])}"
-            )
-        if diff_report.get("removed_scopes"):
-            changes_lines.append(
-                f"Removed scopes: {', '.join(diff_report['removed_scopes'])}"
-            )
-        if diff_report.get("modified_scopes"):
-            changes_lines.append(
-                f"Modified scopes: {len(diff_report['modified_scopes'])}"
-            )
-
-        stats = diff_report.get("stats_delta", {})
-        if any(stats.values()):
-            changes_lines.append(
-                f"Stats delta: {stats.get('total_files', 0):+d} files, "
-                f"{stats.get('total_scopes', 0):+d} scopes, "
-                f"{stats.get('total_symbols', 0):+d} symbols"
-            )
-
-        if changes_lines:
-            changes_section = (
-                "\n\nRecent changes (since last snapshot):\n" + "\n".join(changes_lines)
-            )
-
-    # Load agent exploration notepad findings if available.
-    notepad_section = ""
-    if _run_dir:
-        notepad_path = _run_dir / "notepads" / "all_topics.json"
-        if notepad_path.exists():
-            try:
-                notepad_data = json.loads(notepad_path.read_text(encoding="utf-8"))
-                if notepad_data:
-                    lines = ["\n\nAgent exploration findings:"]
-                    for topic, entries in list(notepad_data.items())[:20]:
-                        lines.append(f"\n## {topic}")
-                        for entry in entries[:5]:
-                            author = entry.get("author", "agent")
-                            content = entry.get("content", "")
-                            if len(content) > 200:
-                                content = content[:200] + "..."
-                            lines.append(f"  - [{author}]: {content}")
-                    notepad_section = "\n".join(lines)
-            except (json.JSONDecodeError, OSError):
-                pass
-
-    return (
-        _CHAT_SYSTEM_TEMPLATE.format(
-            repo_path=index.repo_path,
-            languages=", ".join(index.languages) if index.languages else "unknown",
-            scope_count=len(index.scopes),
-            scope_summaries=scope_summaries,
-            api_count=len(index.public_api),
-            api_block=api_block,
-            env_count=len(index.env_vars),
-            env_block=env_block,
-            edge_block=edge_block,
-            cross_scope_analysis=index.cross_scope_analysis or "(none)",
-        )
-        + changes_section
-        + notepad_section
+    return _CHAT_SYSTEM_TEMPLATE.format(
+        repo_path=index.repo_path,
+        languages=", ".join(index.languages) if index.languages else "unknown",
+        scope_count=len(index.scopes),
+        scope_summaries=scope_summaries,
+        api_count=len(index.public_api),
+        api_block=api_block,
+        env_count=len(index.env_vars),
+        env_block=env_block,
+        edge_block=edge_block,
+        cross_scope_analysis=_clean_llm_generated_text(index.cross_scope_analysis) or "(none)",
     )
+
+
+def _truncate_words(text: str, max_words: int) -> str:
+    """Hard word cap for concise mode to prevent overly long responses."""
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    clipped = " ".join(words[:max_words]).rstrip()
+    # Try to end at a sentence boundary for readability.
+    for punct in (". ", "! ", "? "):
+        idx = clipped.rfind(punct)
+        if idx > max(40, int(len(clipped) * 0.55)):
+            clipped = clipped[: idx + 1]
+            break
+    return clipped + "..."
+
+
+def _make_scannable_markdown(text: str) -> str:
+    """Normalize compact prose into easier-to-skim markdown."""
+    # Convert inline dash bullets into real line bullets.
+    text = re.sub(r"\s+-\s+", "\n- ", text.strip())
+    # Convert inline numbered sections into real lines.
+    text = re.sub(r"\s+(\d+\.)\s+", r"\n\1 ", text)
+
+    has_list = "\n- " in text or re.search(r"\n\d+\.\s", text) is not None
+    if has_list:
+        return text
+
+    # If no list structure exists, force a compact summary + bullets shape.
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if not sentences:
+        return text
+    summary = sentences[0]
+    bullets = "\n".join(f"- {s}" for s in sentences[1:6])
+    if bullets:
+        return f"**Summary**\n{summary}\n\n**Key Points**\n{bullets}"
+    return f"**Summary**\n{summary}"
 
 
 class ChatRequest(BaseModel):
     query: str | None = None
     message: str | None = None
+    concise: bool = False
+    max_words: int | None = None
 
 
 class ChatResponse(BaseModel):
     answer: str
     citations: list[Citation] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+
+
+class DiffChatRequest(BaseModel):
+    question: str
+    diff_context: dict  # The current diff report from /api/changes
+
+
+def _build_diff_system_prompt() -> str:
+    """Build system prompt for diff-aware chat."""
+    return """You are a helpful assistant that explains code and documentation changes between two snapshots of a codebase.
+
+You will receive:
+1. A diff report showing what changed (added scopes, removed scopes, modified scopes, stats delta)
+2. A user question about those changes
+
+Your job is to:
+- Explain the changes clearly and concisely
+- Reference specific scope names when relevant
+- Summarize the impact of changes when asked
+- Help users understand what was added, removed, or modified
+
+Be concise and focus on the actual data provided. If you don't have enough information to answer, say so.
+Format your response using markdown with headers and bullets for readability."""
+
+
+@app.post("/api/diff-chat")
+async def diff_chat(req: DiffChatRequest):
+    """Answer questions about diff changes between snapshots."""
+    if not req.question.strip():
+        return {"answer": "Please provide a question."}
+
+    if _llm_client is None:
+        raise HTTPException(
+            status_code=503, detail="LLM not configured (missing OPENROUTER_KEY)."
+        )
+
+    # Format diff context for the LLM
+    ctx = req.diff_context
+    diff_summary = []
+
+    if ctx.get("added_scopes"):
+        diff_summary.append(f"**Added Scopes ({len(ctx['added_scopes'])}):** {', '.join(ctx['added_scopes'])}")
+    if ctx.get("removed_scopes"):
+        diff_summary.append(f"**Removed Scopes ({len(ctx['removed_scopes'])}):** {', '.join(ctx['removed_scopes'])}")
+    if ctx.get("modified_scopes"):
+        mods = []
+        for m in ctx["modified_scopes"]:
+            details = []
+            if m.get("added_files"):
+                details.append(f"+{len(m['added_files'])} files")
+            if m.get("removed_files"):
+                details.append(f"-{len(m['removed_files'])} files")
+            if m.get("summary_changed"):
+                details.append("summary changed")
+            mod_str = f"{m['scope_id']}"
+            if details:
+                mod_str += f" ({', '.join(details)})"
+            mods.append(mod_str)
+        diff_summary.append(f"**Modified Scopes ({len(ctx['modified_scopes'])}):** {'; '.join(mods)}")
+    
+    stats = ctx.get("stats_delta", {})
+    if any(stats.get(k, 0) != 0 for k in ["total_files", "total_scopes", "total_symbols"]):
+        stats_str = f"Files: {stats.get('total_files', 0):+d}, Scopes: {stats.get('total_scopes', 0):+d}, Symbols: {stats.get('total_symbols', 0):+d}"
+        diff_summary.append(f"**Stats Delta:** {stats_str}")
+
+    if ctx.get("graph_changed"):
+        diff_summary.append("**Graph:** Architecture dependencies changed")
+
+    context_text = "\n".join(diff_summary) if diff_summary else "No changes detected between these snapshots."
+
+    messages = [
+        {"role": "system", "content": _build_diff_system_prompt()},
+        {
+            "role": "user",
+            "content": f"## Diff Report\n{context_text}\n\n## Question\n{req.question}",
+        },
+    ]
+
+    try:
+        answer = await _llm_client.chat(messages)
+        return {"answer": answer}
+    except Exception as exc:
+        logger.error("Diff chat LLM error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"LLM Error: {exc}") from exc
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -777,7 +2619,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     if _llm_client is None:
         raise HTTPException(
-            status_code=503, detail="LLM not configured (missing OPENROUTER_KEY)."
+            status_code=503, detail="LLM not configured (missing BACKBOARD_API_KEY)."
         )
 
     index = _load_index()
@@ -795,41 +2637,72 @@ async def chat(req: ChatRequest) -> ChatResponse:
     else:
         context = "No direct code matches were found in the index."
 
-    # Try to load recent changes
-    diff_report = None
-    try:
-        from .git.diff import compute_diff
-        from .git.history import list_snapshots
-
-        docbot_dir = _get_docbot_dir()
-        snapshots = list_snapshots(docbot_dir)
-
-        if len(snapshots) >= 2:
-            diff = compute_diff(snapshots[-2], snapshots[-1])
-            diff_report = {
-                "added_scopes": diff.added_scopes,
-                "removed_scopes": diff.removed_scopes,
-                "modified_scopes": diff.modified_scopes,
-                "stats_delta": {
-                    "total_files": diff.stats_delta.total_files,
-                    "total_scopes": diff.stats_delta.total_scopes,
-                    "total_symbols": diff.stats_delta.total_symbols,
-                },
-            }
-    except Exception:
-        # If we can't load changes, just continue without them
-        pass
+    brevity_hint = ""
+    if req.concise:
+        target = req.max_words or 220
+        brevity_hint = (
+            f"\n\nResponse style constraint:\n"
+            f"- Keep the answer concise (target <= {target} words).\n"
+            "- Use markdown headings and short bullets; no long paragraphs.\n"
+            "- Preferred format:\n"
+            "  1) **What It Is** (1-2 lines)\n"
+            "  2) **Flow** (4-6 bullets)\n"
+            "  3) **Key Files** (max 4 bullets with file:line)\n"
+            "- Include only the most relevant details unless asked to expand."
+        )
 
     messages = [
-        {"role": "system", "content": _build_chat_system_prompt(index, diff_report)},
+        {"role": "system", "content": _build_chat_system_prompt(index)},
         {
             "role": "user",
-            "content": f"Question:\n{question}\n\nRelevant code context:\n{context}",
+            "content": (
+                f"Question:\n{question}\n\nRelevant code context:\n{context}"
+                f"{brevity_hint}"
+            ),
         },
     ]
     try:
         answer = await _llm_client.chat(messages)
-        return ChatResponse(answer=answer, citations=[r.citation for r in results])
+        if req.concise:
+            answer = _make_scannable_markdown(answer)
+            answer = _truncate_words(answer, req.max_words or 180)
+
+        # Generate follow-up suggestions
+        suggestions: list[str] = []
+        try:
+            scope_titles = [s.title for s in index.scopes[:10]]
+            followup_prompt = (
+                f"The user asked: \"{question}\"\n"
+                f"The answer discussed: {answer[:300]}...\n\n"
+                f"Available scopes in this codebase: {', '.join(scope_titles)}\n\n"
+                "Generate exactly 3 diverse follow-up questions the user might ask next. "
+                "Mix different question types:\n"
+                "- How/why something works\n"
+                "- Comparison or relationship between components\n"
+                "- Debugging or troubleshooting\n"
+                "- Architecture or design decisions\n"
+                "- Code location or file structure\n"
+                "- Data flow or request lifecycle\n\n"
+                'Respond with ONLY a JSON array of 3 strings. Example: ["question 1", "question 2", "question 3"]'
+            )
+            raw = await _llm_client.ask(followup_prompt)
+            # Extract JSON array from response (model may wrap in markdown)
+            cleaned = raw.strip()
+            if "```" in cleaned:
+                # Strip markdown code fences
+                cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+                cleaned = cleaned.replace("```", "").strip()
+            # Find the JSON array in the response
+            start = cleaned.find("[")
+            end = cleaned.rfind("]")
+            if start != -1 and end != -1:
+                parsed = json.loads(cleaned[start : end + 1])
+                if isinstance(parsed, list):
+                    suggestions = [str(s) for s in parsed[:3]]
+        except Exception:
+            pass
+
+        return ChatResponse(answer=answer, citations=[r.citation for r in results], suggestions=suggestions)
     except Exception as exc:
         logger.error("Chat LLM error: %s", exc)
         raise HTTPException(status_code=500, detail=f"LLM Error: {exc}") from exc
@@ -1036,350 +2909,118 @@ async def get_tour_detail(tour_id: str) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# History & Changes
+# History / Diff
 # ---------------------------------------------------------------------------
 
 
 @app.get("/api/history")
-async def get_history() -> JSONResponse:
-    """List all available snapshots with metadata."""
-    from .git.history import list_snapshots
+def get_history():
+    """Return list of documentation snapshots, newest first."""
+    from ..git.history import list_snapshots
+    
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+    
+    # Look for .docbot directory relative to repo root
+    index = _load_index()
+    docbot_dir = Path(index.repo_path) / ".docbot"
+    
+    if not docbot_dir.exists():
+        return []
+    
+    snapshots = list_snapshots(docbot_dir, dedupe=False)
 
-    docbot_dir = _get_docbot_dir()
-    snapshots = list_snapshots(docbot_dir)
-
-    # Convert to JSON-serializable format
-    snapshots_data = []
-    for snap in snapshots:
-        snapshots_data.append(
-            {
-                "run_id": snap.run_id,
-                "commit_hash": snap.commit_hash,
-                "timestamp": snap.timestamp,
-                "stats": {
-                    "total_files": snap.stats.total_files,
-                    "total_scopes": snap.stats.total_scopes,
-                    "total_symbols": snap.stats.total_symbols,
-                },
-                "scope_count": len(snap.scope_summaries),
-            }
+    # Dashboard-level dedupe: collapse runs that are identical in user-visible
+    # architecture shape and top-level metrics.
+    collapsed = []
+    seen_keys: set[tuple[str, int, int, int, str]] = set()
+    for s in snapshots:
+        key = (
+            s.commit_hash,
+            s.stats.total_scopes,
+            s.stats.total_symbols,
+            s.stats.total_edges,
+            s.graph_digest,
         )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        collapsed.append(s)
 
-    return JSONResponse({"snapshots": snapshots_data})
-
-
-@app.get("/api/history/{run_id}")
-async def get_snapshot_detail(run_id: str) -> JSONResponse:
-    """Return detailed information for a specific snapshot."""
-    from .git.history import load_snapshot
-
-    docbot_dir = _get_docbot_dir()
-    snapshot = load_snapshot(docbot_dir, run_id)
-
-    if not snapshot:
-        raise HTTPException(status_code=404, detail=f"Snapshot '{run_id}' not found.")
-
-    # Convert to JSON-serializable format
-    return JSONResponse(
+    return [
         {
-            "run_id": snapshot.run_id,
-            "commit_hash": snapshot.commit_hash,
-            "timestamp": snapshot.timestamp,
-            "graph_digest": snapshot.graph_digest,
-            "stats": {
-                "total_files": snapshot.stats.total_files,
-                "total_scopes": snapshot.stats.total_scopes,
-                "total_symbols": snapshot.stats.total_symbols,
-            },
-            "scope_summaries": {
-                scope_id: {
-                    "file_count": summary.file_count,
-                    "symbol_count": summary.symbol_count,
-                    "summary_hash": summary.summary_hash,
-                }
-                for scope_id, summary in snapshot.scope_summaries.items()
-            },
-            "doc_hashes": snapshot.doc_hashes,
+            "run_id": s.run_id,
+            "timestamp": s.timestamp,
+            "commit_sha": s.commit_hash,
+            "commit_msg": None,  # Not stored in snapshot; could lookup via git
+            "scope_count": s.stats.total_scopes,
+            "symbol_count": s.stats.total_symbols,
+            "entrypoint_count": 0,  # Not tracked in snapshot stats
         }
-    )
-
-
-@app.get("/api/pipeline")
-async def get_pipeline_events() -> JSONResponse:
-    """Return saved pipeline events for the latest run."""
-    try:
-        return JSONResponse(_load_pipeline_events())
-    except HTTPException as exc:
-        if exc.status_code == 404 and _live_pipeline_tracker is not None:
-            return JSONResponse(_live_pipeline_tracker.export_events())
-        raise
-
-
-@app.get("/api/pipeline/{run_id}")
-async def get_pipeline_events_for_run(run_id: str) -> JSONResponse:
-    """Return saved pipeline events for a specific run ID."""
-    return JSONResponse(_load_pipeline_events(run_id))
+        for s in collapsed
+    ]
 
 
 @app.get("/api/changes")
-async def get_changes(
-    from_snapshot: str | None = None,
-    to_snapshot: str | None = None,
-) -> JSONResponse:
-    """Compare two snapshots and return a diff report.
-
-    Query params:
-    - from: Source snapshot run_id (default: second-to-last)
-    - to: Target snapshot run_id (default: latest)
-    """
-    from .git.diff import compute_diff
-    from .git.history import list_snapshots, load_snapshot
-
-    docbot_dir = _get_docbot_dir()
+def get_changes(from_id: str | None = None, to_id: str | None = None):
+    """Compare two snapshots and return the diff report."""
+    from ..git.history import list_snapshots, load_snapshot
+    from ..git.diff import compute_diff
+    
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+    
+    index = _load_index()
+    docbot_dir = Path(index.repo_path) / ".docbot"
+    
+    if not docbot_dir.exists():
+        raise HTTPException(status_code=404, detail="No .docbot directory found.")
+    
     snapshots = list_snapshots(docbot_dir)
-
-    if len(snapshots) < 1:
-        raise HTTPException(status_code=404, detail="No snapshots available.")
-
-    # Determine source snapshot
-    if from_snapshot:
-        from_snap = load_snapshot(docbot_dir, from_snapshot)
-        if not from_snap:
-            raise HTTPException(
-                status_code=404, detail=f"Snapshot '{from_snapshot}' not found."
-            )
-    else:
-        # Default: use second-to-last snapshot
-        if len(snapshots) < 2:
-            raise HTTPException(
-                status_code=400,
-                detail="Need at least 2 snapshots to compare. Only 1 snapshot available.",
-            )
-        from_snap = snapshots[-2]
-
-    # Determine target snapshot
-    if to_snapshot:
-        to_snap = load_snapshot(docbot_dir, to_snapshot)
-        if not to_snap:
-            raise HTTPException(
-                status_code=404, detail=f"Snapshot '{to_snapshot}' not found."
-            )
-    else:
-        # Default: use latest snapshot
-        to_snap = snapshots[-1]
-
-    # Compute diff
+    if len(snapshots) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 snapshots to compare.")
+    
+    # Default: compare latest two
+    if from_id is None:
+        from_id = snapshots[1].run_id  # Second newest
+    if to_id is None:
+        to_id = snapshots[0].run_id  # Newest
+    
+    from_snap = load_snapshot(docbot_dir, from_id)
+    to_snap = load_snapshot(docbot_dir, to_id)
+    
+    if from_snap is None:
+        raise HTTPException(status_code=404, detail=f"Snapshot '{from_id}' not found.")
+    if to_snap is None:
+        raise HTTPException(status_code=404, detail=f"Snapshot '{to_id}' not found.")
+    
     diff_report = compute_diff(from_snap, to_snap)
-
-    # Convert to JSON-serializable format
-    return JSONResponse(
-        {
-            "from_snapshot": {
-                "run_id": from_snap.run_id,
-                "commit_hash": from_snap.commit_hash,
-                "timestamp": from_snap.timestamp,
-            },
-            "to_snapshot": {
-                "run_id": to_snap.run_id,
-                "commit_hash": to_snap.commit_hash,
-                "timestamp": to_snap.timestamp,
-            },
-            "added_scopes": diff_report.added_scopes,
-            "removed_scopes": diff_report.removed_scopes,
-            "modified_scopes": [
-                {
-                    "scope_id": mod.scope_id,
-                    "added_files": mod.added_files,
-                    "removed_files": mod.removed_files,
-                    "added_symbols": mod.added_symbols,
-                    "removed_symbols": mod.removed_symbols,
-                    "summary_changed": mod.summary_changed,
-                }
-                for mod in diff_report.modified_scopes
-            ],
-            "graph_changes": {
-                "added_edges": diff_report.graph_changes.added_edges,
-                "removed_edges": diff_report.graph_changes.removed_edges,
-                "changed_nodes": diff_report.graph_changes.changed_nodes,
-            },
-            "stats_delta": {
-                "total_files": diff_report.stats_delta.total_files,
-                "total_scopes": diff_report.stats_delta.total_scopes,
-                "total_symbols": diff_report.stats_delta.total_symbols,
-            },
-        }
-    )
-
-
-# ---------------------------------------------------------------------------
-# Live Agent Streaming (SSE)
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/agent-stream")
-async def agent_event_stream(request: Request):
-    """Server-Sent Events endpoint for live agent exploration updates.
-
-    Events include: agent_spawned, agent_finished, agent_error,
-    llm_token, tool_start, tool_end, notepad_created, notepad_write.
-    A final "done" event signals the run is complete.
-    """
-    from sse_starlette.sse import EventSourceResponse
-
-    if _live_event_queue is None:
-        async def _no_agents():
-            yield {"event": "done", "data": json.dumps({"no_agents": True})}
-
-        return EventSourceResponse(_no_agents())
-
-    async def event_generator():
-        while True:
-            if await request.is_disconnected():
-                break
-            try:
-                event = await asyncio.wait_for(
-                    _live_event_queue.get(), timeout=30
-                )
-                if event is None:
-                    # Sentinel: run complete.
-                    yield {"event": "done", "data": "{}"}
-                    break
-                event_type = event.get("type", "update")
-                # Track state for late-joining clients.
-                _update_agent_state_snapshot(event)
-                yield {"event": event_type, "data": json.dumps(event)}
-            except asyncio.TimeoutError:
-                # Keep-alive ping.
-                yield {"event": "ping", "data": "{}"}
-
-    return EventSourceResponse(event_generator())
-
-
-def _update_agent_state_snapshot(event: dict) -> None:
-    """Update the in-memory state snapshot from an event."""
-    global _agent_state_snapshot
-    etype = event.get("type", "")
-    agent_id = event.get("agent_id", "")
-
-    if etype == "agent_spawned":
-        _agent_state_snapshot["agents"][agent_id] = {
-            "agent_id": agent_id,
-            "parent_id": event.get("parent_id"),
-            "purpose": event.get("purpose", ""),
-            "depth": event.get("depth", 0),
-            "status": "running",
-            "text": "",
-            "tools": [],
-        }
-    elif etype == "agent_finished":
-        if agent_id in _agent_state_snapshot["agents"]:
-            _agent_state_snapshot["agents"][agent_id]["status"] = "done"
-            _agent_state_snapshot["agents"][agent_id]["summary"] = event.get("summary", "")
-    elif etype == "agent_error":
-        if agent_id in _agent_state_snapshot["agents"]:
-            _agent_state_snapshot["agents"][agent_id]["status"] = "error"
-            _agent_state_snapshot["agents"][agent_id]["error"] = event.get("error", "")
-    elif etype == "llm_token":
-        if agent_id in _agent_state_snapshot["agents"]:
-            _agent_state_snapshot["agents"][agent_id]["text"] += event.get("token", "")
-            # Keep only last 4000 chars to bound memory.
-            text = _agent_state_snapshot["agents"][agent_id]["text"]
-            if len(text) > 4000:
-                _agent_state_snapshot["agents"][agent_id]["text"] = text[-4000:]
-    elif etype == "tool_start":
-        if agent_id in _agent_state_snapshot["agents"]:
-            _agent_state_snapshot["agents"][agent_id]["tools"].append({
-                "tool": event.get("tool", ""),
-                "input": event.get("input", ""),
-                "status": "running",
-            })
-    elif etype == "tool_end":
-        if agent_id in _agent_state_snapshot["agents"]:
-            tools = _agent_state_snapshot["agents"][agent_id]["tools"]
-            if tools and tools[-1].get("status") == "running":
-                tools[-1]["status"] = "done"
-                tools[-1]["output"] = event.get("output", "")[:300]
-    elif etype in ("notepad_created", "notepad_write"):
-        topic = event.get("topic", "")
-        if topic not in _agent_state_snapshot["notepads"]:
-            _agent_state_snapshot["notepads"][topic] = []
-        if etype == "notepad_write":
-            _agent_state_snapshot["notepads"][topic].append({
-                "content": event.get("content", ""),
-                "author": event.get("author", ""),
-            })
-
-
-@app.get("/api/agent-state")
-async def agent_state():
-    """Return current agent tree state for late-joining clients."""
-    if _agent_state_snapshot["agents"]:
-        return JSONResponse(_agent_state_snapshot)
-
-    if _run_dir:
-        state_path = _run_dir / "agent_state.json"
-        if state_path.exists():
-            try:
-                return JSONResponse(json.loads(state_path.read_text(encoding="utf-8")))
-            except (json.JSONDecodeError, OSError):
-                pass
-
-    return JSONResponse({"agents": {}, "notepads": {}})
-
-
-@app.get("/api/notepad")
-async def list_notepad_topics():
-    """List all notepad topics (from live state or persisted data)."""
-    # Try live state first.
-    if _agent_state_snapshot["notepads"]:
-        topics = [
-            {"topic": topic, "entry_count": len(entries)}
-            for topic, entries in _agent_state_snapshot["notepads"].items()
-        ]
-        return JSONResponse({"topics": topics})
-
-    # Fall back to persisted data.
-    if _run_dir:
-        notepads_path = _run_dir / "notepads" / "all_topics.json"
-        if notepads_path.exists():
-            try:
-                data = json.loads(notepads_path.read_text(encoding="utf-8"))
-                topics = [
-                    {"topic": topic, "entry_count": len(entries)}
-                    for topic, entries in data.items()
-                ]
-                return JSONResponse({"topics": topics})
-            except (json.JSONDecodeError, OSError):
-                pass
-
-    return JSONResponse({"topics": []})
-
-
-@app.get("/api/notepad/{topic}")
-async def get_notepad_topic(topic: str):
-    """Get entries for a specific notepad topic."""
-    # Try live state first.
-    if topic in _agent_state_snapshot["notepads"]:
-        return JSONResponse({
-            "topic": topic,
-            "entries": _agent_state_snapshot["notepads"][topic],
-        })
-
-    # Fall back to persisted data.
-    if _run_dir:
-        notepads_path = _run_dir / "notepads" / "all_topics.json"
-        if notepads_path.exists():
-            try:
-                data = json.loads(notepads_path.read_text(encoding="utf-8"))
-                if topic in data:
-                    return JSONResponse({
-                        "topic": topic,
-                        "entries": data[topic],
-                    })
-            except (json.JSONDecodeError, OSError):
-                pass
-
-    raise HTTPException(status_code=404, detail=f"Topic '{topic}' not found.")
+    
+    return {
+        "from_id": from_id,
+        "to_id": to_id,
+        "from_timestamp": from_snap.timestamp,
+        "to_timestamp": to_snap.timestamp,
+        "added_scopes": diff_report.added_scopes,
+        "removed_scopes": diff_report.removed_scopes,
+        "modified_scopes": [
+            {
+                "scope_id": m.scope_id,
+                "added_files": m.added_files,
+                "removed_files": m.removed_files,
+                "added_symbols": m.added_symbols,
+                "removed_symbols": m.removed_symbols,
+                "summary_changed": m.summary_changed,
+            }
+            for m in diff_report.modified_scopes
+        ],
+        "graph_changed": bool(diff_report.graph_changes.changed_nodes),
+        "stats_delta": {
+            "total_files": diff_report.stats_delta.total_files,
+            "total_scopes": diff_report.stats_delta.total_scopes,
+            "total_symbols": diff_report.stats_delta.total_symbols,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1395,14 +3036,35 @@ def start_server(
 ) -> None:
     """Start the webapp server pointing at a completed run directory."""
     import uvicorn
+    from fastapi.staticfiles import StaticFiles
 
-    global _run_dir, _index_cache, _search_index_cache, _llm_client, _tours_cache, _service_details_cache
+    global _run_dir, _index_cache, _search_index_cache, _llm_client, _tours_cache, _service_details_cache, _explore_graph_cache, _explore_suggestions_cache
     _run_dir = run_dir.resolve()
     _index_cache = None
     _search_index_cache = None
     _tours_cache = None
     _service_details_cache = None
+    _explore_graph_cache = None
+    _explore_suggestions_cache = None
     _llm_client = llm_client
-    ensure_static_assets_mounted()
+
+    here = Path(__file__).parent.resolve()
+    potential_dists = [
+        here / "web_dist",  # Bundled package
+        here.parents[2] / "webapp" / "dist",  # Editable/source checkout (src/docbot/web -> repo root)
+    ]
+
+    dist_dir = None
+    for p in potential_dists:
+        if p.exists() and (p / "index.html").exists():
+            dist_dir = p
+            break
+
+    if dist_dir:
+        if not any(getattr(route, "name", None) == "static" for route in app.routes):
+            app.mount(
+                "/", StaticFiles(directory=str(dist_dir), html=True), name="static"
+            )
+        print(f"Serving static assets from {dist_dir}")
 
     uvicorn.run(app, host=host, port=port)

@@ -6,7 +6,6 @@ the JSON response into a FileExtraction.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from pathlib import Path
@@ -77,27 +76,7 @@ class LLMExtractor:
         )
 
         try:
-            # We may be called from within asyncio.to_thread, so there's
-            # no running event loop on this thread.
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                # Already inside an event loop — can't nest asyncio.run.
-                # Use a new thread to run the coroutine.
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    raw = pool.submit(
-                        asyncio.run,
-                        self._client.ask(prompt, system=_EXTRACT_SYSTEM),
-                    ).result(timeout=60)
-            else:
-                raw = asyncio.run(
-                    self._client.ask(prompt, system=_EXTRACT_SYSTEM)
-                )
+            raw = self._client.ask_sync(prompt, system=_EXTRACT_SYSTEM)
         except Exception as exc:
             logger.warning("LLM extraction failed for %s: %s", rel_path, exc)
             return FileExtraction()

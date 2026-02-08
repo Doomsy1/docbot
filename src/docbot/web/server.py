@@ -11,7 +11,7 @@ import time
 from pathlib import Path, PurePosixPath
 
 from fastapi.encoders import jsonable_encoder
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -2934,6 +2934,26 @@ def _build_scope_description(scope: "ScopeResult") -> str:
     return " ".join(parts)
 
 
+def _build_scope_context(index: DocsIndex) -> str:
+    """Build a text summary of all scopes for use in LLM prompts."""
+    lines: list[str] = []
+    for s in index.scopes:
+        symbols = _scope_key_symbols(s, limit=8)
+        sym_str = ", ".join(symbols) if symbols else "n/a"
+        files_str = ", ".join(p.split("/")[-1] for p in s.paths[:6])
+        summary_str = ""
+        if _is_llm_narrative(s.summary):
+            summary_str = f"\n    summary: {_truncate_words(s.summary, 60)}"
+        lines.append(
+            f"  - scope_id: {s.scope_id}\n"
+            f"    title: {s.title}\n"
+            f"    files: {files_str}\n"
+            f"    key_symbols: {sym_str}"
+            f"{summary_str}"
+        )
+    return "\n".join(lines)
+
+
 def _extract_json_array(raw: str) -> list[dict] | None:
     """Parse a JSON array from raw LLM text, stripping markdown fences."""
     cleaned = raw.strip()
@@ -2953,22 +2973,7 @@ async def _enrich_tour_descriptions(tours: list[dict], index: DocsIndex) -> list
         return tours
 
     # --- Build rich scope context for the LLM ---
-    scope_ctx_lines: list[str] = []
-    for s in index.scopes:
-        symbols = _scope_key_symbols(s, limit=8)
-        sym_str = ", ".join(symbols) if symbols else "n/a"
-        files_str = ", ".join(p.split("/")[-1] for p in s.paths[:6])
-        summary_str = ""
-        if _is_llm_narrative(s.summary):
-            summary_str = f"\n    summary: {_truncate_words(s.summary, 60)}"
-        scope_ctx_lines.append(
-            f"  - scope_id: {s.scope_id}\n"
-            f"    title: {s.title}\n"
-            f"    files: {files_str}\n"
-            f"    key_symbols: {sym_str}"
-            f"{summary_str}"
-        )
-    scope_context = "\n".join(scope_ctx_lines)
+    scope_context = _build_scope_context(index)
 
     # --- 1. Enrich tour-level descriptions ---
     tour_items = []
@@ -3231,6 +3236,96 @@ async def get_tour_detail(tour_id: str) -> JSONResponse:
         if t.get("tour_id") == tour_id:
             return JSONResponse(t)
     raise HTTPException(status_code=404, detail=f"Tour '{tour_id}' not found.")
+
+
+@app.post("/api/tours/generate")
+async def generate_custom_tour(req: Request) -> JSONResponse:
+    """Generate a custom guided tour from a user's learning goal."""
+    body = await req.json()
+    topic: str = (body.get("topic") or "").strip()
+    if not topic:
+        raise HTTPException(status_code=400, detail="A 'topic' field is required.")
+    if _llm_client is None:
+        raise HTTPException(status_code=503, detail="LLM not configured.")
+
+    index = _load_index()
+    scope_context = _build_scope_context(index)
+
+    # Build a file catalog with symbols for the LLM to pick from
+    file_catalog_lines: list[str] = []
+    for s in index.scopes:
+        for fp in s.paths:
+            ext = s.file_extractions.get(fp)
+            syms = ", ".join(sym.name for sym in ext.symbols[:6]) if ext and ext.symbols else ""
+            sym_part = f" (symbols: {syms})" if syms else ""
+            file_catalog_lines.append(f"  {fp} [scope: {s.scope_id}]{sym_part}")
+    file_catalog = "\n".join(file_catalog_lines)
+
+    prompt = (
+        "You are generating a custom guided code tour for a developer who wants to learn about:\n"
+        f"\"{topic}\"\n\n"
+        f"Project scopes:\n{scope_context}\n\n"
+        f"All files:\n{file_catalog}\n\n"
+        "Generate a tour as a JSON object with these keys:\n"
+        "- \"title\": a short title for the tour (3-8 words)\n"
+        "- \"description\": a one-sentence summary of the tour\n"
+        "- \"steps\": an array of 4-8 steps, each with:\n"
+        "  - \"title\": step name\n"
+        "  - \"description\": 3-5 sentence detailed explanation of what this file/module does, "
+        "why it matters for the topic, how it connects to other parts, and key symbols to look at. "
+        "Use markdown formatting (bold, backticks).\n"
+        "  - \"file\": the exact file path from the catalog above\n"
+        "  - \"line_start\": 1\n"
+        "  - \"line_end\": 50\n\n"
+        "Pick files that are most relevant to the topic. Order steps in a logical learning sequence.\n"
+        "Return ONLY the JSON object, no markdown fences."
+    )
+
+    raw = await _llm_client.ask(prompt)
+
+    # Parse the JSON object
+    cleaned = raw.strip()
+    if "```" in cleaned:
+        cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+        cleaned = cleaned.replace("```", "").strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1:
+        raise HTTPException(status_code=500, detail="Failed to parse LLM tour response.")
+
+    tour_data = json.loads(cleaned[start : end + 1])
+
+    # Build file -> scope_id lookup
+    file_to_scope: dict[str, str] = {}
+    for s in index.scopes:
+        for fp in s.paths:
+            file_to_scope[fp] = s.scope_id
+
+    # Normalize into our standard tour shape
+    tour_id = f"custom-{hash(topic) & 0xFFFFFF:06x}"
+    steps = []
+    for step in tour_data.get("steps", []):
+        fp = step.get("file", "")
+        steps.append({
+            "tour_id": tour_id,
+            "title": step.get("title", ""),
+            "description": step.get("description", ""),
+            "citation": {
+                "file": fp,
+                "line_start": step.get("line_start", 1),
+                "line_end": step.get("line_end", 50),
+            },
+            "scope_id": file_to_scope.get(fp),
+        })
+
+    tour = {
+        "tour_id": tour_id,
+        "title": tour_data.get("title", f"Custom: {topic}"),
+        "description": tour_data.get("description", topic),
+        "steps": steps,
+    }
+
+    return JSONResponse(tour)
 
 
 # ---------------------------------------------------------------------------

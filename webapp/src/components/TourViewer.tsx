@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { IconRoute, IconChevronRight, IconChevronLeft, IconCircleCheck, IconCircleFilled } from '@tabler/icons-react';
+import { IconRoute, IconChevronRight, IconChevronLeft, IconCircleCheck, IconCircleFilled, IconSparkles, IconCpu } from '@tabler/icons-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -118,6 +118,8 @@ export default function TourViewer({ onSelectFile }: TourViewerProps) {
   const [selectedTour, setSelectedTour] = useState<Tour | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [customTopic, setCustomTopic] = useState('');
+  const [generating, setGenerating] = useState(false);
 
   // Fetch tours
   useEffect(() => {
@@ -141,6 +143,26 @@ export default function TourViewer({ onSelectFile }: TourViewerProps) {
   const prevStep = useCallback(() => {
     setCurrentStepIndex(prev => Math.max(prev - 1, 0));
   }, []);
+
+  const generateCustomTour = useCallback(async () => {
+    if (!customTopic.trim() || generating) return;
+    setGenerating(true);
+    try {
+      const res = await fetch('/api/tours/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: customTopic.trim() }),
+      });
+      if (!res.ok) throw new Error('Failed to generate tour');
+      const tour: Tour = await res.json();
+      setCustomTopic('');
+      startTour(tour);
+    } catch (err) {
+      console.error('Custom tour generation failed:', err);
+    } finally {
+      setGenerating(false);
+    }
+  }, [customTopic, generating, startTour]);
 
   if (loading) {
     return (
@@ -298,6 +320,42 @@ export default function TourViewer({ onSelectFile }: TourViewerProps) {
                     No tours available for this run.
                 </div>
             )}
+        </div>
+
+        {/* Custom Tour Generator */}
+        <div className="bg-white border border-black p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+            <div className="flex items-center gap-2 mb-3">
+                <IconSparkles size={18} className="text-purple-600" />
+                <h2 className="text-lg font-bold">Create Your Own Tour</h2>
+            </div>
+            <p className="text-sm text-gray-500 font-sans mb-4">
+                Describe what you want to learn and we'll generate a custom walkthrough.
+            </p>
+            <div className="flex gap-3">
+                <input
+                    type="text"
+                    value={customTopic}
+                    onChange={e => setCustomTopic(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && generateCustomTour()}
+                    placeholder="e.g. How does the LLM integration work?"
+                    disabled={generating}
+                    className="flex-1 border border-black px-3 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 disabled:opacity-50 placeholder:text-gray-300"
+                />
+                <button
+                    onClick={generateCustomTour}
+                    disabled={!customTopic.trim() || generating}
+                    className="border border-black px-5 py-2 font-bold uppercase text-sm bg-black text-white hover:bg-gray-800 transition-colors disabled:opacity-30 flex items-center gap-2 shrink-0"
+                >
+                    {generating ? (
+                        <>
+                            <IconCpu size={14} className="animate-spin" />
+                            Generating...
+                        </>
+                    ) : (
+                        'Generate'
+                    )}
+                </button>
+            </div>
         </div>
       </div>
     </div>

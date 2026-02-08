@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import threading
 import urllib.error
 import urllib.parse
@@ -20,11 +21,31 @@ DEFAULT_MODEL = "openai/gpt-4o-mini"
 
 
 def _split_model(model: str) -> tuple[str, str]:
-    """Split 'provider/model_name' -> (llm_provider, model_name)."""
-    if "/" in model:
-        provider, name = model.split("/", 1)
+    """Map model id to Backboard (llm_provider, model_name).
+
+    Backboard accepts canonical providers (openai/anthropic/google/...) with
+    short model names, but OpenRouter-style model ids (e.g. `vendor/model`)
+    must be sent as `llm_provider=openrouter` and full `model_name`.
+    """
+    known_providers = {
+        "openai",
+        "anthropic",
+        "google",
+        "meta",
+        "mistral",
+        "cohere",
+        "xai",
+        "deepseek",
+        "groq",
+        "openrouter",
+    }
+    if "/" not in model:
+        return "openai", model
+    provider, name = model.split("/", 1)
+    if provider.lower() in known_providers:
         return provider, name
-    return "openai", model
+    # Treat unknown-prefixed IDs as OpenRouter catalog IDs.
+    return "openrouter", model
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +97,48 @@ class LLMClient:
     def _form_headers(self) -> dict[str, str]:
         return {"X-API-Key": self.api_key}
 
+    def _extract_supported_models(self, error_body: str) -> list[str]:
+        """Parse Backboard unsupported-model errors into model ids."""
+        text = error_body or ""
+        if "Supported models:" not in text:
+            return []
+        match = re.search(r"Supported models:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return []
+        tail = match.group(1).strip()
+        # keep the first line only; API sometimes appends extra context
+        tail = tail.splitlines()[0]
+        candidates = [c.strip() for c in tail.split(",") if c.strip()]
+        return candidates
+
+    def _switch_to_supported_model(self, error_body: str) -> bool:
+        """Switch self.model to a supported fallback if available."""
+        supported = self._extract_supported_models(error_body)
+        if not supported:
+            return False
+        fallback = next((m for m in supported if m != self.model), None)
+        if fallback is None:
+            # If parsing yields only the current (still failing) model, use safe default.
+            fallback = DEFAULT_MODEL
+        if fallback == self.model:
+            return False
+        old = self.model
+        self.model = fallback
+        # assistant is model-bound; force recreate with fallback model
+        self._assistant_id = None
+        logger.warning("Backboard model '%s' unsupported; falling back to '%s'.", old, fallback)
+        return True
+
+    def _switch_to_default_model(self, reason: str) -> bool:
+        """Fallback to a known-good default model."""
+        if self.model == DEFAULT_MODEL:
+            return False
+        old = self.model
+        self.model = DEFAULT_MODEL
+        self._assistant_id = None
+        logger.warning("Backboard model '%s' failed (%s); falling back to '%s'.", old, reason, DEFAULT_MODEL)
+        return True
+
     # ------------------------------------------------------------------
     # Backboard resource management
     # ------------------------------------------------------------------
@@ -85,30 +148,42 @@ class LLMClient:
         with self._init_lock:
             if self._assistant_id:
                 return self._assistant_id
-            provider, model_name = _split_model(self.model)
-            body = json.dumps({
-                "name": "docbot",
-                "description": "Documentation generator assistant",
-                "llm_provider": provider,
-                "llm_model_name": model_name,
-                "tools": [],
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                f"{BACKBOARD_BASE_URL}/assistants",
-                data=body,
-                headers=self._json_headers(),
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-            except urllib.error.HTTPError as exc:
-                error_body = exc.read().decode("utf-8", errors="replace")
-                raise RuntimeError(
-                    f"Backboard assistant creation failed ({exc.code}): {error_body}"
-                ) from exc
-            self._assistant_id = data["assistant_id"]
-            return self._assistant_id
+            attempted_fallback = False
+            while True:
+                provider, model_name = _split_model(self.model)
+                body = json.dumps({
+                    "name": "docbot",
+                    "description": "Documentation generator assistant",
+                    "llm_provider": provider,
+                    "llm_model_name": model_name,
+                    "tools": [],
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    f"{BACKBOARD_BASE_URL}/assistants",
+                    data=body,
+                    headers=self._json_headers(),
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                    self._assistant_id = data["assistant_id"]
+                    return self._assistant_id
+                except urllib.error.HTTPError as exc:
+                    error_body = exc.read().decode("utf-8", errors="replace")
+                    can_retry = (
+                        not attempted_fallback
+                        and (
+                            ("not supported" in error_body.lower() and self._switch_to_supported_model(error_body))
+                            or ("not a valid model id" in error_body.lower() and self._switch_to_default_model("invalid model id"))
+                        )
+                    )
+                    if can_retry:
+                        attempted_fallback = True
+                        continue
+                    raise RuntimeError(
+                        f"Backboard assistant creation failed ({exc.code}): {error_body}"
+                    ) from exc
 
     def _create_thread_sync(self) -> str:
         """Create a new Backboard thread."""
@@ -138,30 +213,67 @@ class LLMClient:
         send_to_llm: bool = True,
     ) -> str:
         """Send a message to a Backboard thread (form-encoded). Blocking."""
-        provider, model_name = _split_model(self.model)
-        form_data = urllib.parse.urlencode({
-            "content": content,
-            "stream": "false",
-            "memory": memory,
-            "send_to_llm": str(send_to_llm).lower(),
-            "llm_provider": provider,
-            "model_name": model_name,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            f"{BACKBOARD_BASE_URL}/threads/{thread_id}/messages",
-            data=form_data,
-            headers=self._form_headers(),
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"Backboard API error ({exc.code}): {error_body}"
-            ) from exc
-        return data.get("content", "")
+        attempted_fallback = False
+        while True:
+            provider, model_name = _split_model(self.model)
+            form_data = urllib.parse.urlencode({
+                "content": content,
+                "stream": "false",
+                "memory": memory,
+                "send_to_llm": str(send_to_llm).lower(),
+                "llm_provider": provider,
+                "model_name": model_name,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                f"{BACKBOARD_BASE_URL}/threads/{thread_id}/messages",
+                data=form_data,
+                headers=self._form_headers(),
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                # Backboard may return API-level errors in a 200 payload.
+                response_text = str(data.get("content", "") or "")
+                error_text = str(
+                    data.get("error")
+                    or data.get("detail")
+                    or data.get("message")
+                    or ""
+                )
+                combined = (response_text + "\n" + error_text).strip()
+                if (
+                    not attempted_fallback
+                    and "not supported" in combined.lower()
+                    and self._switch_to_supported_model(combined)
+                ):
+                    attempted_fallback = True
+                    continue
+                if (
+                    not attempted_fallback
+                    and "not a valid model id" in combined.lower()
+                    and self._switch_to_default_model("invalid model id")
+                ):
+                    attempted_fallback = True
+                    continue
+                if error_text and not response_text:
+                    raise RuntimeError(f"Backboard API error: {error_text}")
+                return response_text
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                can_retry = (
+                    not attempted_fallback
+                    and (
+                        ("not supported" in error_body.lower() and self._switch_to_supported_model(error_body))
+                        or ("not a valid model id" in error_body.lower() and self._switch_to_default_model("invalid model id"))
+                    )
+                )
+                if can_retry:
+                    attempted_fallback = True
+                    continue
+                raise RuntimeError(
+                    f"Backboard API error ({exc.code}): {error_body}"
+                ) from exc
 
     # ------------------------------------------------------------------
     # Message flattening

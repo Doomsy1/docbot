@@ -54,6 +54,13 @@ interface TransitionResponse {
   routing: RoutingInfo;
 }
 
+interface SuggestionResponse {
+  suggestions: string[];
+  router: string;
+  reason: string;
+  latency_ms: number;
+}
+
 interface GraphHistoryItem {
   scene: GraphScene;
   routing: RoutingInfo;
@@ -65,6 +72,8 @@ export default function DynamicGraphChat() {
   const [scene, setScene] = useState<GraphScene | null>(null);
   const [routing, setRouting] = useState<RoutingInfo | null>(null);
   const [debugInfo, setDebugInfo] = useState<Record<string, unknown> | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     { id: 'intro', sender: 'bot', text: 'Ask a question and I will adapt the graph depth and scope automatically.' },
   ]);
@@ -117,8 +126,28 @@ export default function DynamicGraphChat() {
     });
   }, []);
 
-  const send = async () => {
-    const query = input.trim();
+  useEffect(() => {
+    const loadSuggestions = async () => {
+      setSuggestionsLoading(true);
+      try {
+        const res = await fetch('/api/explore/suggestions');
+        if (!res.ok) throw new Error(`suggestions failed: ${res.status}`);
+        const data = (await res.json()) as SuggestionResponse;
+        setSuggestions(Array.isArray(data.suggestions) ? data.suggestions.slice(0, 3) : []);
+      } catch {
+        setSuggestions([]);
+      } finally {
+        setSuggestionsLoading(false);
+      }
+    };
+    loadSuggestions().catch(() => {
+      setSuggestionsLoading(false);
+      setSuggestions([]);
+    });
+  }, []);
+
+  const send = async (rawQuery?: string) => {
+    const query = (rawQuery ?? input).trim();
     if (!query || loading || !scene) return;
     setLoading(true);
     setMessages((prev) => [...prev, { id: `${Date.now()}-u`, sender: 'user', text: query }]);
@@ -287,6 +316,28 @@ export default function DynamicGraphChat() {
         </div>
 
         <div className="border-t border-black p-3 bg-gray-50">
+          <div className="mb-2">
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">Suggested Questions</div>
+            <div className="flex flex-wrap gap-2">
+              {suggestionsLoading && (
+                <span className="text-xs text-gray-500">Generating suggestions...</span>
+              )}
+              {!suggestionsLoading && suggestions.length === 0 && (
+                <span className="text-xs text-gray-400">No suggestions available.</span>
+              )}
+              {!suggestionsLoading && suggestions.map((q, idx) => (
+                <button
+                  key={`${idx}-${q}`}
+                  onClick={() => send(q)}
+                  disabled={loading || !scene}
+                  className="text-xs px-2 py-1 border border-black bg-white hover:bg-black hover:text-white disabled:opacity-50"
+                  title={q}
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="flex gap-2">
             <input
               value={input}
@@ -297,7 +348,7 @@ export default function DynamicGraphChat() {
               disabled={loading || !scene}
             />
             <button
-              onClick={send}
+              onClick={() => send()}
               disabled={loading || !input.trim() || !scene}
               className="p-3 border border-black bg-white hover:bg-black hover:text-white transition-all disabled:opacity-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
             >

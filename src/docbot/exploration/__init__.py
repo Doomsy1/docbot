@@ -104,6 +104,7 @@ async def run_agent_exploration(
 
     child_seq = 0
     delegate_counts: dict[str, int] = {}
+    large_repo = len(scan_files) >= 80
 
     def _select_scope_files(target: str) -> list[str]:
         norm = target.strip().replace("\\", "/").strip("/")
@@ -195,6 +196,20 @@ async def run_agent_exploration(
                     f"Assigned scope file count: {len(scope_files)}.\n"
                     f"Max delegation depth: {max_depth}. Current depth: {depth}."
                 )
+                if parent_id is None and depth < max_depth:
+                    top_targets = sorted(
+                        {
+                            p.split("/", 1)[0]
+                            for p in scope_files
+                            if "/" in p and not p.startswith(".")
+                        }
+                    )[:8]
+                    if top_targets:
+                        initial_message += (
+                            "\nCandidate child targets: "
+                            + ", ".join(top_targets)
+                            + ". Delegate only when it improves coverage."
+                        )
                 if attempt > 0:
                     initial_message = f"{initial_message}\n\n{retry_directive}"
                 result = await graph.ainvoke(
@@ -264,14 +279,45 @@ async def run_agent_exploration(
             top_counts[top] = top_counts.get(top, 0) + 1
         planned = [name for name, _ in sorted(top_counts.items(), key=lambda kv: kv[1], reverse=True)[:3]]
         for idx, target in enumerate(planned, start=1):
-            await _run_agent(
-                agent_id=f"{root_id}.plan{idx}",
+            child_id = f"{root_id}.plan{idx}"
+            child_scope_files = _select_scope_files(target)
+            child_summary = await _run_agent(
+                agent_id=child_id,
                 parent_id=root_id,
                 agent_purpose=f"Deep-dive '{target}' and record architecture, data flow, and key implementation details.",
                 parent_context=(root_summary or "")[:2000],
                 depth=1,
-                scope_files=_select_scope_files(target),
+                scope_files=child_scope_files,
             )
+
+            # For large repositories, enforce a second delegation layer.
+            if max_depth > 1 and large_repo:
+                sub_counts: dict[str, int] = {}
+                for path in child_scope_files:
+                    parts = path.replace("\\", "/").split("/")
+                    if len(parts) >= 2 and parts[0] == target:
+                        sub = parts[1]
+                        if sub and not sub.startswith("."):
+                            sub_counts[sub] = sub_counts.get(sub, 0) + 1
+                sub_targets = [n for n, _ in sorted(sub_counts.items(), key=lambda kv: kv[1], reverse=True)[:2]]
+                if not sub_targets and child_scope_files:
+                    # Fallback to at least one depth-2 agent even if child files
+                    # are flat under the top-level directory.
+                    sub_targets = [child_scope_files[0].replace("\\", "/")]
+
+                for sub_idx, sub in enumerate(sub_targets, start=1):
+                    sub_path = sub if "/" in sub else f"{target}/{sub}"
+                    await _run_agent(
+                        agent_id=f"{child_id}.plan{sub_idx}",
+                        parent_id=child_id,
+                        agent_purpose=(
+                            f"Deep-dive '{sub_path}' and capture implementation details, "
+                            f"critical data flow, and notable concerns."
+                        ),
+                        parent_context=(child_summary or root_summary or "")[:2000],
+                        depth=2,
+                        scope_files=_select_scope_files(sub_path),
+                    )
 
     return store
 

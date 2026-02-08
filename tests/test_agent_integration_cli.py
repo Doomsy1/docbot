@@ -66,6 +66,10 @@ def test_run_async_agents_emits_child_delegation_events(tmp_path: Path) -> None:
     assert any(e.get("parent_id") == "root" for e in spawned), (
         "expected delegated child agent spawned from root"
     )
+    # Large repo expectation: children should spawn their own delegates.
+    assert any((e.get("depth") or 0) >= 2 for e in spawned), (
+        "expected depth-2 (grandchild) agent spawn for large repository exploration"
+    )
 
     assert not any(e.get("type") == "agent_error" for e in events), (
         "agent exploration should complete without runtime errors"

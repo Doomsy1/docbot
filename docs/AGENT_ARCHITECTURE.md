@@ -60,6 +60,19 @@ Every agent invocation carries an `AgentState` TypedDict:
 The graph is compiled once and reused. Each `delegate` call recursively
 invokes the same graph with a new AgentState.
 
+## MIMO-Specific Execution Notes
+
+For `xiaomi/mimo-v2-flash`, exploration uses a bounded, model-driven path
+in `exploration/__init__.py` to avoid unstable LangGraph tool loops:
+
+- scoped summarization per agent (`_summarize_scope_mimo`)
+- model-driven delegation planning (`_plan_delegations`)
+- fallback top-up planning when model under-delegates
+- strict scope sandbox checks in `_delegate_child`
+
+This path is intentionally conservative on correctness (no out-of-scope
+delegation) and dynamic on breadth (child counts derived from scope shape).
+
 ### Tools (tools.py)
 
 Created by `create_tools()` factory which binds runtime state:
@@ -95,6 +108,10 @@ events to an `asyncio.Queue`:
 
 The SSE endpoint drains this queue and forwards events to the browser.
 
+Important: state persistence is not SSE-consumer-dependent anymore.
+Agent and notepad events are mirrored into `_agent_state_snapshot` even if
+no browser is connected during the run.
+
 ## Integration with the Pipeline
 
 The orchestrator runs two tracks in parallel after SCAN:
@@ -125,9 +142,13 @@ In `DocbotConfig` (models.py):
 
 | Field           | Default | Purpose                                 |
 |-----------------|---------|------------------------------------------|
-| use_agents      | False   | Enable agent exploration                 |
+| use_agents      | True    | Enable agent exploration                 |
+| agent_depth     | 4       | Default recursion depth used by run path |
 | agent_max_depth | 8       | Max recursion depth for delegation       |
 | agent_model     | None    | Separate model for agents (optional)     |
+
+`run_async()` currently maps `agent_depth` to `agent_max_depth` for legacy
+`docbot run` style invocation.
 
 ## Extending
 

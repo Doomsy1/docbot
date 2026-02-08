@@ -801,7 +801,7 @@ def run(
         False, "--agents", help="Enable recursive agent exploration (more thorough but slower)."
     ),
     agent_depth: int = typer.Option(
-        2, "--agent-depth", help="Agent recursion depth (1=file, 2=symbol)."
+        4, "--agent-depth", help="Agent exploration max depth."
     ),
     visualize: bool = typer.Option(
         False, "--visualize", "--viz", help="Open live pipeline visualization."

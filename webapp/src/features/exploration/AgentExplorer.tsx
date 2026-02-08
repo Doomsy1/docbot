@@ -22,10 +22,13 @@ function AgentExplorer() {
     isConnected,
     isDone,
     noAgents,
+    retry,
   } = useAgentStream();
 
   const graphRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const selectedAgentRef = useRef(selectedAgent);
+  selectedAgentRef.current = selectedAgent;
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
   // Track container size with ResizeObserver.
@@ -46,9 +49,11 @@ function AgentExplorer() {
     return () => observer.disconnect();
   }, []);
 
-  // Auto-zoom to fit whenever graph data changes.
+  // Auto-zoom only once when nodes first appear (0 -> >0).
+  const hasInitialZoomRef = useRef(false);
   useEffect(() => {
-    if (graphRef.current && graphNodes.length > 0) {
+    if (graphRef.current && graphNodes.length > 0 && !hasInitialZoomRef.current) {
+      hasInitialZoomRef.current = true;
       const timer = setTimeout(() => {
         graphRef.current?.zoomToFit(400, 40);
       }, 300);
@@ -65,6 +70,8 @@ function AgentExplorer() {
     [setSelectedAgent],
   );
 
+  // Read selectedAgent from ref so this callback identity stays stable
+  // and doesn't cause ForceGraph2D to re-render/reheat on selection changes.
   const paintNode = useCallback(
     (node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
       const gn = node as GraphNode & { x: number; y: number };
@@ -78,13 +85,13 @@ function AgentExplorer() {
       ctx.fill();
 
       // Highlight ring for selected node.
-      if (selectedAgent === gn.id) {
+      if (selectedAgentRef.current === gn.id) {
         ctx.strokeStyle = '#000';
         ctx.lineWidth = 1.5 / globalScale;
         ctx.stroke();
       }
 
-      // Label below the node.
+      // Label below the node -- use scope_root-derived name.
       const fontSize = Math.max(10 / globalScale, 2);
       ctx.font = `${fontSize}px sans-serif`;
       ctx.textAlign = 'center';
@@ -94,10 +101,12 @@ function AgentExplorer() {
         gn.name.length > 20 ? gn.name.slice(0, 20) + '...' : gn.name;
       ctx.fillText(label, gn.x, gn.y + radius + 2);
     },
-    [selectedAgent],
+    [],
   );
 
   const runningCount = graphNodes.filter((n) => n.status === 'running').length;
+  const errorCount = graphNodes.filter((n) => n.status === 'error').length;
+  const showRetry = !isConnected && !isDone;
 
   return (
     <div className="h-full flex flex-col bg-white">
@@ -121,6 +130,16 @@ function AgentExplorer() {
             Running: {runningCount}
           </span>
         )}
+        {errorCount > 0 && (
+          <span className="text-xs font-mono text-red-600">
+            Errors: {errorCount}
+          </span>
+        )}
+        {notepads.size > 0 && (
+          <span className="text-xs font-mono text-gray-500">
+            Topics: {notepads.size}
+          </span>
+        )}
         <span
           className={`text-xs font-bold uppercase tracking-wide ${
             isDone ? 'text-gray-500' : 'text-green-600'
@@ -128,6 +147,14 @@ function AgentExplorer() {
         >
           {isDone ? 'Done' : 'In Progress'}
         </span>
+        {showRetry && (
+          <button
+            onClick={retry}
+            className="text-xs font-mono px-2 py-0.5 border border-gray-300 rounded hover:border-black hover:bg-gray-100 transition-colors"
+          >
+            Retry
+          </button>
+        )}
       </div>
 
       {/* Main content: graph + detail panel */}
@@ -170,7 +197,8 @@ function AgentExplorer() {
               linkDirectionalParticleSpeed={0.005}
               linkColor={() => '#d1d5db'}
               linkWidth={1.5}
-              cooldownTicks={80}
+              cooldownTicks={40}
+              d3AlphaDecay={0.05}
             />
           )}
         </div>
@@ -181,6 +209,7 @@ function AgentExplorer() {
             <AgentDetail
               agent={agents.get(selectedAgent)!}
               onClose={() => setSelectedAgent(null)}
+              onSelectAgent={setSelectedAgent}
             />
           </div>
         )}
@@ -189,7 +218,7 @@ function AgentExplorer() {
       {/* Notepad strip */}
       {notepads.size > 0 && (
         <div className="border-t border-black">
-          <NotepadViewer notepads={notepads} />
+          <NotepadViewer notepads={notepads} agents={agents} />
         </div>
       )}
     </div>

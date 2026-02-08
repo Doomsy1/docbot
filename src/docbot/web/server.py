@@ -4097,6 +4097,11 @@ async def get_diff_summary(from_id: str, to_id: str):
 
     diff_report = compute_diff(from_snap, to_snap)
 
+    # Build scope lookup for rich descriptions
+    scope_lookup: dict[str, object] = {}
+    for s in index.scopes:
+        scope_lookup[s.scope_id] = s
+
     # Build a detailed textual description of the diff for the LLM
     parts: list[str] = []
     parts.append(f"Comparing snapshot from {from_snap.timestamp} to {to_snap.timestamp}.")
@@ -4105,13 +4110,35 @@ async def get_diff_summary(from_id: str, to_id: str):
     parts.append(f"Stats delta: {sd.total_scopes:+d} scopes, {sd.total_files:+d} files, {sd.total_symbols:+d} symbols.")
 
     if diff_report.added_scopes:
-        parts.append(f"New scopes added: {', '.join(diff_report.added_scopes)}")
+        added_parts = []
+        for sid in diff_report.added_scopes:
+            scope = scope_lookup.get(sid)
+            if scope:
+                files = ", ".join(getattr(scope, "paths", [])[:6])
+                symbols = ", ".join(sym.name for sym in getattr(scope, "public_api", [])[:6])
+                summary = getattr(scope, "summary", "") or ""
+                added_parts.append(
+                    f"  - **{sid}** ({getattr(scope, 'title', sid)}): "
+                    f"{len(getattr(scope, 'paths', []))} files, "
+                    f"{len(getattr(scope, 'public_api', []))} symbols. "
+                    f"Key files: {files or 'N/A'}. "
+                    f"Key symbols: {symbols or 'N/A'}. "
+                    f"Summary: {summary[:200] if summary else 'N/A'}"
+                )
+            else:
+                added_parts.append(f"  - **{sid}**")
+        parts.append("New scopes added:\n" + "\n".join(added_parts))
+
     if diff_report.removed_scopes:
-        parts.append(f"Scopes removed: {', '.join(diff_report.removed_scopes)}")
+        removed_parts = []
+        for sid in diff_report.removed_scopes:
+            removed_parts.append(f"  - **{sid}**")
+        parts.append("Scopes removed:\n" + "\n".join(removed_parts))
 
     if diff_report.modified_scopes:
         mod_lines = []
         for m in diff_report.modified_scopes:
+            scope = scope_lookup.get(m.scope_id)
             details = []
             if m.added_files:
                 details.append(f"added files: {', '.join(m.added_files[:8])}")
@@ -4123,23 +4150,39 @@ async def get_diff_summary(from_id: str, to_id: str):
                 details.append(f"removed symbols: {', '.join(m.removed_symbols[:8])}")
             if m.summary_changed:
                 details.append("documentation summary changed")
-            mod_lines.append(f"  - {m.scope_id}: {'; '.join(details)}")
+            scope_title = getattr(scope, "title", m.scope_id) if scope else m.scope_id
+            scope_summary = (getattr(scope, "summary", "") or "") if scope else ""
+            context = f" Context: {scope_summary[:150]}" if scope_summary else ""
+            mod_lines.append(f"  - **{m.scope_id}** ({scope_title}): {'; '.join(details)}.{context}")
         parts.append("Modified scopes:\n" + "\n".join(mod_lines))
 
     if diff_report.graph_changes.changed_nodes:
-        parts.append("Dependency graph changed.")
+        parts.append("Dependency graph structure changed between these snapshots.")
+
+    # Include edge information for context
+    if index.scope_edges:
+        edge_strs = [f"{a} → {b}" for a, b in index.scope_edges[:15]]
+        parts.append(f"Current scope dependencies: {'; '.join(edge_strs)}")
 
     diff_text = "\n".join(parts)
 
     prompt = (
         "You are a technical writer summarizing changes between two documentation snapshots of a codebase.\n\n"
         f"## Change Report\n{diff_text}\n\n"
-        "Write a concise 2-4 paragraph summary that:\n"
-        "1. Opens with a one-sentence overview of the most significant change\n"
-        "2. Explains what was added, removed, or restructured and why it matters\n"
-        "3. Notes any shifts in architecture or dependencies if relevant\n"
-        "4. Closes with the overall impact on the project\n\n"
-        "Use plain prose, no bullet lists. Reference specific scope names naturally."
+        "Write a well-structured, **specific** summary in Markdown with these sections:\n\n"
+        "### Overview\nA 1-2 sentence high-level summary of the most significant change. Be specific about *what* changed and *why* it matters.\n\n"
+        "### How Things Changed\nExplain the nature and impact of the changes — NOT which scopes were added/removed/modified (the user already sees that). "
+        "Instead focus on: What new capabilities or functionality were introduced? What functionality was removed or replaced? "
+        "How did modified scopes evolve — what shifted in their responsibilities, APIs, or behavior? "
+        "Use bullet points. Reference specific files, symbols, and functionality to be concrete.\n\n"
+        "### Architecture Impact\nExplain how these changes affect the dependency graph, module boundaries, or system design. "
+        "Reference specific scope relationships. If the graph changed, explain what that means for the project.\n\n"
+        "### Bottom Line\nOne sentence on the overall impact — be concrete, not generic.\n\n"
+        "IMPORTANT: Do NOT simply list which scopes changed — the UI already shows added/removed/modified scopes separately. "
+        "Focus on HOW things changed and WHAT EFFECT it has on the codebase. "
+        "Do NOT use vague phrases like 'various changes were made' or 'the project was updated'. "
+        "Always reference specific file names and symbol names from the data above. "
+        "Use the exact section headers above (### Overview, ### How Things Changed, ### Architecture Impact, ### Bottom Line)."
     )
 
     try:

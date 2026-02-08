@@ -7,6 +7,7 @@ import type { AgentNode } from './types';
 interface Props {
   agent: AgentNode;
   onClose: () => void;
+  onSelectAgent?: (id: string) => void;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -15,7 +16,13 @@ const STATUS_COLORS: Record<string, string> = {
   error: 'bg-red-500',
 };
 
-export default function AgentDetail({ agent, onClose }: Props) {
+const MAX_VISIBLE_TOOLS = 20;
+
+export default function AgentDetail({ agent, onClose, onSelectAgent }: Props) {
+  const totalTools = agent.tools.length;
+  const visibleTools = agent.tools.slice(-MAX_VISIBLE_TOOLS);
+  const hiddenCount = totalTools - visibleTools.length;
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Header */}
@@ -40,16 +47,46 @@ export default function AgentDetail({ agent, onClose }: Props) {
         <div className="text-xs leading-relaxed">{agent.purpose || '(none)'}</div>
       </div>
 
+      {/* Scope root */}
+      {agent.scope_root && (
+        <div className="px-3 py-2 border-b border-gray-200">
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-0.5">Scope</div>
+          <div className="text-xs font-mono text-gray-700">{agent.scope_root}</div>
+        </div>
+      )}
+
+      {/* Parent agent */}
+      {agent.parent_id && (
+        <div className="px-3 py-2 border-b border-gray-200">
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-0.5">Parent</div>
+          {onSelectAgent ? (
+            <button
+              onClick={() => onSelectAgent(agent.parent_id!)}
+              className="text-xs font-mono text-blue-600 hover:underline"
+            >
+              {agent.parent_id}
+            </button>
+          ) : (
+            <div className="text-xs font-mono text-gray-700">{agent.parent_id}</div>
+          )}
+        </div>
+      )}
+
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto">
         {/* Tool calls */}
-        {agent.tools.length > 0 && (
+        {totalTools > 0 && (
           <div className="px-3 py-2 border-b border-gray-200">
             <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">
-              Tools ({agent.tools.length})
+              Tools ({totalTools})
+              {hiddenCount > 0 && (
+                <span className="text-gray-400 normal-case ml-1">
+                  showing {visibleTools.length} of {totalTools}
+                </span>
+              )}
             </div>
             <div className="space-y-1">
-              {agent.tools.slice(-20).map((tool, i) => (
+              {visibleTools.map((tool, i) => (
                 <div key={i} className="text-xs font-mono">
                   <span className={tool.status === 'running' ? 'text-green-600' : 'text-gray-600'}>
                     {tool.tool}

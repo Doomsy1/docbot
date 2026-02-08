@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { IconGitCompare, IconPlus, IconMinus, IconEdit, IconChartBar, IconCpu, IconChevronDown, IconChevronRight, IconSend, IconMessageCircle, IconFileDescription } from '@tabler/icons-react';
+import { IconGitCompare, IconPlus, IconMinus, IconEdit, IconChartBar, IconCpu, IconChevronDown, IconChevronRight, IconSend, IconMessageCircle, IconFileDescription, IconTopologyRing } from '@tabler/icons-react';
+import DiffGraph from './DiffGraph';
 
 interface HistorySnapshot {
   run_id: string;
@@ -288,11 +289,20 @@ export default function DiffViewer() {
               </div>
             </div>
 
+            {/* Visual Graph */}
+            <div className="bg-white border border-black p-6 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+              <div className="flex items-center gap-2 mb-4 border-b border-gray-100 pb-2">
+                <IconTopologyRing className="text-purple-600" />
+                <h2 className="text-lg font-bold uppercase tracking-wide">Change Graph</h2>
+              </div>
+              <DiffGraph diff={diff} />
+            </div>
+
             {/* Narrative Summary */}
             <div className="bg-white border border-black p-6 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
               <div className="flex items-center gap-2 mb-4 border-b border-gray-100 pb-2">
                 <IconFileDescription className="text-blue-600" />
-                <h2 className="text-lg font-bold uppercase tracking-wide">What Changed</h2>
+                <h2 className="text-lg font-bold uppercase tracking-wide">Impact Analysis</h2>
               </div>
               {summaryLoading ? (
                 <div className="flex items-center gap-2 text-gray-400 font-mono text-sm py-4">
@@ -457,7 +467,11 @@ export default function DiffViewer() {
                     : 'bg-white text-gray-800'
                 }`}>
                   {msg.role === 'assistant' ? (
-                    <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: msg.content.replace(/\n/g, '<br/>') }} />
+                    <div className="prose prose-sm max-w-none">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {msg.content}
+                      </ReactMarkdown>
+                    </div>
                   ) : (
                     msg.content
                   )}

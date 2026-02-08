@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 BACKBOARD_BASE_URL = "https://app.backboard.io/api"
-DEFAULT_MODEL = "openai/gpt-4o-mini"
+DEFAULT_MODEL = "google/gemini-3-flash-preview"
 
 
 def _split_model(model: str) -> tuple[str, str]:

@@ -30,7 +30,7 @@ Documentation is almost always outdated or non-existent. **DocBot** solves this 
    ```
 
 2. **Configure**
-   Create a `.env` file with your `OPENROUTER_KEY`.
+   Create a `.env` file with your `BACKBOARD_API_KEY`.
 
 3. **Initialize & Generate**
 
@@ -66,7 +66,7 @@ Flags for `docbot generate`:
 | `--agents`      | Enable recursive agentic exploration (deep-dive). |
 | `--no-llm`      | Skip AI enrichment (static extraction only).      |
 | `--concurrency` | Parallel worker count (default: 4).               |
-| `--model`       | Override default OpenRouter model ID.             |
+| `--model`       | Override default model ID.                        |
 
 ## How It Works
 

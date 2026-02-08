@@ -12,7 +12,11 @@
       "Bash(node -e:*)",
       "Bash(npx vite build:*)",
       "Bash(timeout 10 npx vite:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "WebSearch",
+      "WebFetch(domain:app.backboard.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

@@ -31,6 +31,7 @@ _llm_client: LLMClient | None = None
 _tours_cache: list[dict] | None = None
 _service_details_cache: dict | None = None
 _explore_graph_cache: dict | None = None
+_explore_suggestions_cache: dict | None = None
 
 
 def _load_index() -> DocsIndex:
@@ -89,6 +90,27 @@ def _scope_group(scope) -> str:
 def _normalize_query_tokens(text: str) -> set[str]:
     """Lowercase + tokenize an arbitrary user query."""
     return set(re.findall(r"[a-z0-9_./-]+", text.lower()))
+
+
+def _looks_like_llm_error_text(text: str | None) -> bool:
+    """Detect stale LLM error blobs accidentally persisted into docs artifacts."""
+    if not text:
+        return False
+    t = text.strip().lower()
+    if not t:
+        return False
+    return (
+        t.startswith("llm error:")
+        or "model '" in t and "is not supported" in t
+        or "supported models:" in t
+    )
+
+
+def _clean_llm_generated_text(text: str | None) -> str:
+    """Return empty string when a stored text is actually an LLM failure."""
+    if _looks_like_llm_error_text(text):
+        return ""
+    return (text or "").strip()
 
 
 def _infer_graph_view(query: str) -> str:
@@ -1340,7 +1362,7 @@ async def get_index() -> JSONResponse:
             "entrypoints": index.entrypoints,
             "env_var_count": len(index.env_vars),
             "public_api_count": len(index.public_api),
-            "cross_scope_analysis": index.cross_scope_analysis or None,
+            "cross_scope_analysis": _clean_llm_generated_text(index.cross_scope_analysis) or None,
             "scopes": scopes_summary,
             "public_api_by_scope": public_api_by_scope,
             "entrypoint_groups": entrypoint_groups,
@@ -1354,6 +1376,7 @@ async def get_scopes() -> JSONResponse:
     index = _load_index()
     scopes = []
     for s in index.scopes:
+        clean_summary = _clean_llm_generated_text(s.summary)
         scopes.append(
             {
                 "scope_id": s.scope_id,
@@ -1363,7 +1386,7 @@ async def get_scopes() -> JSONResponse:
                 "symbol_count": len(s.public_api),
                 "env_var_count": len(s.env_vars),
                 "error": s.error,
-                "summary": s.summary[:300] if s.summary else None,
+                "summary": clean_summary[:300] if clean_summary else None,
             }
         )
     return JSONResponse({"scopes": scopes})
@@ -1560,6 +1583,21 @@ def _pick_focus_scope_id(index: DocsIndex, scope_filter: set[str] | None, query:
     return best.scope_id
 
 
+def _pick_backend_services_scope(index: DocsIndex) -> str | None:
+    """Pick a backend scope that best represents service-level architecture."""
+    candidates = [s for s in index.scopes if _scope_group(s) == "backend"]
+    if not candidates:
+        return None
+
+    def score(s) -> tuple[int, int]:
+        sid = s.scope_id.lower()
+        title = s.title.lower()
+        serviceish = 1 if ("service" in sid or "service" in title) else 0
+        return serviceish, len(s.paths)
+
+    return max(candidates, key=score).scope_id
+
+
 def _pick_focus_module_id(catalog: dict, scope_id: str | None, query: str) -> str | None:
     if not scope_id:
         return None
@@ -1647,6 +1685,66 @@ def _heuristic_fallback_answer(index: DocsIndex, query: str, *, max_items: int =
     return "\n".join(lines[: max_items + 1])
 
 
+def _low_signal_answer(answer: str) -> bool:
+    """Detect vague answers that should be replaced by deterministic summaries."""
+    text = (answer or "").strip()
+    if not text:
+        return True
+    lower = text.lower()
+    generic_phrases = (
+        "organized into various modules",
+        "supporting scalability and maintainability",
+        "different purposes",
+        "structured approach",
+        "various modules serving",
+    )
+    has_file_refs = ("/" in text and "." in text) or ("`" in text and ":" in text)
+    if any(p in lower for p in generic_phrases) and not has_file_refs:
+        return True
+    return len(text.split()) < 28
+
+
+def _targeted_backend_answer(index: DocsIndex, query: str, *, max_items: int = 6) -> str:
+    """Generate a concise, code-grounded fallback answer for service/backend queries."""
+    hits = _load_search_index().search(query, limit=14)
+    scope_hits: dict[str, list[str]] = {}
+    file_to_scope = _file_to_scope_map(index)
+    for h in hits:
+        sid = file_to_scope.get(h.citation.file, "")
+        if not sid:
+            continue
+        scope_hits.setdefault(sid, [])
+        key = f"{h.citation.file}:{h.citation.line_start}"
+        if key not in scope_hits[sid]:
+            scope_hits[sid].append(key)
+
+    ranked = sorted(
+        index.scopes,
+        key=lambda s: (
+            1 if _scope_group(s) == "backend" else 0,
+            len(scope_hits.get(s.scope_id, [])),
+            len(s.paths),
+        ),
+        reverse=True,
+    )
+    picks = [s for s in ranked if _scope_group(s) == "backend"][:max_items]
+    if not picks:
+        return _heuristic_fallback_answer(index, query, max_items=4)
+
+    lines = ["## Backend Systems"]
+    for s in picks:
+        refs = scope_hits.get(s.scope_id, [])[:2]
+        ref_txt = f" ({', '.join(f'`{r}`' for r in refs)})" if refs else ""
+        summary = _clean_llm_generated_text(s.summary)
+        if summary:
+            summary = summary.split(".")[0].strip()
+        else:
+            langs = ", ".join(s.languages) if s.languages else "unknown"
+            summary = f"{len(s.paths)} files, {len(s.public_api)} symbols ({langs})"
+        lines.append(f"- **{s.title}**: {summary}{ref_txt}")
+    return "\n".join(lines)
+
+
 def _match_module_id(catalog: dict, raw: str | None, scope_id: str | None) -> str | None:
     if not raw:
         return None
@@ -1681,7 +1779,7 @@ def _build_explore_system_prompt(index: DocsIndex) -> str:
     return (
         "You are a codebase exploration copilot. "
         "Return concise, high-signal markdown and an exact graph routing plan. "
-        "Do not over-explain. Prefer concrete architecture relationships."
+        "Do not over-explain. Prefer concrete architecture relationships with file references."
     )
 
 
@@ -1750,7 +1848,132 @@ Rules:
 - Only use entity view if user explicitly asks for functions/classes/entities.
 - Keep answer concise and skimmable.
 - Trust the user's requested focus area; keep scope tight.
+- Include concrete repo file references (e.g. `services/x/app/main.py`) in the answer.
+- Preferred format:
+  1) What it is (1-2 lines)
+  2) Key systems (3-6 bullets)
+  3) Where to inspect (2-4 file references)
 """
+
+
+def _default_explore_suggestions(index: DocsIndex, *, max_items: int = 3) -> list[str]:
+    """Deterministic fallback suggestions when LLM suggestions fail."""
+    ranked_scopes = sorted(
+        index.scopes,
+        key=lambda s: (
+            1 if _scope_group(s) == "backend" else 0,
+            len(s.paths),
+        ),
+        reverse=True,
+    )
+    suggestions: list[str] = []
+    if ranked_scopes:
+        top = ranked_scopes[0]
+        suggestions.append(f"Give me a high-level architecture overview of `{top.title}`.")
+    if len(ranked_scopes) > 1:
+        suggestions.append(
+            f"Explain the end-to-end flow between `{ranked_scopes[0].title}` and `{ranked_scopes[1].title}`."
+        )
+    suggestions.append("Show me the most important backend services and where to inspect them.")
+    return suggestions[:max_items]
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """Parse json_mode output, tolerating fences and surrounding prose."""
+    txt = (raw or "").strip()
+    if txt.startswith("```"):
+        txt = re.sub(r"^```(?:json)?\s*", "", txt)
+        txt = re.sub(r"\s*```$", "", txt)
+    try:
+        parsed = json.loads(txt)
+    except Exception:
+        # Attempt to salvage first JSON object from mixed output.
+        start = txt.find("{")
+        end = txt.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            parsed = json.loads(txt[start : end + 1])
+        else:
+            raise
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM JSON payload is not an object.")
+    return parsed
+
+
+def _sanitize_suggestions(raw: object, *, max_items: int = 3) -> list[str]:
+    """Normalize suggestions to short, unique question strings."""
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        text = re.sub(r"\s+", " ", text)
+        if len(text) > 140:
+            text = text[:137].rstrip() + "..."
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+@app.get("/api/explore/suggestions")
+async def explore_suggestions() -> JSONResponse:
+    """Return 3 project-specific suggested questions for Explore chat."""
+    global _explore_suggestions_cache
+    index = _load_index()
+    cache_key = f"{index.repo_path}:{index.generated_at}:{len(index.scopes)}"
+    if _explore_suggestions_cache and _explore_suggestions_cache.get("key") == cache_key:
+        return JSONResponse(_explore_suggestions_cache["data"])
+
+    fallback = _default_explore_suggestions(index, max_items=3)
+    scope_lines = [f"- {s.scope_id}: {s.title} ({len(s.paths)} files)" for s in index.scopes[:20]]
+    prompt = (
+        "Generate exactly 3 short, clickable suggested user questions for exploring this codebase.\n"
+        "Focus on architecture understanding, key service flows, and practical drill-downs.\n"
+        "Each suggestion should be under 110 characters and phrased as a direct question.\n\n"
+        f"Scopes:\n{chr(10).join(scope_lines)}\n\n"
+        'Return JSON only: {"suggestions": ["...","...","..."]}'
+    )
+
+    t0 = time.perf_counter()
+    suggestions = fallback
+    router = "fallback"
+    reason = "Deterministic fallback suggestions."
+    if _llm_client is not None:
+        try:
+            llm_raw = await asyncio.wait_for(
+                _llm_client.chat(
+                    [
+                        {"role": "system", "content": "You create concise, high-signal onboarding prompts for codebase exploration."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    json_mode=True,
+                ),
+                timeout=6.0,
+            )
+            parsed = _parse_llm_json(llm_raw)
+            parsed_suggestions = _sanitize_suggestions(parsed.get("suggestions"), max_items=3)
+            if len(parsed_suggestions) == 3:
+                suggestions = parsed_suggestions
+                router = "llm"
+                reason = "Backboard-generated project-aware suggestions."
+        except Exception as exc:
+            logger.info("Explore suggestions fallback due to LLM error: %s", exc)
+
+    payload = {
+        "suggestions": suggestions,
+        "router": router,
+        "reason": reason,
+        "latency_ms": int((time.perf_counter() - t0) * 1000),
+    }
+    _explore_suggestions_cache = {"key": cache_key, "data": payload}
+    return JSONResponse(payload)
 
 
 @app.post("/api/explore")
@@ -1760,7 +1983,7 @@ async def explore(req: ExploreRequest) -> JSONResponse:
     if not query:
         raise HTTPException(status_code=400, detail="Query is required.")
     if _llm_client is None:
-        raise HTTPException(status_code=503, detail="LLM not configured (missing OPENROUTER_KEY).")
+        raise HTTPException(status_code=503, detail="LLM not configured (missing BACKBOARD_API_KEY).")
 
     index = _load_index()
     prev_state = req.state or ExploreState()
@@ -1816,6 +2039,13 @@ async def explore(req: ExploreRequest) -> JSONResponse:
         if focus_module_id and not focus_scope_id:
             focus_scope_id = catalog["modules"][focus_module_id]["scope_id"]
 
+        # If LLM returns vague focus ids (e.g., "services"), recover deterministically.
+        if view in {"module", "file", "entity"} and not focus_scope_id:
+            inferred_scope_filter = _infer_scope_filter(index, query)
+            focus_scope_id = _pick_focus_scope_id(index, inferred_scope_filter, query) or prev_state.focus_scope_id
+        if view in {"file", "entity"} and not focus_module_id and focus_scope_id:
+            focus_module_id = _pick_focus_module_id(catalog, focus_scope_id, query) or prev_state.focus_module_id
+
         route_reason = str(g.get("reason") or "LLM route")
         ql = query.lower()
         if (
@@ -1829,6 +2059,27 @@ async def explore(req: ExploreRequest) -> JSONResponse:
             focus_module_id = None
             focus_file_id = None
             route_reason = "LLM route adjusted to module view for actionable service-level intent."
+
+        # Guarantee meaningful graph motion when user asks backend/service overviews.
+        if view == "scope" and any(k in ql for k in ("backend", "service", "systems", "subsystem")):
+            view = "module"
+            if not focus_scope_id:
+                focus_scope_id = _pick_focus_scope_id(index, _infer_scope_filter(index, query), query)
+            route_reason = "Expanded to module view for backend/service overview."
+
+        # For backend services overviews, bias toward a richer services scope.
+        if "backend" in ql and "service" in ql:
+            preferred_scope = _pick_backend_services_scope(index)
+            if preferred_scope:
+                focus_scope_id = preferred_scope
+                view = "module"
+                focus_module_id = None
+                focus_file_id = None
+                route_reason = "Focused module view on backend services scope."
+
+        if _low_signal_answer(answer):
+            answer = _targeted_backend_answer(index, query)
+
         highlighted_node_id = str(g.get("highlighted_node_id") or "") or None
         scene = _build_explore_scene(
             index,
@@ -1872,7 +2123,14 @@ async def explore(req: ExploreRequest) -> JSONResponse:
             focus_module_id=focus_module_id,
             focus_file_id=focus_file_id,
         )
-        answer = _heuristic_fallback_answer(index, query)
+        ql = query.lower()
+        raw_fallback = llm_raw.strip()
+        if raw_fallback and not _looks_like_llm_error_text(raw_fallback):
+            answer = _truncate_words(_make_scannable_markdown(raw_fallback), 220)
+        elif any(k in ql for k in ("backend", "service", "services", "worker", "flow")):
+            answer = _targeted_backend_answer(index, query)
+        else:
+            answer = _heuristic_fallback_answer(index, query)
         return JSONResponse(
             jsonable_encoder(
                 {
@@ -2012,7 +2270,7 @@ async def get_service_details() -> JSONResponse:
 
     scope_summaries: dict[str, str] = {}
     for s in index.scopes:
-        scope_summaries[s.scope_id] = s.summary or s.title
+        scope_summaries[s.scope_id] = _clean_llm_generated_text(s.summary) or s.title
 
     service_contexts: list[str] = []
     for node in external_nodes:
@@ -2175,11 +2433,13 @@ def _build_chat_system_prompt(index: DocsIndex) -> str:
     scope_lines = []
     for s in index.scopes:
         langs = ", ".join(s.languages) if s.languages else "unknown"
-        summary = (
-            (s.summary[:200] + "...")
-            if s.summary and len(s.summary) > 200
-            else (s.summary or "")
-        )
+        clean_summary = _clean_llm_generated_text(s.summary)
+        if clean_summary and len(clean_summary) > 200:
+            summary = clean_summary[:200] + "..."
+        elif clean_summary:
+            summary = clean_summary
+        else:
+            summary = f"{len(s.paths)} files; {len(s.public_api)} public symbols."
         scope_lines.append(
             f"- [{s.scope_id}] {s.title} ({langs}, {len(s.paths)} files): {summary}"
         )
@@ -2212,7 +2472,7 @@ def _build_chat_system_prompt(index: DocsIndex) -> str:
         env_count=len(index.env_vars),
         env_block=env_block,
         edge_block=edge_block,
-        cross_scope_analysis=index.cross_scope_analysis or "(none)",
+        cross_scope_analysis=_clean_llm_generated_text(index.cross_scope_analysis) or "(none)",
     )
 
 
@@ -2359,7 +2619,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     if _llm_client is None:
         raise HTTPException(
-            status_code=503, detail="LLM not configured (missing OPENROUTER_KEY)."
+            status_code=503, detail="LLM not configured (missing BACKBOARD_API_KEY)."
         )
 
     index = _load_index()
@@ -2731,7 +2991,25 @@ def get_history():
     if not docbot_dir.exists():
         return []
     
-    snapshots = list_snapshots(docbot_dir)
+    snapshots = list_snapshots(docbot_dir, dedupe=False)
+
+    # Dashboard-level dedupe: collapse runs that are identical in user-visible
+    # architecture shape and top-level metrics.
+    collapsed = []
+    seen_keys: set[tuple[str, int, int, int, str]] = set()
+    for s in snapshots:
+        key = (
+            s.commit_hash,
+            s.stats.total_scopes,
+            s.stats.total_symbols,
+            s.stats.total_edges,
+            s.graph_digest,
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        collapsed.append(s)
+
     return [
         {
             "run_id": s.run_id,
@@ -2742,7 +3020,7 @@ def get_history():
             "symbol_count": s.stats.total_symbols,
             "entrypoint_count": 0,  # Not tracked in snapshot stats
         }
-        for s in snapshots
+        for s in collapsed
     ]
 
 
@@ -2823,13 +3101,14 @@ def start_server(
     import uvicorn
     from fastapi.staticfiles import StaticFiles
 
-    global _run_dir, _index_cache, _search_index_cache, _llm_client, _tours_cache, _service_details_cache, _explore_graph_cache
+    global _run_dir, _index_cache, _search_index_cache, _llm_client, _tours_cache, _service_details_cache, _explore_graph_cache, _explore_suggestions_cache
     _run_dir = run_dir.resolve()
     _index_cache = None
     _search_index_cache = None
     _tours_cache = None
     _service_details_cache = None
     _explore_graph_cache = None
+    _explore_suggestions_cache = None
     _llm_client = llm_client
 
     here = Path(__file__).parent.resolve()

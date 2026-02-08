@@ -113,7 +113,7 @@ const SERVICE_DESCRIPTIONS: Record<string, string> = {
   ext_openai: 'OpenAI provides GPT language models and APIs for text generation, embeddings, image generation, and other AI capabilities. Scopes using it handle AI-powered features like chat, summarization, or content generation.',
   ext_gemini: 'Google Gemini is a multimodal AI model used for text generation, reasoning, image understanding, and other intelligent processing tasks. Scopes using it integrate AI-driven analysis or generation features.',
   ext_anthropic: 'Anthropic provides the Claude family of AI models for text generation, analysis, and reasoning. Scopes using it power AI chat, content generation, or automated analysis features.',
-  ext_openrouter: 'OpenRouter is an API gateway that provides unified access to multiple LLM providers (OpenAI, Anthropic, Google, etc.). Scopes using it make LLM calls for text generation or analysis.',
+  ext_openrouter: 'Backboard.io is a unified API with persistent memory/RAG that provides access to multiple LLM providers (OpenAI, Anthropic, Google, etc.). Scopes using it make LLM calls for text generation or analysis.',
   ext_auth0: 'Auth0 is an identity platform for authentication and authorization, handling user login, SSO, MFA, and access control.',
   ext_clerk: 'Clerk is a user authentication and management platform providing sign-in/sign-up flows, session management, and user profiles.',
   ext_stripe: 'Stripe is a payment processing platform used for handling credit card payments, subscriptions, invoices, and financial transactions.',
@@ -323,7 +323,7 @@ export default function Dashboard() {
                 ) : (
                     <div className="text-gray-400 italic font-mono py-8 text-center border-2 border-dashed border-gray-200">
                         No architecture analysis found.<br/>
-                        Run docbot with an OPENROUTER_KEY to generate one.
+                        Run docbot with a BACKBOARD_API_KEY to generate one.
                     </div>
                 )}
             </div>

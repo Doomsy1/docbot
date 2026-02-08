@@ -22,7 +22,7 @@ Decisions made:
 -   Keep Python's ast module (already built, zero dependencies) -- tree-sitter for TS/JS, Go, Rust, Java; LLM fallback
     for everything else
 -   React SPA for the frontend
--   OpenRouter only for LLM provider
+-   Backboard.io for LLM provider
 -   Full experience for V1 webapp (chat + graph + dynamic viz + tours + code nav)
 
 ---

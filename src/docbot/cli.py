@@ -95,15 +95,15 @@ def _build_llm_client(
 
     if no_llm:
         return None
-    api_key = os.environ.get("OPENROUTER_KEY", "").strip()
+    api_key = os.environ.get("BACKBOARD_API_KEY", "").strip()
     if api_key:
         return LLMClient(api_key=api_key, model=model)
     if not quiet:
         console.print(
-            "[yellow]OPENROUTER_KEY not set. Running in template-only mode.[/yellow]"
+            "[yellow]BACKBOARD_API_KEY not set. Running in template-only mode.[/yellow]"
         )
         console.print(
-            "[dim]Set OPENROUTER_KEY or pass --no-llm to suppress this warning.[/dim]"
+            "[dim]Set BACKBOARD_API_KEY or pass --no-llm to suppress this warning.[/dim]"
         )
     return None
 
@@ -271,7 +271,7 @@ def generate(
         None, "--timeout", "-t", help="Per-scope timeout in seconds."
     ),
     model: Optional[str] = typer.Option(
-        None, "--model", "-m", help="OpenRouter model ID."
+        None, "--model", "-m", help="Model ID (provider/model)."
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
     use_agents: bool = typer.Option(
@@ -341,7 +341,7 @@ def generate(
         tracker = NoOpTracker()
 
     if llm_client is not None:
-        console.print(f"[bold]LLM:[/bold] {effective_cfg.model} via OpenRouter")
+        console.print(f"[bold]LLM:[/bold] {effective_cfg.model} via Backboard")
 
     # Run the git-aware pipeline, outputting to .docbot/.
     _run_async(
@@ -372,7 +372,7 @@ def update(
         None, "--timeout", "-t", help="Per-scope timeout in seconds."
     ),
     model: Optional[str] = typer.Option(
-        None, "--model", "-m", help="OpenRouter model ID."
+        None, "--model", "-m", help="Model ID (provider/model)."
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
 ) -> None:
@@ -467,8 +467,8 @@ def serve(
     ),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
     port: int = typer.Option(8000, "--port", "-p", help="Port number."),
-    model: str = typer.Option(
-        DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID (for chat)."
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m", help="Model ID (provider/model, for chat). Defaults to .docbot/config.toml."
     ),
     no_browser: bool = typer.Option(
         False, "--no-browser", help="Don't auto-open browser."
@@ -498,6 +498,7 @@ def serve(
         if project_root and (project_root / ".docbot" / "docs_index.json").exists():
             run_dir = project_root / ".docbot"
 
+    effective_model = model
     if run_dir is None:
         if path is not None:
             # Path was given but no docs found -- run analysis first.
@@ -506,8 +507,15 @@ def serve(
                 f"[bold]No docs found -- running analysis on[/bold] {resolved}"
             )
             from .pipeline.orchestrator import run_async
+            if effective_model is None:
+                cfg_path = resolved / ".docbot" / "config.toml"
+                if cfg_path.exists():
+                    from .git.project import load_config
+                    effective_model = load_config(resolved / ".docbot").model
+                else:
+                    effective_model = DEFAULT_MODEL
 
-            llm_client = _build_llm_client(model)
+            llm_client = _build_llm_client(effective_model)
             try:
                 run_dir = asyncio.run(run_async(repo_path=resolved, llm_client=llm_client))
             except KeyboardInterrupt:
@@ -522,7 +530,21 @@ def serve(
             )
             raise typer.Exit(code=1)
 
-    llm_client = _build_llm_client(model, quiet=True)
+    if effective_model is None:
+        config_model = None
+        # Prefer config next to served .docbot directory.
+        if (run_dir / "config.toml").exists():
+            from .git.project import load_config
+            config_model = load_config(run_dir).model
+        else:
+            # If serving a run snapshot folder, try sibling .docbot config.
+            sibling_docbot = run_dir.parent / ".docbot"
+            if (sibling_docbot / "config.toml").exists():
+                from .git.project import load_config
+                config_model = load_config(sibling_docbot).model
+        effective_model = config_model or DEFAULT_MODEL
+
+    llm_client = _build_llm_client(effective_model, quiet=True)
 
     # Ensure webapp is built before starting server
     _ensure_webapp_built()
@@ -532,6 +554,7 @@ def serve(
     url = f"http://{host}:{port}"
     console.print(f"[bold cyan]Serving[/bold cyan] {run_dir}")
     console.print(f"  {url}")
+    console.print(f"[bold]LLM model:[/bold] {effective_model}")
 
     if not no_browser:
         import threading
@@ -562,14 +585,16 @@ def config(
     if key is None:
         # Print all config.
         console.print("[bold]docbot config:[/bold]")
-        for field_name in cfg.model_fields:
+        fields = type(cfg).model_fields
+        for field_name in fields:
             console.print(f"  {field_name} = {getattr(cfg, field_name)!r}")
         return
 
-    if key not in cfg.model_fields:
+    fields = type(cfg).model_fields
+    if key not in fields:
         console.print(
             f"[red]Error:[/red] Unknown config key [bold]{key}[/bold].\n"
-            f"  Valid keys: {', '.join(cfg.model_fields)}"
+            f"  Valid keys: {', '.join(fields)}"
         )
         raise typer.Exit(code=1)
 
@@ -579,7 +604,7 @@ def config(
         return
 
     # Set value -- coerce to the correct type.
-    field_info = cfg.model_fields[key]
+    field_info = fields[key]
     field_type = field_info.annotation
     try:
         if field_type is bool or field_type == (bool | None):
@@ -769,7 +794,7 @@ def run(
         120.0, "--timeout", "-t", help="Per-scope timeout in seconds."
     ),
     model: str = typer.Option(
-        DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID."
+        DEFAULT_MODEL, "--model", "-m", help="Model ID (provider/model)."
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
     use_agents: bool = typer.Option(

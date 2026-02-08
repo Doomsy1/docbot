@@ -66,6 +66,7 @@ function nodeRadius(n: MixedNode): number {
 }
 
 function edgeStyle(kind: string): { stroke: string; width: number; dashed: boolean } {
+  if (kind === 'runtime_http') return { stroke: '#dc2626', width: 2.4, dashed: false };
   if (kind === 'entity_intra_file') return { stroke: '#64748b', width: 1.5, dashed: true };
   if (kind === 'entity_cross_file') return { stroke: '#1f2937', width: 2.2, dashed: false };
   if (kind === 'file_dep') return { stroke: '#334155', width: 2.0, dashed: false };

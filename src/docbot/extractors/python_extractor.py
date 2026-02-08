@@ -108,8 +108,16 @@ class PythonExtractor:
                     resolved = ".".join(base + ([mod] if mod else []))
                     if resolved:
                         imports.append(resolved)
+                        for alias in node.names:
+                            alias_name = getattr(alias, "name", "") or ""
+                            if alias_name and alias_name != "*":
+                                imports.append(f"{resolved}.{alias_name}")
                 elif mod:
                     imports.append(mod)
+                    for alias in node.names:
+                        alias_name = getattr(alias, "name", "") or ""
+                        if alias_name and alias_name != "*":
+                            imports.append(f"{mod}.{alias_name}")
 
             # Public functions / async functions at module level
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

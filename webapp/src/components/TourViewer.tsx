@@ -1,12 +1,12 @@
-import { useEffect, useState, useCallback } from 'react';
-import { IconRoute, IconChevronRight, IconChevronLeft, IconMap2, IconCircleCheck } from '@tabler/icons-react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { IconRoute, IconChevronRight, IconChevronLeft, IconCircleCheck, IconCircleFilled } from '@tabler/icons-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { codeToHtml } from 'shiki';
 
 interface TourStep {
   title: string;
   description: string;
+  scope_id?: string | null;
   citation?: {
     file: string;
     line_start: number;
@@ -25,75 +25,90 @@ interface TourViewerProps {
   onSelectFile?: (path: string) => void;
 }
 
-function CodePanel({ file, lineStart, lineEnd }: { file: string; lineStart: number; lineEnd: number }) {
-  const [html, setHtml] = useState<string>('');
-  const [loading, setLoading] = useState(true);
+// Simple vertical step graph component
+function TourStepGraph({ steps, currentIndex }: { steps: TourStep[]; currentIndex: number }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const currentNodeRef = useRef<HTMLDivElement>(null);
 
+  // Scroll to keep current step visible
   useEffect(() => {
-    setLoading(true);
-    fetch(`/api/files/${file}`)
-      .then(res => res.json())
-      .then(async (data) => {
-        const lines = (data.content as string).split('\n');
-        // Show context: 5 lines before to 5 lines after the citation range
-        const start = Math.max(0, lineStart - 6);
-        const end = Math.min(lines.length, lineEnd + 5);
-        const snippet = lines.slice(start, end).join('\n');
-
-        // Detect language from file extension
-        const ext = file.split('.').pop() || '';
-        const langMap: Record<string, string> = {
-          py: 'python', ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx',
-          go: 'go', rs: 'rust', java: 'java', kt: 'kotlin', cs: 'csharp',
-          swift: 'swift', rb: 'ruby', md: 'markdown', json: 'json', toml: 'toml',
-          yaml: 'yaml', yml: 'yaml', css: 'css', html: 'html',
-        };
-        const lang = langMap[ext] || 'text';
-
-        const highlighted = await codeToHtml(snippet, {
-          lang,
-          theme: 'github-light',
-        });
-
-        // Inject line numbers starting from actual file line
-        const lineNumbered = highlighted.replace(
-          /(<pre[^>]*><code[^>]*>)([\s\S]*?)(<\/code><\/pre>)/,
-          (_match, pre, code, post) => {
-            const codeLines = code.split('\n');
-            const numbered = codeLines.map((line: string, i: number) => {
-              const lineNum = start + i + 1;
-              const isHighlighted = lineNum >= lineStart && lineNum <= lineEnd;
-              return `<span class="line-row ${isHighlighted ? 'bg-yellow-100' : ''}"><span class="line-num text-gray-400 select-none pr-4 inline-block w-12 text-right text-xs">${lineNum}</span>${line}</span>`;
-            }).join('\n');
-            return `${pre}${numbered}${post}`;
-          }
-        );
-
-        setHtml(lineNumbered);
-      })
-      .catch(() => setHtml('<div class="p-4 text-red-500 font-mono text-sm">Failed to load file.</div>'))
-      .finally(() => setLoading(false));
-  }, [file, lineStart, lineEnd]);
-
-  if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center text-gray-400 font-mono text-sm animate-pulse">
-        Loading {file}...
-      </div>
-    );
-  }
+    if (currentNodeRef.current && containerRef.current) {
+      const container = containerRef.current;
+      const node = currentNodeRef.current;
+      // Center the current node in the container
+      const scrollTop = node.offsetTop - container.clientHeight / 2 + node.clientHeight / 2;
+      container.scrollTo({ top: scrollTop, behavior: 'smooth' });
+    }
+  }, [currentIndex]);
 
   return (
-    <div className="h-full flex flex-col">
-      <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 font-mono text-xs text-gray-600 flex items-center gap-2">
-        <IconMap2 size={12} />
-        {file}
-        <span className="text-gray-400">lines {lineStart}-{lineEnd}</span>
+    <div ref={containerRef} className="h-full overflow-auto p-6">
+      <div className="flex flex-col items-center">
+        {steps.map((step, index) => {
+          const isCompleted = index < currentIndex;
+          const isCurrent = index === currentIndex;
+
+          return (
+            <div key={index} className="flex flex-col items-center" ref={isCurrent ? currentNodeRef : undefined}>
+              {/* Node */}
+              <div
+                className={`
+                  relative flex items-center justify-center w-10 h-10 rounded-full border-2
+                  transition-all duration-300 shrink-0
+                  ${isCurrent 
+                    ? 'bg-blue-600 border-blue-600 text-white scale-110 shadow-lg' 
+                    : isCompleted 
+                      ? 'bg-green-500 border-green-500 text-white' 
+                      : 'bg-white border-gray-300 text-gray-400'
+                  }
+                `}
+              >
+                {isCompleted ? (
+                  <IconCircleCheck size={20} />
+                ) : isCurrent ? (
+                  <IconCircleFilled size={20} />
+                ) : (
+                  <span className="text-sm font-bold">{index + 1}</span>
+                )}
+              </div>
+
+              {/* Step title */}
+              <div
+                className={`
+                  mt-2 text-center max-w-[180px] text-sm font-medium transition-all duration-300
+                  ${isCurrent 
+                    ? 'text-blue-600 font-bold' 
+                    : isCompleted 
+                      ? 'text-green-600' 
+                      : 'text-gray-400'
+                  }
+                `}
+              >
+                {step.title}
+              </div>
+
+              {/* Connector line (except for last node) */}
+              {index < steps.length - 1 && (
+                <div className="flex flex-col items-center my-2">
+                  <div
+                    className={`
+                      w-0.5 h-12 transition-all duration-300
+                      ${index < currentIndex ? 'bg-green-500' : 'bg-gray-200'}
+                    `}
+                  />
+                  <svg
+                    className={`w-3 h-3 -mt-1 ${index < currentIndex ? 'text-green-500' : 'text-gray-200'}`}
+                    viewBox="0 0 10 10"
+                    fill="currentColor"
+                  >
+                    <polygon points="5,10 0,0 10,0" />
+                  </svg>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
-      <div
-        className="flex-1 overflow-auto text-sm [&_pre]:!bg-white [&_pre]:!m-0 [&_pre]:!p-4 [&_.line-row]:block [&_.line-row]:leading-relaxed"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
     </div>
   );
 }
@@ -104,6 +119,7 @@ export default function TourViewer({ onSelectFile }: TourViewerProps) {
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [loading, setLoading] = useState(true);
 
+  // Fetch tours
   useEffect(() => {
     fetch('/api/tours')
       .then(res => res.json())
@@ -137,7 +153,6 @@ export default function TourViewer({ onSelectFile }: TourViewerProps) {
   if (selectedTour) {
     const step = selectedTour.steps[currentStepIndex];
     const progress = ((currentStepIndex + 1) / selectedTour.steps.length) * 100;
-    const hasCitation = step.citation && step.citation.file;
 
     return (
       <div className="h-full flex flex-col bg-white">
@@ -166,10 +181,15 @@ export default function TourViewer({ onSelectFile }: TourViewerProps) {
             />
         </div>
 
-        {/* Split view: tour step left, code right */}
+        {/* Split view: step graph left, description right */}
         <div className="flex-1 flex overflow-hidden">
+          {/* Step graph */}
+          <div className="w-64 shrink-0 border-r border-black bg-gray-50">
+            <TourStepGraph steps={selectedTour.steps} currentIndex={currentStepIndex} />
+          </div>
+
           {/* Tour step content */}
-          <div className={`${hasCitation ? 'w-2/5' : 'w-full'} flex flex-col border-r border-gray-200`}>
+          <div className="flex-1 flex flex-col">
             <div className="flex-1 overflow-auto p-6 space-y-4">
               <div className="flex items-center gap-3">
                 <div className="w-7 h-7 rounded-full border border-black flex items-center justify-center font-bold text-xs bg-white shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
@@ -189,9 +209,8 @@ export default function TourViewer({ onSelectFile }: TourViewerProps) {
                   onClick={() => onSelectFile?.(step.citation!.file)}
                   className="p-2 bg-blue-50 border border-blue-100 font-mono text-xs text-blue-700 flex items-center gap-2 hover:bg-blue-100 transition-colors w-full"
                 >
-                  <IconMap2 size={14} />
-                  {step.citation.file}:{step.citation.line_start}-{step.citation.line_end}
-                  <span className="ml-auto text-blue-400 text-[10px]">Open in Files</span>
+                  <span className="truncate">{step.citation.file}:{step.citation.line_start}-{step.citation.line_end}</span>
+                  <span className="ml-auto text-blue-400 text-[10px] shrink-0">Open in Files</span>
                 </button>
               )}
 
@@ -235,17 +254,6 @@ export default function TourViewer({ onSelectFile }: TourViewerProps) {
               )}
             </div>
           </div>
-
-          {/* Code panel */}
-          {hasCitation && (
-            <div className="w-3/5 h-full">
-              <CodePanel
-                file={step.citation!.file}
-                lineStart={step.citation!.line_start}
-                lineEnd={step.citation!.line_end}
-              />
-            </div>
-          )}
         </div>
       </div>
     );

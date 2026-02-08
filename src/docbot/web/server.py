@@ -2727,7 +2727,7 @@ Generate {tour_count} guided tours as a JSON array. Each tour has:
 - "description": 1-sentence description
 - "steps": array of step objects, each with:
   - "title": step title
-  - "description": 2-3 sentence explanation of what to look at and why
+  - "description": Write a thorough explanation of 150-200 words. Cover: what this code does and why, key implementation details and patterns, important functions/classes, and developer tips or gotchas. Use markdown formatting with **bold** for emphasis.
   - "citation": object with:
     - "file": repo-relative file path
     - "line_start": starting line number (integer)
@@ -2767,10 +2767,23 @@ def _build_tour_prompt(index: DocsIndex) -> str:
     )
 
 
-def _normalize_tours(raw_tours: list[dict]) -> list[dict]:
+def _normalize_tours(raw_tours: list[dict], index: "DocsIndex | None" = None) -> list[dict]:
     """Normalize tours into the API shape expected by the webapp."""
+    # Build a map from file path to scope_id for quick lookup
+    file_to_scope: dict[str, str] = {}
+    if index:
+        for scope in index.scopes:
+            for path in scope.paths:
+                file_to_scope[path] = scope.scope_id
+    
     normalized: list[dict] = []
     for i, tour in enumerate(raw_tours):
+        tour_id = tour.get("tour_id", f"tour-{i + 1}")
+        # Try to extract scope_id from tour_id (e.g., "core_web-deep-dive" -> "core_web")
+        tour_scope_id = None
+        if "-deep-dive" in tour_id:
+            tour_scope_id = tour_id.replace("-deep-dive", "")
+        
         steps_out = []
         for step in tour.get("steps", []):
             citation = step.get("citation")
@@ -2780,17 +2793,23 @@ def _normalize_tours(raw_tours: list[dict]) -> list[dict]:
                     "line_start": int(step.get("line_start", 1) or 1),
                     "line_end": int(step.get("line_end", 1) or 1),
                 }
+            
+            # Determine scope_id for this step
+            file_path = citation.get("file", "")
+            scope_id = file_to_scope.get(file_path) or tour_scope_id
+            
             steps_out.append(
                 {
                     "title": step.get("title", "Step"),
                     "description": step.get("description", step.get("explanation", "")),
                     "citation": citation,
+                    "scope_id": scope_id,
                 }
             )
 
         normalized.append(
             {
-                "tour_id": tour.get("tour_id", f"tour-{i + 1}"),
+                "tour_id": tour_id,
                 "title": tour.get("title", f"Tour {i + 1}"),
                 "description": tour.get("description", ""),
                 "steps": steps_out,
@@ -2800,59 +2819,103 @@ def _normalize_tours(raw_tours: list[dict]) -> list[dict]:
 
 
 async def _generate_tours(index: DocsIndex) -> list[dict]:
-    """Generate tours via LLM or return a minimal fallback."""
-    if _llm_client is None:
-        steps = []
-        for s in index.scopes[:8]:
-            first_file = s.paths[0] if s.paths else ""
-            steps.append(
-                {
-                    "title": s.title,
-                    "description": s.summary[:200]
-                    if s.summary
-                    else f"Scope covering {len(s.paths)} file(s).",
-                    "citation": {"file": first_file, "line_start": 1, "line_end": 30},
-                }
-            )
-        return [
+    """Generate tours from scope summaries - fast and reliable."""
+    # Build tours directly from scope data for reliability and speed
+    overview_steps = []
+    for s in index.scopes[:8]:
+        first_file = s.paths[0] if s.paths else ""
+        # Use the full summary - don't truncate
+        description = s.summary or f"This scope covers {len(s.paths)} file(s) related to {s.title}."
+        overview_steps.append(
             {
-                "tour_id": "project-overview",
-                "title": "Project Overview",
-                "description": "A walkthrough of the main components.",
-                "steps": steps,
+                "title": s.title,
+                "description": description,
+                "citation": {"file": first_file, "line_start": 1, "line_end": 50},
             }
-        ]
+        )
+    
+    # Create a getting-started tour with the most important scopes
+    getting_started_steps = []
+    priority_keywords = ["entry", "cli", "main", "config", "model", "core"]
+    prioritized = sorted(
+        index.scopes,
+        key=lambda s: sum(1 for kw in priority_keywords if kw in s.scope_id.lower()),
+        reverse=True
+    )[:5]
+    
+    for s in prioritized:
+        first_file = s.paths[0] if s.paths else ""
+        description = s.summary or f"The {s.title} scope contains {len(s.paths)} file(s)."
+        getting_started_steps.append(
+            {
+                "title": s.title,
+                "description": description,
+                "citation": {"file": first_file, "line_start": 1, "line_end": 50},
+            }
+        )
+    
+    tours = [
+        {
+            "tour_id": "project-overview",
+            "title": "Project Overview",
+            "description": "A walkthrough of all major components in the codebase.",
+            "steps": overview_steps,
+        },
+        {
+            "tour_id": "getting-started",
+            "title": "Getting Started",
+            "description": "Key files and modules a new developer should read first.",
+            "steps": getting_started_steps,
+        },
+    ]
+    
+    # Add deep-dive tours for each scope
+    for s in index.scopes[:5]:
+        if not s.paths:
+            continue
+        
+        # Break down files in the scope into steps
+        scope_steps = []
+        # Limit to 6 key files to keep tour manageable
+        for file_path in s.paths[:6]:
+            # Get file-specific details if available
+            extraction = s.file_extractions.get(file_path)
+            
+            # Build a unique description for this file
+            desc_lines = [f"**{file_path.split('/')[-1]}** is part of the **{s.title}** scope."]
+            
+            if extraction and extraction.symbols:
+                # List top 5 symbols to give context on what's in the file
+                top_symbols = sorted(extraction.symbols, key=lambda x: len(x.name))[:5]
+                symbol_names = [f"`{sym.name}`" for sym in top_symbols]
+                desc_lines.append(f"It defines key symbols such as: {', '.join(symbol_names)}.")
+            elif extraction and extraction.imports:
+                 # Fallback to imports if no symbols
+                 top_imports = sorted(extraction.imports)[:5]
+                 import_names = [f"`{imp}`" for imp in top_imports]
+                 desc_lines.append(f"It imports modules such as: {', '.join(import_names)}.")
+            elif s.summary:
+                 # Fallback to scope summary if no extraction data, using smart truncation
+                 summary_snippet = _truncate_words(s.summary, 40)
+                 desc_lines.append(f"It contributes to the scope: {summary_snippet}")
+            else:
+                 desc_lines.append("It contains implementation details for this scope.")
 
-    prompt = _build_tour_prompt(index)
-    try:
-        raw = await _llm_client.ask(prompt, json_mode=True)
-        tours = json.loads(raw)
-        if isinstance(tours, dict) and "tours" in tours:
-            tours = tours["tours"]
-        if not isinstance(tours, list):
-            tours = [tours]
-        return _normalize_tours(tours)
-    except Exception as exc:
-        logger.error("Tour generation failed: %s", exc)
-        return [
-            {
-                "tour_id": "project-overview",
-                "title": "Project Overview",
-                "description": "Auto-generated overview (LLM generation failed).",
-                "steps": [
-                    {
-                        "title": s.title,
-                        "description": s.summary[:200] if s.summary else "",
-                        "citation": {
-                            "file": s.paths[0] if s.paths else "",
-                            "line_start": 1,
-                            "line_end": 30,
-                        },
-                    }
-                    for s in index.scopes[:6]
-                ],
-            }
-        ]
+            scope_steps.append({
+                "title": file_path.split("/")[-1],
+                "description": " ".join(desc_lines),
+                "citation": {"file": file_path, "line_start": 1, "line_end": 50},
+            })
+        
+        if scope_steps:
+            tours.append({
+                "tour_id": f"{s.scope_id}-deep-dive",
+                "title": f"{s.title} Deep Dive",
+                "description": f"Detailed walkthrough of {s.title} files.",
+                "steps": scope_steps,
+            })
+    
+    return _normalize_tours(tours, index)
 
 
 async def _load_tours() -> list[dict]:
@@ -2871,14 +2934,14 @@ async def _load_tours() -> list[dict]:
             loaded = json.loads(tours_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 loaded = [loaded]
-            _tours_cache = _normalize_tours(loaded)
+            _tours_cache = _normalize_tours(loaded, _load_index())
             return _tours_cache
         except (json.JSONDecodeError, OSError):
             pass
 
     index = _load_index()
     if index.tours:
-        _tours_cache = _normalize_tours([t.model_dump() for t in index.tours])
+        _tours_cache = _normalize_tours([t.model_dump() for t in index.tours], index)
         return _tours_cache
 
     tours = await _generate_tours(index)

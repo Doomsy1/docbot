@@ -67,7 +67,7 @@ export default function App() {
             <div className="h-full p-4">
               <FileViewer
                 filePath={selectedFile}
-                onSelectFile={(path) => setSelectedFile(path)}
+                onSelectFile={(path: string) => setSelectedFile(path)}
               />
             </div>
           )}

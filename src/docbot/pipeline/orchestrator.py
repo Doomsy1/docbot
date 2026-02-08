@@ -287,7 +287,7 @@ async def run_async(
     tracker: NoOpTracker | None = None,
     mock: bool = False,
     use_agents: bool = False,
-    agent_depth: int = 2,
+    agent_depth: int = 4,
     event_queue: asyncio.Queue | None = None,
 ) -> Path:
     """Full pipeline: scan -> plan -> explore -> reduce -> render.

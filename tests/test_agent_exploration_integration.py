@@ -112,3 +112,40 @@ def test_mimo_child_scopes_stay_within_parent_scope() -> None:
         assert child_scope.startswith(f"{parent_scope}/"), (
             f"child scope '{child_scope}' must stay within parent scope '{parent_scope}'"
         )
+
+
+@pytest.mark.skipif(not _integration_repo().exists(), reason="integration repo not found")
+def test_mimo_deep_search_reaches_double_digit_agents() -> None:
+    _load_dotenv(Path.cwd())
+    if not _has_openrouter_key():
+        pytest.skip("OPENROUTER_KEY not configured")
+
+    repo = _integration_repo()
+    scan = scan_repo(repo)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=30000)
+    cfg = DocbotConfig(
+        model="xiaomi/mimo-v2-flash",
+        agent_model="xiaomi/mimo-v2-flash",
+        use_agents=True,
+        agent_depth=4,
+        agent_max_depth=4,
+    )
+
+    asyncio.run(
+        run_agent_exploration(
+            repo_root=repo,
+            scan_result=scan,
+            config=cfg,
+            event_queue=queue,
+        )
+    )
+
+    events: list[dict] = []
+    while not queue.empty():
+        events.append(queue.get_nowait())
+
+    spawned = [e for e in events if e.get("type") == "agent_spawned"]
+    depths = {(e.get("depth") or 0) for e in spawned}
+
+    assert len(spawned) >= 10, "expected deep-search to produce at least 10 agents"
+    assert max(depths) >= 3, "expected delegation depth to reach at least 3"

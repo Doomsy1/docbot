@@ -184,9 +184,10 @@ export default function DiffViewer() {
   }
 
   return (
-    <div className="h-full flex flex-col bg-gray-50">
-      <div className="flex-1 overflow-auto">
-        <div className="max-w-4xl mx-auto p-8 space-y-6">
+    <div className="h-full flex bg-gray-50">
+      <div className="flex-1 overflow-hidden">
+        <div className="h-full overflow-auto">
+          <div className="max-w-4xl mx-auto p-8 space-y-6">
         {/* Header */}
         <div className="border-b border-black pb-4">
           <h1 className="text-2xl font-bold font-mono flex items-center gap-3">
@@ -435,63 +436,62 @@ export default function DiffViewer() {
             )}
           </>
         )}
+          </div>
         </div>
       </div>
 
-      {/* Chat Panel - fixed at bottom */}
       {diff && (
-        <div className="border-t border-black bg-white">
-          {/* Chat Messages */}
-          <div className="max-w-4xl mx-auto">
-            {chatMessages.length > 0 && (
-              <div className="max-h-64 overflow-y-auto p-4 space-y-3 bg-gray-50 border-b border-black">
-                {chatMessages.map((msg, i) => (
-                  <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[80%] px-4 py-2 text-sm border border-black ${
-                      msg.role === 'user'
-                        ? 'bg-gray-100'
-                        : 'bg-white text-gray-800'
-                    }`}>
-                      {msg.role === 'assistant' ? (
-                        <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: msg.content.replace(/\n/g, '<br/>') }} />
-                      ) : (
-                        msg.content
-                      )}
-                    </div>
-                  </div>
-                ))}
-                {chatLoading && (
-                  <div className="flex justify-start">
-                    <div className="bg-white border border-black px-4 py-2 text-sm text-gray-500">
-                      <IconCpu className="inline animate-spin mr-2" size={14} />
-                      Thinking...
-                    </div>
-                  </div>
-                )}
-                <div ref={chatEndRef} />
+        <div className="w-[570px] shrink-0 border-l border-black bg-white flex flex-col">
+          <div className="p-3 border-b border-black text-xs font-bold uppercase tracking-widest bg-gray-50">
+            Diff Chat
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-white">
+            {chatMessages.length === 0 && !chatLoading && (
+              <div className="text-xs text-gray-400 italic">No messages yet.</div>
+            )}
+            {chatMessages.map((msg, i) => (
+              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[80%] px-4 py-2 text-sm border border-black ${
+                  msg.role === 'user'
+                    ? 'bg-gray-100'
+                    : 'bg-white text-gray-800'
+                }`}>
+                  {msg.role === 'assistant' ? (
+                    <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: msg.content.replace(/\n/g, '<br/>') }} />
+                  ) : (
+                    msg.content
+                  )}
+                </div>
+              </div>
+            ))}
+            {chatLoading && (
+              <div className="flex justify-start">
+                <div className="bg-white border border-black px-4 py-2 text-sm text-gray-500">
+                  <IconCpu className="inline animate-spin mr-2" size={14} />
+                  Thinking...
+                </div>
               </div>
             )}
-
-            {/* Chat Input */}
-            <div className="p-4 flex gap-3 items-center">
-              <IconMessageCircle className="text-gray-400 shrink-0" size={20} />
-              <input
-                type="text"
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-                placeholder="Ask about the changes..."
-                className="flex-1 border border-black px-3 py-2 text-sm font-mono bg-white focus:ring-2 focus:ring-blue-500/10"
-                disabled={chatLoading}
-              />
-              <button
-                onClick={sendMessage}
-                disabled={chatLoading || !chatInput.trim()}
-                className="p-3 border border-black bg-white hover:bg-black hover:text-white transition-all disabled:opacity-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
-              >
-                {chatLoading ? <IconCpu className="animate-spin" size={18} /> : <IconSend size={18} />}
-              </button>
-            </div>
+            <div ref={chatEndRef} />
+          </div>
+          <div className="border-t border-black p-4 flex gap-3 items-center bg-white">
+            <IconMessageCircle className="text-gray-400 shrink-0" size={20} />
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
+              placeholder="Ask about the changes..."
+              className="flex-1 border border-black px-3 py-2 text-sm font-mono bg-white focus:ring-2 focus:ring-blue-500/10"
+              disabled={chatLoading}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={chatLoading || !chatInput.trim()}
+              className="p-3 border border-black bg-white hover:bg-black hover:text-white transition-all disabled:opacity-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
+            >
+              {chatLoading ? <IconCpu className="animate-spin" size={18} /> : <IconSend size={18} />}
+            </button>
           </div>
         </div>
       )}

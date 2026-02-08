@@ -18,7 +18,8 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(powershell.exe -Command \"Get-Process -Name docbot -ErrorAction SilentlyContinue | Stop-Process -Force; Write-Host ''killed''\")",
-      "Bash(C:/Users/kevin/AppData/Roaming/Python/Python314/Scripts/docbot.exe serve C:/Users/kevin/Documents/GitHub/docbot/docbot_data/20260207T200959Z_28752c)"
+      "Bash(C:/Users/kevin/AppData/Roaming/Python/Python314/Scripts/docbot.exe serve C:/Users/kevin/Documents/GitHub/docbot/docbot_data/20260207T200959Z_28752c)",
+      "Bash(npm run dev:*)"
     ]
   }
 }

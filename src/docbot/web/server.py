@@ -15,8 +15,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .llm import LLMClient
-from .models import Citation, DocsIndex
+from ..llm import LLMClient
+from ..models import Citation, DocsIndex
 from .search import SearchIndex
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ _index_cache: DocsIndex | None = None
 _search_index_cache: SearchIndex | None = None
 _llm_client: LLMClient | None = None
 _tours_cache: list[dict] | None = None
+_service_details_cache: dict | None = None
 _explore_graph_cache: dict | None = None
 
 
@@ -1995,6 +1996,65 @@ def _resolve_import_to_file(
     return None
 
 
+@app.get("/api/service-details")
+async def get_service_details() -> JSONResponse:
+    """Return LLM-generated usage descriptions for each external service per scope."""
+    global _service_details_cache
+    if _service_details_cache is not None:
+        return JSONResponse(_service_details_cache)
+
+    index = _load_index()
+    external_nodes, external_edges = _detect_external_services(index)
+
+    if not external_nodes:
+        _service_details_cache = {}
+        return JSONResponse({})
+
+    scope_summaries: dict[str, str] = {}
+    for s in index.scopes:
+        scope_summaries[s.scope_id] = s.summary or s.title
+
+    service_contexts: list[str] = []
+    for node in external_nodes:
+        edges = [e for e in external_edges if e["to"] == node["id"]]
+        scope_parts = []
+        for edge in edges:
+            scope_id = edge["from"]
+            imports = edge.get("imports", [])
+            summary = scope_summaries.get(scope_id, scope_id)
+            scope_parts.append(
+                f'  - scope "{scope_id}": imports {imports}. Scope summary: "{summary}"'
+            )
+        service_contexts.append(
+            f'Service: {node["title"]} (id: {node["id"]})\n'
+            + "\n".join(scope_parts)
+        )
+
+    prompt = (
+        "You are a technical documentation writer. For each external service and scope pair below, "
+        "write a 1-2 sentence explanation of HOW and WHY that scope uses the service. "
+        "Be specific — reference the actual libraries/imports and what they enable. "
+        "Use the scope summary to understand the scope's purpose.\n\n"
+        + "\n\n".join(service_contexts)
+        + '\n\nRespond with JSON: {"<service_id>": {"<scope_id>": "<explanation>", ...}, ...}\n'
+        "Only include the JSON object, no other text."
+    )
+
+    if _llm_client is None:
+        _service_details_cache = {}
+        return JSONResponse({})
+
+    try:
+        raw = await _llm_client.ask(prompt, json_mode=True)
+        result = json.loads(raw)
+        _service_details_cache = result
+        return JSONResponse(result)
+    except Exception as exc:
+        logger.warning("Failed to generate service details: %s", exc)
+        _service_details_cache = {}
+        return JSONResponse({})
+
+
 @app.get("/api/files/{file_path:path}")
 async def get_file(file_path: str) -> JSONResponse:
     """Read a source file from the repository."""
@@ -2203,6 +2263,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     citations: list[Citation] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -2261,7 +2322,43 @@ async def chat(req: ChatRequest) -> ChatResponse:
         if req.concise:
             answer = _make_scannable_markdown(answer)
             answer = _truncate_words(answer, req.max_words or 180)
-        return ChatResponse(answer=answer, citations=[r.citation for r in results])
+
+        # Generate follow-up suggestions
+        suggestions: list[str] = []
+        try:
+            scope_titles = [s.title for s in index.scopes[:10]]
+            followup_prompt = (
+                f"The user asked: \"{question}\"\n"
+                f"The answer discussed: {answer[:300]}...\n\n"
+                f"Available scopes in this codebase: {', '.join(scope_titles)}\n\n"
+                "Generate exactly 3 diverse follow-up questions the user might ask next. "
+                "Mix different question types:\n"
+                "- How/why something works\n"
+                "- Comparison or relationship between components\n"
+                "- Debugging or troubleshooting\n"
+                "- Architecture or design decisions\n"
+                "- Code location or file structure\n"
+                "- Data flow or request lifecycle\n\n"
+                'Respond with ONLY a JSON array of 3 strings. Example: ["question 1", "question 2", "question 3"]'
+            )
+            raw = await _llm_client.ask(followup_prompt)
+            # Extract JSON array from response (model may wrap in markdown)
+            cleaned = raw.strip()
+            if "```" in cleaned:
+                # Strip markdown code fences
+                cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+                cleaned = cleaned.replace("```", "").strip()
+            # Find the JSON array in the response
+            start = cleaned.find("[")
+            end = cleaned.rfind("]")
+            if start != -1 and end != -1:
+                parsed = json.loads(cleaned[start : end + 1])
+                if isinstance(parsed, list):
+                    suggestions = [str(s) for s in parsed[:3]]
+        except Exception:
+            pass
+
+        return ChatResponse(answer=answer, citations=[r.citation for r in results], suggestions=suggestions)
     except Exception as exc:
         logger.error("Chat LLM error: %s", exc)
         raise HTTPException(status_code=500, detail=f"LLM Error: {exc}") from exc
@@ -2482,18 +2579,19 @@ def start_server(
     import uvicorn
     from fastapi.staticfiles import StaticFiles
 
-    global _run_dir, _index_cache, _search_index_cache, _llm_client, _tours_cache, _explore_graph_cache
+    global _run_dir, _index_cache, _search_index_cache, _llm_client, _tours_cache, _service_details_cache, _explore_graph_cache
     _run_dir = run_dir.resolve()
     _index_cache = None
     _search_index_cache = None
     _tours_cache = None
+    _service_details_cache = None
     _explore_graph_cache = None
     _llm_client = llm_client
 
     here = Path(__file__).parent.resolve()
     potential_dists = [
         here / "web_dist",  # Bundled package
-        here.parents[1] / "webapp" / "dist",  # Editable/source checkout
+        here.parents[2] / "webapp" / "dist",  # Editable/source checkout (src/docbot/web -> repo root)
     ]
 
     dist_dir = None

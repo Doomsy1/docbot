@@ -4,7 +4,14 @@
       "Bash(tasklist:*)",
       "Bash(taskkill:*)",
       "Bash(curl:*)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run build:*)",
+      "Bash(\"C:/Users/kevin/AppData/Roaming/Python/Python314/Scripts/docbot.exe\" serve \"C:/Users/kevin/Documents/GitHub/docbot/docbot_data/20260207T200959Z_28752c\" --port 8000)",
+      "Bash(ls:*)",
+      "Bash(node -e:*)",
+      "Bash(npx vite build:*)",
+      "Bash(timeout 10 npx vite:*)"
     ]
   }
 }

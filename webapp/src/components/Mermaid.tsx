@@ -24,7 +24,9 @@ function sanitizeMermaid(src: string): string {
     // Strip inline %% comments (Mermaid only supports whole-line comments)
     .replace(/^(.+?)\s+%%.*$/gm, '$1')
     // Fix node labels with unquoted parentheses: A[Compose Video (and audio)] -> A["Compose Video (and audio)"]
-    .replace(/(\[)([^\]"]*\([^\]]*\))(\])/g, '$1"$2"$3');
+    .replace(/(\[)([^\]"]*\([^\]]*\))(\])/g, '$1"$2"$3')
+    // Fix edge labels with spaces inside pipes: -->| "label" | -> -->|label|
+    .replace(/-->\|\s*"?([^"|]*)"?\s*\|/g, '-->|$1|');
 }
 
 export default function Mermaid({ chart }: MermaidProps) {
@@ -68,9 +70,9 @@ export default function Mermaid({ chart }: MermaidProps) {
   }
 
   return (
-    <div 
-        className="mermaid my-4 flex justify-center bg-white border border-black p-4 overflow-x-auto shadow-[4px_4px_0px_0px_rgba(0,0,0,0.1)]" 
-        ref={ref} 
+    <div
+        className="mermaid-container my-4 flex justify-center bg-white border border-black p-4 overflow-x-auto shadow-[4px_4px_0px_0px_rgba(0,0,0,0.1)]"
+        ref={ref}
     />
   );
 }

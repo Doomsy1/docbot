@@ -12,7 +12,7 @@ import asyncio
 from pathlib import Path
 
 from ..models import DocsIndex, ScopePlan, ScopeResult, SourceFile
-from ..pipeline.scanner import ScanResult
+from .scanner import ScanResult
 
 # -- Mock scope definitions ---------------------------------------------------
 

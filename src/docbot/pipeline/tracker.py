@@ -22,11 +22,14 @@ class AgentNode:
     id: str
     name: str
     state: AgentState = AgentState.pending
+    agent_type: str = "stage"
     parent_id: str | None = None
     children_ids: list[str] = field(default_factory=list)
     started_at: float | None = None
     finished_at: float | None = None
     detail: str = ""
+    llm_text: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 class PipelineTracker:
@@ -41,9 +44,20 @@ class PipelineTracker:
         self._start_time: float = time.time()
         self._run_id: str = ""
 
-    def add_node(self, node_id: str, name: str, parent_id: str | None = None) -> None:
+    def add_node(
+        self,
+        node_id: str,
+        name: str,
+        parent_id: str | None = None,
+        agent_type: str = "stage",
+    ) -> None:
         with self._lock:
-            node = AgentNode(id=node_id, name=name, parent_id=parent_id)
+            node = AgentNode(
+                id=node_id,
+                name=name,
+                parent_id=parent_id,
+                agent_type=agent_type,
+            )
             self._nodes[node_id] = node
             if parent_id is None:
                 self._root_id = node_id
@@ -57,6 +71,7 @@ class PipelineTracker:
                     "node_id": node_id,
                     "name": name,
                     "parent_id": parent_id,
+                    "agent_type": agent_type,
                 }
             )
 
@@ -87,27 +102,7 @@ class PipelineTracker:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            now = time.monotonic()
-            nodes = []
-            for n in self._nodes.values():
-                if n.finished_at and n.started_at:
-                    elapsed = round(n.finished_at - n.started_at, 1)
-                elif n.started_at:
-                    elapsed = round(now - n.started_at, 1)
-                else:
-                    elapsed = 0.0
-                nodes.append(
-                    {
-                        "id": n.id,
-                        "name": n.name,
-                        "state": n.state.value,
-                        "parent": n.parent_id,
-                        "children": list(n.children_ids),
-                        "elapsed": elapsed,
-                        "detail": n.detail,
-                    }
-                )
-            return {"nodes": nodes, "root": self._root_id}
+            return self._snapshot_unlocked()
 
     def set_run_id(self, run_id: str) -> None:
         """Set the run ID for this tracker (used in export_events)."""
@@ -122,13 +117,93 @@ class PipelineTracker:
                 "run_id": self._run_id,
                 "total_duration": total_duration,
                 "events": list(self._events),  # Copy to avoid mutation
+                "snapshot": self._snapshot_unlocked(),
             }
+
+    def _snapshot_unlocked(self) -> dict[str, Any]:
+        now = time.monotonic()
+        nodes = []
+        for n in self._nodes.values():
+            if n.finished_at and n.started_at:
+                elapsed = round(n.finished_at - n.started_at, 1)
+            elif n.started_at:
+                elapsed = round(now - n.started_at, 1)
+            else:
+                elapsed = 0.0
+            nodes.append(
+                {
+                    "id": n.id,
+                    "name": n.name,
+                    "agent_type": n.agent_type,
+                    "state": n.state.value,
+                    "parent": n.parent_id,
+                    "children": list(n.children_ids),
+                    "elapsed": elapsed,
+                    "detail": n.detail,
+                    "llm_text": n.llm_text,
+                    "tool_calls": list(n.tool_calls),
+                }
+            )
+        return {"nodes": nodes, "root": self._root_id}
+
+    def append_text(self, node_id: str, text: str) -> None:
+        """Append streamed LLM text to a node and record an event."""
+        with self._lock:
+            node = self._nodes.get(node_id)
+            if node is None or not text:
+                return
+            node.llm_text = (node.llm_text + text)[-12000:]
+            self._events.append(
+                {
+                    "type": "text",
+                    "timestamp": time.time() - self._start_time,
+                    "node_id": node_id,
+                    "text": text,
+                }
+            )
+
+    def record_tool_call(
+        self,
+        node_id: str,
+        tool_name: str,
+        args: dict[str, Any],
+        result_preview: str,
+    ) -> None:
+        """Record a tool call against a node and emit an event."""
+        with self._lock:
+            node = self._nodes.get(node_id)
+            if node is None:
+                return
+            call = {
+                "name": tool_name,
+                "args": args,
+                "result_preview": result_preview,
+            }
+            node.tool_calls.append(call)
+            if len(node.tool_calls) > 50:
+                node.tool_calls = node.tool_calls[-50:]
+            self._events.append(
+                {
+                    "type": "tool_call",
+                    "timestamp": time.time() - self._start_time,
+                    "node_id": node_id,
+                    "tool": tool_name,
+                    "args": args,
+                    "result_preview": result_preview,
+                }
+            )
 
 
 class NoOpTracker:
     """Drop-in replacement that does nothing; used when --visualize is off."""
 
-    def add_node(self, node_id: str, name: str, parent_id: str | None = None) -> None:
+    def add_node(
+        self,
+        node_id: str,
+        name: str,
+        parent_id: str | None = None,
+        agent_type: str = "stage",
+    ) -> None:
         pass
 
     def set_state(
@@ -144,3 +219,15 @@ class NoOpTracker:
 
     def export_events(self) -> dict:
         return {"run_id": "", "total_duration": 0.0, "events": []}
+
+    def append_text(self, node_id: str, text: str) -> None:
+        pass
+
+    def record_tool_call(
+        self,
+        node_id: str,
+        tool_name: str,
+        args: dict[str, Any],
+        result_preview: str,
+    ) -> None:
+        pass

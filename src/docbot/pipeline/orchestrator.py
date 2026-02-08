@@ -40,17 +40,12 @@ async def _explore_one(
     tracker: NoOpTracker | None = None,
     node_id: str = "",
     _work_fn=None,
-    use_agents: bool = False,
-    agent_depth: int = 2,
 ) -> ScopeResult:
     """Run a single scope exploration under concurrency + timeout control.
 
     When *_work_fn* is provided (an async callable accepting a ScopePlan and
     returning a ScopeResult), it replaces the real explore_scope + LLM call.
     This lets ``--mock-viz`` reuse the semaphore/timeout/tracker logic.
-    
-    When *use_agents* is True, uses recursive agent exploration instead of
-    the simpler enrich_scope_with_llm.
     """
     if tracker and node_id:
         tracker.set_state(node_id, AgentState.waiting, "awaiting semaphore")
@@ -66,29 +61,11 @@ async def _explore_one(
                     timeout=timeout,
                 )
                 if llm_client and result.error is None:
-                    if use_agents:
-                        if tracker and node_id:
-                            tracker.set_state(node_id, AgentState.running, "agent exploration")
-                        from .explorer import explore_scope_with_agents
-                        # Re-run with agents (includes extraction + agent loop)
-                        result = await explore_scope_with_agents(
-                            plan,
-                            repo_root,
-                            llm_client,
-                            agent_depth,
-                            tracker=tracker,
-                            tracker_node_id=node_id,
-                        )
-                    else:
-                        if tracker and node_id:
-                            tracker.set_state(node_id, AgentState.running, "llm summary")
-                        result = await enrich_scope_with_llm(result, repo_root, llm_client)
+                    if tracker and node_id:
+                        tracker.set_state(node_id, AgentState.running, "llm summary")
+                    result = await enrich_scope_with_llm(result, repo_root, llm_client)
             if tracker and node_id:
-                detail = "ok"
-                if use_agents and llm_client and result.error is None:
-                    detail = "agent summary complete"
-                elif llm_client and result.error is None:
-                    detail = "llm summary complete"
+                detail = "llm summary complete" if llm_client and result.error is None else "ok"
                 tracker.set_state(node_id, AgentState.done, detail)
             return result
         except asyncio.TimeoutError:
@@ -120,7 +97,7 @@ async def _run_scan(
     console.print(f"[bold]Scanning[/bold] {repo_path} ...")
     tracker.set_state("scanner", AgentState.running)
     if mock:
-        from ..viz import mock_viz
+        from . import mock as mock_viz
         await asyncio.sleep(1.5)
         scan = mock_viz.mock_scan(repo_path)
     else:
@@ -155,7 +132,7 @@ async def _run_plan(
     console.print("[bold]Planning[/bold] scopes ...")
     tracker.set_state("planner", AgentState.running)
     if mock:
-        from ..viz import mock_viz
+        from . import mock as mock_viz
         await asyncio.sleep(2.0)
         plans = mock_viz.mock_plans()
     else:
@@ -178,8 +155,6 @@ async def _run_explore(
     llm_client: LLMClient | None,
     tracker: NoOpTracker,
     mock: bool = False,
-    use_agents: bool = False,
-    agent_depth: int = 2,
 ) -> list[ScopeResult]:
     """Stage 3: Explore scopes in parallel."""
     using_llm = llm_client is not None
@@ -199,21 +174,17 @@ async def _run_explore(
         console=console,
     ) as progress:
         label = "Exploring scopes"
-        if use_agents:
-            label += " (agent mode)"
-        elif using_llm:
+        if using_llm:
             label += " (+ LLM summaries)"
         task = progress.add_task(label, total=len(plans))
 
         async def _run_and_track(plan: ScopePlan) -> ScopeResult:
-            from ..viz import mock_viz
+            from . import mock as mock_viz
             nid = f"explorer.{plan.scope_id}"
             result = await _explore_one(
                 plan, repo_path, sem, timeout, llm_client,
                 tracker=tracker, node_id=nid,
                 _work_fn=mock_viz.mock_explore_work if mock else None,
-                use_agents=use_agents,
-                agent_depth=agent_depth,
             )
             progress.advance(task)
             return result
@@ -243,7 +214,7 @@ async def _run_reduce(
         tracker.set_state("reducer.analysis", AgentState.running)
         tracker.set_state("reducer.mermaid", AgentState.running)
         if mock:
-            from ..viz import mock_viz
+            from . import mock as mock_viz
             await asyncio.sleep(2.5)
             docs_index = mock_viz.mock_docs_index(scope_results, repo_path)
         else:
@@ -317,6 +288,7 @@ async def run_async(
     mock: bool = False,
     use_agents: bool = False,
     agent_depth: int = 2,
+    event_queue: asyncio.Queue | None = None,
 ) -> Path:
     """Full pipeline: scan -> plan -> explore -> reduce -> render.
 
@@ -331,9 +303,9 @@ async def run_async(
     state transitions are driven by the same code paths used for real runs.
     """
     if mock:
-        from ..viz import mock_viz
+        from . import mock as mock_viz
         import tempfile
-        await asyncio.sleep(3.0)  # let the browser load D3 from CDN
+        await asyncio.sleep(1.0)  # brief pause to let webapp connect
         using_llm = True  # so we exercise the full tracker tree
         timeout = mock_viz.MOCK_TIMEOUT
         run_dir = Path(tempfile.mkdtemp(prefix="docbot_mock_"))
@@ -368,8 +340,13 @@ async def run_async(
     # -- Build tracker tree skeleton --
     tracker.add_node("orchestrator", "Orchestrator")
     tracker.add_node("scanner", "Scanner", "orchestrator")
-    tracker.add_node("planner", "Planner", "orchestrator")
-    tracker.add_node("explorer_hub", "Explorer Hub", "orchestrator")
+    if use_agents and llm_client:
+        tracker.add_node("standard_track", "Standard Track", "orchestrator")
+        tracker.add_node("planner", "Planner", "standard_track")
+        tracker.add_node("explorer_hub", "Explorer Hub", "standard_track")
+    else:
+        tracker.add_node("planner", "Planner", "orchestrator")
+        tracker.add_node("explorer_hub", "Explorer Hub", "orchestrator")
     tracker.add_node("reducer", "Reducer", "orchestrator")
     tracker.add_node("renderer", "Renderer", "orchestrator")
 
@@ -383,8 +360,34 @@ async def run_async(
         tracker.set_state("orchestrator", AgentState.done)
         return run_dir
 
-    # 2. Plan (+ LLM refinement)
-    plans = await _run_plan(scan, max_scopes, llm_client, tracker, mock, meta if not mock else None)
+    if use_agents and llm_client:
+        console.print(f"  [bold cyan]Agent mode enabled[/bold cyan] (max_depth={agent_depth})")
+        tracker.set_state("standard_track", AgentState.running)
+        cfg = DocbotConfig(
+            max_scopes=max_scopes,
+            concurrency=concurrency,
+            timeout=timeout,
+            use_agents=True,
+            agent_depth=agent_depth,
+            agent_max_depth=agent_depth,
+            no_llm=False,
+        )
+        (plans, scope_results), notepad_store = await asyncio.gather(
+            _standard_track(scan, repo_path, cfg, llm_client, tracker, meta if not mock else None),
+            _agent_track(scan, repo_path, cfg, tracker, event_queue),
+        )
+        tracker.set_state("standard_track", AgentState.done)
+        scope_results = _merge_agent_findings(scope_results, notepad_store)
+        if not mock:
+            _persist_notepad(notepad_store, run_dir)
+    else:
+        # 2. Plan (+ LLM refinement)
+        plans = await _run_plan(scan, max_scopes, llm_client, tracker, mock, meta if not mock else None)
+
+        # 3. Explore in parallel (+ LLM summaries)
+        scope_results = await _run_explore(
+            plans, repo_path, concurrency, timeout, llm_client, tracker, mock,
+        )
 
     if not mock:
         plan_path = run_dir / "plan.json"
@@ -392,15 +395,6 @@ async def run_async(
             json.dumps([p.model_dump() for p in plans], indent=2),
             encoding="utf-8",
         )
-
-    # 3. Explore in parallel (+ LLM summaries or agent mode)
-    if use_agents and llm_client and not mock:
-        console.print(f"  [bold cyan]Agent mode enabled[/bold cyan] (depth={agent_depth})")
-    scope_results = await _run_explore(
-        plans, repo_path, concurrency, timeout, llm_client, tracker, mock,
-        use_agents=use_agents,
-        agent_depth=agent_depth,
-    )
 
     if not mock:
         scopes_dir = run_dir / "scopes"
@@ -455,8 +449,6 @@ async def _standard_track(
     scope_results = await _run_explore(
         plans, repo_path, config.concurrency, config.timeout, llm_client, tracker,
         mock=False,
-        use_agents=False,
-        agent_depth=config.agent_depth,
     )
     return plans, scope_results
 
@@ -616,8 +608,6 @@ async def generate_async(
         scope_results = await _run_explore(
             plans, repo_path, config.concurrency, config.timeout, llm_client, tracker,
             mock=False,
-            use_agents=False,
-            agent_depth=config.agent_depth,
         )
         tracker.set_state("standard_track", AgentState.done)
 
@@ -878,8 +868,6 @@ async def update_async(
     affected_results = await _run_explore(
         affected_plans, repo_path, config.concurrency, config.timeout, llm_client, tracker,
         mock=False,
-        use_agents=config.use_agents,
-        agent_depth=config.agent_depth,
     )
     
     # Save updated scope results

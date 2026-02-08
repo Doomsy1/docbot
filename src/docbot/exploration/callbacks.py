@@ -64,11 +64,26 @@ class AgentEventCallback(AsyncCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Called for each token the LLM streams back."""
+        if not token:
+            return
         await self._put({
             "type": "llm_token",
             "agent_id": self.agent_id,
             "token": token,
         })
+
+    async def on_chat_model_start(
+        self,
+        serialized: dict[str, Any],
+        messages: list[list[Any]],
+        **kwargs: Any,
+    ) -> None:
+        """Called when a chat model run starts.
+
+        AsyncCallbackHandler defaults can raise NotImplementedError when this
+        hook is unimplemented; treat as a no-op for our event stream.
+        """
+        return None
 
     # -- Tool events ----------------------------------------------------------
 

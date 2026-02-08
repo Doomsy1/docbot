@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 if TYPE_CHECKING:
     from .store import NotepadStore
@@ -41,6 +41,9 @@ def create_tools(
     store: "NotepadStore",
     event_queue: asyncio.Queue | None = None,
     agent_id: str = "root",
+    delegate_fn: Callable[[str, str, str, str], Awaitable[str]] | None = None,
+    current_depth: int = 0,
+    max_depth: int = 0,
 ) -> list:
     """Build the set of LangChain tools bound to the given runtime state.
 
@@ -211,36 +214,40 @@ def create_tools(
     # 6. delegate
     # ------------------------------------------------------------------
     @tool
-    def delegate(target: str, name: str, purpose: str, context: str) -> str:
+    async def delegate(
+        target: str,
+        purpose: str,
+        name: str = "",
+        context: str = "",
+    ) -> str:
         """Spawn a child agent to explore a subdirectory or module.
 
         Use this when a part of the codebase is large or complex enough
         to warrant dedicated exploration by a separate agent.
 
-        Parameters
-        ----------
-        target:
-            The subdirectory or module path to explore, relative to the
-            repository root (e.g. ``src/auth``, ``lib/utils``).
-        name:
-            A short, descriptive display name for the child agent
-            (e.g. ``"Auth Module Explorer"``).
-        purpose:
-            A concise explanation of why this child agent is being
-            spawned and what it should focus on.
-        context:
-            Condensed knowledge from the parent agent that the child
-            should use as starting context. Include relevant findings,
-            patterns noticed, and specific questions to investigate.
-
-        Note: delegation is handled at the graph level. This tool
-        records the delegation request and the graph runner wires the
-        actual child agent invocation.
+        Required args:
+        - target: subdirectory/module path relative to repo root.
+        - purpose: what the child should focus on.
+        Optional args:
+        - name: child label (auto-generated when omitted).
+        - context: condensed parent context for the child.
         """
+        if not name:
+            name = f"delegate:{target}"
+        if current_depth >= max_depth:
+            return (
+                f"Delegation blocked: already at maximum depth "
+                f"({current_depth}/{max_depth})."
+            )
+        if delegate_fn is None:
+            return (
+                f"Delegation requested for '{name}' on '{target}', but no "
+                f"delegate handler is configured."
+            )
+        summary = await delegate_fn(target, name, purpose, context)
         return (
-            f"Delegation registered. A child agent '{name}' will explore "
-            f"'{target}' with purpose: {purpose}. "
-            f"(Delegation is executed at the graph level.)"
+            f"Delegated to child agent '{name}' for '{target}'. "
+            f"Child summary: {summary[:600]}"
         )
 
     # ------------------------------------------------------------------

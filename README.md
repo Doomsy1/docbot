@@ -50,6 +50,8 @@ and code navigation.
 | `docbot config [key] [value]` | View or modify `.docbot/config.toml` settings                   |
 | `docbot hook install`         | Install post-commit git hook for automatic doc updates          |
 | `docbot hook uninstall`       | Remove the docbot git hook                                      |
+| `docbot diff`                 | Show changes between documentation snapshots                    |
+| `docbot replay [run_id]`     | Replay a past pipeline run visualization                        |
 
 ## Options
 
@@ -62,6 +64,10 @@ Flags for `docbot generate` (override config.toml values for that invocation):
 | `--concurrency / -j`  | Parallel explorer workers (default: 4).               |
 | `--timeout / -t`      | Per-scope timeout in seconds (default: 120).          |
 | `--max-scopes`        | Maximum number of documentation scopes (default: 20). |
+| `--agents`            | Enable recursive LangGraph agent exploration.         |
+| `--agent-depth`       | Max recursion depth for agents (default: 8).          |
+| `--serve`             | Start live webapp during generation for visualization.|
+| `-p` / `--port`       | Webapp port when using --serve (default: 8000).       |
 
 ## How It Works
 
@@ -103,23 +109,42 @@ The Vite dev server at http://localhost:5173 proxies API calls to the FastAPI ba
 
 ```
 src/docbot/
-  cli.py              # Typer CLI entry point
-  models.py           # Pydantic data models
-  llm.py              # Async OpenRouter LLM client
-  orchestrator.py     # 5-stage pipeline coordinator
-  scanner.py          # Stage 1: file discovery
-  planner.py          # Stage 2: scope planning
-  explorer.py         # Stage 3: per-scope extraction + LLM enrichment
-  reducer.py          # Stage 4: cross-scope analysis + dependency graph
-  renderer.py         # Stage 5: doc generation
-  server.py           # FastAPI backend
-  search.py           # BM25 search index
-  project.py          # .docbot/ directory management
-  git_utils.py        # Git CLI wrappers
-  hooks.py            # Git hook install/uninstall
-  tracker.py          # Pipeline state/event tracking (webapp pipeline replay)
-  extractors/         # Language-specific extraction (tree-sitter + LLM fallback)
-webapp/               # React SPA (Vite + ReactFlow + Tailwind)
+  cli.py                # Typer CLI entry point
+  models.py             # Pydantic data models
+  llm.py                # Async OpenRouter LLM client
+  pipeline/             # 5-stage async documentation pipeline
+    orchestrator.py     #   Pipeline coordinator
+    scanner.py          #   Stage 1: file discovery
+    planner.py          #   Stage 2: scope planning
+    explorer.py         #   Stage 3: per-scope extraction + LLM enrichment
+    reducer.py          #   Stage 4: cross-scope analysis + dependency graph
+    renderer.py         #   Stage 5: doc generation
+    tracker.py          #   Pipeline state/event tracking
+  exploration/          # LangGraph-based recursive agent system
+    graph.py            #   StateGraph definition (ReAct loop)
+    tools.py            #   Agent tools (read_file, delegate, notepad, etc.)
+    store.py            #   NotepadStore for cross-agent knowledge sharing
+    prompts.py          #   Agent system prompt
+    callbacks.py        #   SSE event bridge (AsyncCallbackHandler)
+  extractors/           # Language-specific extraction (tree-sitter + LLM fallback)
+  git/                  # Git integration layer
+    project.py          #   .docbot/ directory management
+    utils.py            #   Git CLI wrappers
+    hooks.py            #   Git hook install/uninstall
+    history.py          #   Documentation snapshots
+    diff.py             #   Snapshot comparison
+  web/                  # Web serving layer
+    server.py           #   FastAPI backend + SSE endpoints
+    search.py           #   BM25 search index
+  agents/               # (deprecated) Old agent system -- use exploration/ instead
+webapp/                 # React SPA (Vite + ReactFlow + Tailwind)
+  src/features/
+    exploration/        #   Live agent visualization (Force Graph + SSE)
+    pipeline/           #   Pipeline replay/dashboard
+    architecture/       #   System graph
+    chat/               #   AI chat panel
+    files/              #   Code viewer
+    tours/              #   Guided tours
 ```
 
 ## Stack
@@ -127,7 +152,8 @@ webapp/               # React SPA (Vite + ReactFlow + Tailwind)
 -   **Core**: Python 3.11+, Typer, Pydantic, AsyncIO
 -   **AI**: OpenRouter API (any model)
 -   **Extraction**: tree-sitter (10 languages) + LLM fallback (universal)
--   **Webapp**: React + Vite + ReactFlow + Tailwind (frontend), FastAPI + Uvicorn (backend)
+-   **Agent Exploration**: LangGraph + LangChain (recursive tool-using agents)
+-   **Webapp**: React + Vite + ReactFlow + react-force-graph-2d + Tailwind (frontend), FastAPI + Uvicorn + SSE (backend)
 
 ## Architecture
 
@@ -136,14 +162,20 @@ graph TD
     CLI --> Orchestrator
     Orchestrator --> Scanner
     Scanner --> ScanResult
-    Orchestrator --> Planner
+    Orchestrator --> StandardTrack[Standard Track]
+    StandardTrack --> Planner
     Planner --> ScopePlans
-    Orchestrator --> Explorer
+    StandardTrack --> Explorer
     Explorer --> ScopeResults
-    Orchestrator --> Reducer
+    Orchestrator --> AgentTrack[Agent Track]
+    AgentTrack --> LangGraph[LangGraph Agents]
+    LangGraph --> NotepadStore[Shared Notepad]
+    Orchestrator --> Merge[Merge Findings]
+    Merge --> Reducer
     Reducer --> DocsIndex
     Orchestrator --> Renderer
     Renderer --> Output[Markdown + HTML]
     CLI --> Server[FastAPI Server]
+    Server --> SSE[SSE Agent Stream]
     Server --> Webapp[React SPA]
 ```

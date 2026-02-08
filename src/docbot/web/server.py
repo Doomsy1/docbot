@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from ..llm import LLMClient
 from ..models import Citation, DocsIndex
+from ..pipeline.tracker import PipelineTracker
 from .search import SearchIndex
 
 logger = logging.getLogger(__name__)
@@ -29,14 +30,42 @@ _service_details_cache: dict | None = None
 
 # Live agent event queue -- set when running with --serve --agents.
 _live_event_queue: asyncio.Queue | None = None
+_live_pipeline_tracker: PipelineTracker | None = None
 # Snapshot of current agent states for late-joining clients.
 _agent_state_snapshot: dict = {"agents": {}, "notepads": {}}
+
+
+def ensure_static_assets_mounted() -> None:
+    """Mount built webapp assets on '/' if available and not already mounted."""
+    from fastapi.staticfiles import StaticFiles
+
+    here = Path(__file__).parent.resolve()
+    potential_dists = [
+        here / "web_dist",  # Bundled package
+        here.parents[2] / "webapp" / "dist",  # Editable/source checkout
+    ]
+
+    dist_dir = None
+    for p in potential_dists:
+        if p.exists() and (p / "index.html").exists():
+            dist_dir = p
+            break
+
+    if dist_dir and not any(getattr(route, "name", None) == "static" for route in app.routes):
+        app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="static")
+        print(f"Serving static assets from {dist_dir}")
 
 
 def _set_live_event_queue(queue: asyncio.Queue | None) -> None:
     """Set the live event queue (called from CLI before starting server)."""
     global _live_event_queue
     _live_event_queue = queue
+
+
+def _set_live_pipeline_tracker(tracker: PipelineTracker | None) -> None:
+    """Set live pipeline tracker for in-memory /api/pipeline fallback."""
+    global _live_pipeline_tracker
+    _live_pipeline_tracker = tracker
 
 
 def _load_index() -> DocsIndex:
@@ -77,38 +106,69 @@ def _load_search_index() -> SearchIndex:
 
 
 def _get_docbot_dir() -> Path:
-    """Get the .docbot directory from the run directory."""
+    """Get the .docbot directory from the run directory.
+
+    First checks if _run_dir itself IS a .docbot/ directory, then falls back
+    to looking for .docbot/ inside the analyzed repo root.
+    """
     if _run_dir is None:
         raise HTTPException(status_code=503, detail="No run directory configured.")
 
-    index = _load_index()
-    repo_root = Path(index.repo_path).resolve()
-    docbot_dir = repo_root / ".docbot"
+    # If _run_dir IS the .docbot directory already (git-integrated layout).
+    if _run_dir.name == ".docbot":
+        return _run_dir
 
-    if not docbot_dir.exists():
-        raise HTTPException(
-            status_code=404, detail=".docbot directory not found in repository."
-        )
+    # Try to find .docbot/ via the analyzed repo root.
+    try:
+        index = _load_index()
+        repo_root = Path(index.repo_path).resolve()
+        docbot_dir = repo_root / ".docbot"
+        if docbot_dir.exists():
+            return docbot_dir
+    except HTTPException:
+        pass
 
-    return docbot_dir
+    raise HTTPException(
+        status_code=404, detail=".docbot directory not found."
+    )
 
 
 def _load_pipeline_events(run_id: str | None = None) -> dict:
-    """Load saved pipeline events for a run (or the latest run)."""
-    from ..git.project import load_state
+    """Load saved pipeline events for a run (or the latest run).
 
-    docbot_dir = _get_docbot_dir()
-    state = load_state(docbot_dir)
-    selected_run_id = run_id or state.last_run_id
+    Searches in multiple locations:
+    1. .docbot/history/<run_id>/pipeline_events.json (git-integrated layout)
+    2. _run_dir/pipeline_events.json (legacy run directory layout)
+    """
+    events_path: Path | None = None
+    selected_run_id = run_id
 
-    if not selected_run_id:
-        raise HTTPException(status_code=404, detail="No run history available.")
+    # Try .docbot/ layout first.
+    try:
+        docbot_dir = _get_docbot_dir()
+        from ..git.project import load_state
+        state = load_state(docbot_dir)
+        if not selected_run_id:
+            selected_run_id = state.last_run_id
+        if selected_run_id:
+            candidate = docbot_dir / "history" / selected_run_id / "pipeline_events.json"
+            if candidate.exists():
+                events_path = candidate
+    except (HTTPException, Exception):
+        pass
 
-    events_path = docbot_dir / "history" / selected_run_id / "pipeline_events.json"
-    if not events_path.exists():
+    # Fallback: check the run directory itself (legacy layout).
+    if events_path is None and _run_dir is not None:
+        candidate = _run_dir / "pipeline_events.json"
+        if candidate.exists():
+            events_path = candidate
+            if not selected_run_id:
+                selected_run_id = _run_dir.name
+
+    if events_path is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Pipeline events not found for run '{selected_run_id}'.",
+            detail="No pipeline events found. Run 'docbot generate' first.",
         )
 
     try:
@@ -122,11 +182,11 @@ def _load_pipeline_events(run_id: str | None = None) -> dict:
     # Backward compatibility: older runs saved a plain snapshot shape.
     if "events" not in payload and "nodes" in payload:
         payload = {
-            "run_id": selected_run_id,
+            "run_id": selected_run_id or "unknown",
             "events": [],
             "snapshot": payload,
         }
-    payload.setdefault("run_id", selected_run_id)
+    payload.setdefault("run_id", selected_run_id or "unknown")
     payload.setdefault("events", [])
     return payload
 
@@ -1044,7 +1104,12 @@ async def get_snapshot_detail(run_id: str) -> JSONResponse:
 @app.get("/api/pipeline")
 async def get_pipeline_events() -> JSONResponse:
     """Return saved pipeline events for the latest run."""
-    return JSONResponse(_load_pipeline_events())
+    try:
+        return JSONResponse(_load_pipeline_events())
+    except HTTPException as exc:
+        if exc.status_code == 404 and _live_pipeline_tracker is not None:
+            return JSONResponse(_live_pipeline_tracker.export_events())
+        raise
 
 
 @app.get("/api/pipeline/{run_id}")
@@ -1159,10 +1224,10 @@ async def agent_event_stream(request: Request):
     from sse_starlette.sse import EventSourceResponse
 
     if _live_event_queue is None:
-        raise HTTPException(
-            status_code=503,
-            detail="No live agent run in progress. Start with --serve --agents.",
-        )
+        async def _no_agents():
+            yield {"event": "done", "data": json.dumps({"no_agents": True})}
+
+        return EventSourceResponse(_no_agents())
 
     async def event_generator():
         while True:
@@ -1245,7 +1310,18 @@ def _update_agent_state_snapshot(event: dict) -> None:
 @app.get("/api/agent-state")
 async def agent_state():
     """Return current agent tree state for late-joining clients."""
-    return JSONResponse(_agent_state_snapshot)
+    if _agent_state_snapshot["agents"]:
+        return JSONResponse(_agent_state_snapshot)
+
+    if _run_dir:
+        state_path = _run_dir / "agent_state.json"
+        if state_path.exists():
+            try:
+                return JSONResponse(json.loads(state_path.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    return JSONResponse({"agents": {}, "notepads": {}})
 
 
 @app.get("/api/notepad")
@@ -1316,7 +1392,6 @@ def start_server(
 ) -> None:
     """Start the webapp server pointing at a completed run directory."""
     import uvicorn
-    from fastapi.staticfiles import StaticFiles
 
     global _run_dir, _index_cache, _search_index_cache, _llm_client, _tours_cache, _service_details_cache
     _run_dir = run_dir.resolve()
@@ -1325,24 +1400,6 @@ def start_server(
     _tours_cache = None
     _service_details_cache = None
     _llm_client = llm_client
-
-    here = Path(__file__).parent.resolve()
-    potential_dists = [
-        here / "web_dist",  # Bundled package
-        here.parents[2] / "webapp" / "dist",  # Editable/source checkout (src/docbot/web -> repo root)
-    ]
-
-    dist_dir = None
-    for p in potential_dists:
-        if p.exists() and (p / "index.html").exists():
-            dist_dir = p
-            break
-
-    if dist_dir:
-        if not any(getattr(route, "name", None) == "static" for route in app.routes):
-            app.mount(
-                "/", StaticFiles(directory=str(dist_dir), html=True), name="static"
-            )
-        print(f"Serving static assets from {dist_dir}")
+    ensure_static_assets_mounted()
 
     uvicorn.run(app, host=host, port=port)

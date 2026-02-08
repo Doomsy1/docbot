@@ -21,6 +21,7 @@ function AgentExplorer() {
     setSelectedAgent,
     isConnected,
     isDone,
+    noAgents,
   } = useAgentStream();
 
   const graphRef = useRef<any>(null);
@@ -135,9 +136,19 @@ function AgentExplorer() {
         <div className="flex-1 relative" ref={containerRef}>
           {graphNodes.length === 0 ? (
             <div className="absolute inset-0 flex items-center justify-center">
-              <span className="text-sm font-mono text-gray-400 animate-pulse">
-                Waiting for agents...
-              </span>
+              {isDone && noAgents ? (
+                <span className="text-sm font-mono text-gray-400">
+                  No agent exploration for this run
+                </span>
+              ) : isDone ? (
+                <span className="text-sm font-mono text-gray-400">
+                  No agent data available
+                </span>
+              ) : (
+                <span className="text-sm font-mono text-gray-400 animate-pulse">
+                  Waiting for agents...
+                </span>
+              )}
             </div>
           ) : (
             <ForceGraph2D

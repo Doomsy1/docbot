@@ -114,6 +114,7 @@ def _should_continue(state: AgentState) -> str:
 def build_graph(
     llm: Any,
     tools: list[Any],
+    tool_choice: Any = None,
 ) -> Any:
     """Construct and compile the ReAct agent graph.
 
@@ -133,7 +134,10 @@ def build_graph(
         ``.ainvoke()``.
     """
     # Bind tools so the LLM emits structured tool-call messages.
-    llm_with_tools = llm.bind_tools(tools)
+    if tool_choice is None:
+        llm_with_tools = llm.bind_tools(tools)
+    else:
+        llm_with_tools = llm.bind_tools(tools, tool_choice=tool_choice)
 
     # Create the graph with our state schema.
     graph = StateGraph(AgentState)

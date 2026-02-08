@@ -2,7 +2,7 @@
 
 from .scanner import scan_repo
 from .planner import build_plan, refine_plan_with_llm
-from .explorer import explore_scope, enrich_scope_with_llm, explore_scope_with_agents
+from .explorer import explore_scope, enrich_scope_with_llm
 from .reducer import reduce, reduce_with_llm
 from .renderer import (
     render,
@@ -22,7 +22,6 @@ __all__ = [
     "refine_plan_with_llm",
     "explore_scope",
     "enrich_scope_with_llm",
-    "explore_scope_with_agents",
     "reduce",
     "reduce_with_llm",
     "render",

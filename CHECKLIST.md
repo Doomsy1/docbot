@@ -46,6 +46,25 @@ a given phase. Dependencies between developers are managed through interface con
 | `src/docbot/git/history.py` | Dev B | 3D    |
 | `src/docbot/git/diff.py`    | Dev B | 3E    |
 
+**Agent exploration files (LangGraph refactor):**
+
+| File                                              | Owner | Status   |
+| ------------------------------------------------- | ----- | -------- |
+| `src/docbot/exploration/__init__.py`              | Dev B | Complete |
+| `src/docbot/exploration/graph.py`                 | Dev B | Complete |
+| `src/docbot/exploration/tools.py`                 | Dev B | Complete |
+| `src/docbot/exploration/store.py`                 | Dev B | Complete |
+| `src/docbot/exploration/prompts.py`               | Dev B | Complete |
+| `src/docbot/exploration/callbacks.py`             | Dev B | Complete |
+| `webapp/src/features/exploration/AgentExplorer.tsx`| Dev D | Complete |
+| `webapp/src/features/exploration/AgentDetail.tsx` | Dev D | Complete |
+| `webapp/src/features/exploration/NotepadViewer.tsx`| Dev D | Complete |
+| `webapp/src/features/exploration/useAgentStream.ts`| Dev D | Complete |
+| `webapp/src/features/exploration/types.ts`        | Dev D | Complete |
+| `docs/AGENT_ARCHITECTURE.md`                      | Dev B | Complete |
+| `docs/MIGRATION_NOTES.md`                         | Dev B | Complete |
+| `tests/test_exploration_graph.py`                 | Dev B | Complete |
+
 ---
 
 ## Phase 1: Multi-Language Support [COMPLETE]

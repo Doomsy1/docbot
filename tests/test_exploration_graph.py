@@ -204,6 +204,71 @@ class TestTools:
                 "write_notepad", "list_topics", "delegate", "finish",
             }
 
+    @requires_langgraph
+    @pytest.mark.asyncio
+    async def test_delegate_tool_invokes_delegate_handler(self):
+        from docbot.exploration.tools import create_tools
+        from pathlib import Path
+        import tempfile
+
+        called: list[dict] = []
+
+        async def _delegate_handler(target: str, name: str, purpose: str, context: str) -> str:
+            called.append(
+                {"target": target, "name": name, "purpose": purpose, "context": context}
+            )
+            return "child summary"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NotepadStore()
+            tools = create_tools(
+                repo_root=Path(tmp),
+                store=store,
+                delegate_fn=_delegate_handler,
+                current_depth=0,
+                max_depth=2,
+            )
+            delegate_tool = next(t for t in tools if t.name == "delegate")
+            out = await delegate_tool.ainvoke(
+                {
+                    "target": "src",
+                    "name": "child-a",
+                    "purpose": "inspect src",
+                    "context": "focus on data flow",
+                }
+            )
+
+            assert called
+            assert called[0]["name"] == "child-a"
+            assert "child summary" in out
+
+    @requires_langgraph
+    @pytest.mark.asyncio
+    async def test_delegate_tool_blocks_at_max_depth(self):
+        from docbot.exploration.tools import create_tools
+        from pathlib import Path
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NotepadStore()
+            tools = create_tools(
+                repo_root=Path(tmp),
+                store=store,
+                delegate_fn=None,
+                current_depth=2,
+                max_depth=2,
+            )
+            delegate_tool = next(t for t in tools if t.name == "delegate")
+            out = await delegate_tool.ainvoke(
+                {
+                    "target": "src",
+                    "name": "child-b",
+                    "purpose": "inspect src",
+                    "context": "",
+                }
+            )
+            assert "maximum depth" in out.lower()
+
 
 # ---------------------------------------------------------------------------
 # Callbacks tests
@@ -242,6 +307,14 @@ class TestCallbacks:
         # Should not raise.
         cb = AgentEventCallback(None, "test-agent")
         asyncio.run(cb.on_llm_new_token("test"))
+
+    @pytest.mark.asyncio
+    async def test_on_chat_model_start_noop(self):
+        from docbot.exploration.callbacks import AgentEventCallback
+        queue = asyncio.Queue()
+        cb = AgentEventCallback(queue, "test-agent")
+        await cb.on_chat_model_start({}, [])
+        assert queue.empty()
 
 
 # ---------------------------------------------------------------------------

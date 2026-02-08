@@ -60,8 +60,8 @@ class LLMClient:
     max_tokens: int = 8192
     temperature: float = 0.3
     backoff_enabled: bool = True
-    max_retries: int = 4
-    base_backoff_seconds: float = 0.05
+    max_retries: int = 6
+    base_backoff_seconds: float = 2.0
     adaptive_reduction_factor: float = 0.6
     max_concurrency: int = 6
     _sem: asyncio.Semaphore = field(init=False, repr=False)
@@ -110,6 +110,12 @@ class LLMClient:
             error_body = exc.read().decode("utf-8", errors="replace")
             logger.error("OpenRouter HTTP %s: %s", exc.code, error_body)
             raise RuntimeError(f"OpenRouter API error ({exc.code}): {error_body}") from exc
+        except urllib.error.URLError as exc:
+            logger.error("OpenRouter connection error: %s", exc.reason)
+            raise RuntimeError(f"OpenRouter connection error: {exc.reason}") from exc
+        except (TimeoutError, OSError) as exc:
+            logger.error("OpenRouter network error: %s", exc)
+            raise RuntimeError(f"OpenRouter network error: {exc}") from exc
 
         # Extract the assistant message text.
         try:
@@ -212,6 +218,14 @@ class LLMClient:
             raise RuntimeError(
                 f"OpenRouter API error ({exc.code}): {error_body}"
             ) from exc
+        except urllib.error.URLError as exc:
+            logger.error("OpenRouter stream connection error: %s", exc.reason)
+            raise RuntimeError(
+                f"OpenRouter connection error: {exc.reason}"
+            ) from exc
+        except (TimeoutError, OSError) as exc:
+            logger.error("OpenRouter stream network error: %s", exc)
+            raise RuntimeError(f"OpenRouter network error: {exc}") from exc
 
         try:
             for raw_line in resp:
@@ -330,6 +344,20 @@ class LLMClient:
 
 
 def _is_retryable(exc: Exception) -> bool:
+    """Determine if an LLM call error is worth retrying.
+
+    Retries on: rate limits (429), server errors (5xx), timeouts,
+    temporary failures, and connection errors.
+    """
     msg = str(exc).lower()
-    retry_markers = ("429", "rate limit", "timeout", "temporar", "5")
+    retry_markers = (
+        "429", "rate limit", "rate_limit",
+        "500", "502", "503", "504", "server error",
+        "timeout", "timed out",
+        "temporar",
+        "connection error", "connection reset", "connection refused",
+        "connection closed", "connection aborted",
+        "network error", "urlopen error",
+        "broken pipe", "eof",
+    )
     return any(m in msg for m in retry_markers)

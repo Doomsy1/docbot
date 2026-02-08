@@ -17,6 +17,7 @@ interface AgentStreamState {
   setSelectedAgent: (id: string | null) => void;
   isConnected: boolean;
   isDone: boolean;
+  noAgents: boolean;
 }
 
 export function useAgentStream(): AgentStreamState {
@@ -25,26 +26,67 @@ export function useAgentStream(): AgentStreamState {
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isDone, setIsDone] = useState(false);
-
-  // Use a ref to avoid stale closure issues in event handlers.
-  const agentsRef = useRef(agents);
-  agentsRef.current = agents;
-  const notepadsRef = useRef(notepads);
-  notepadsRef.current = notepads;
+  const [noAgents, setNoAgents] = useState(false);
+  const isDoneRef = useRef(false);
+  const noAgentsRef = useRef(false);
+  const failureCountRef = useRef(0);
 
   useEffect(() => {
     let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+
+    const loadPersistedState = async (): Promise<boolean> => {
+      try {
+        const response = await fetch('/api/agent-state');
+        if (!response.ok) {
+          return false;
+        }
+        const payload = await response.json() as {
+          agents?: Record<string, AgentNode>;
+          notepads?: Record<string, NoteEntry[]>;
+        };
+        const persistedAgents = payload.agents ?? {};
+        const persistedNotepads = payload.notepads ?? {};
+        if (Object.keys(persistedAgents).length === 0) {
+          return false;
+        }
+        setAgents(new Map(Object.entries(persistedAgents)));
+        setNotepads(new Map(Object.entries(persistedNotepads)));
+        setNoAgents(false);
+        noAgentsRef.current = false;
+        setIsDone(true);
+        isDoneRef.current = true;
+        return true;
+      } catch {
+        return false;
+      }
+    };
 
     const connect = () => {
+      if (cancelled || isDoneRef.current || noAgentsRef.current) {
+        return;
+      }
       es = new EventSource('/api/agent-stream');
 
-      es.onopen = () => setIsConnected(true);
+      es.onopen = () => {
+        setIsConnected(true);
+        failureCountRef.current = 0;
+      };
+
       es.onerror = () => {
         setIsConnected(false);
-        // Try to reconnect after a delay if not done.
-        if (!isDone) {
-          setTimeout(connect, 3000);
+        es?.close();
+        if (cancelled || isDoneRef.current || noAgentsRef.current) {
+          return;
         }
+        failureCountRef.current += 1;
+        if (failureCountRef.current >= 3) {
+          setIsDone(true);
+          isDoneRef.current = true;
+          return;
+        }
+        reconnectTimer = setTimeout(connect, 3000);
       };
 
       es.addEventListener('agent_spawned', (e: MessageEvent) => {
@@ -125,7 +167,7 @@ export function useAgentStream(): AgentStreamState {
             };
             next.set(data.agent_id!, {
               ...agent,
-              tools: [...agent.tools, newTool],
+              tools: [...agent.tools.slice(-49), newTool],
             });
           }
           return next;
@@ -182,8 +224,20 @@ export function useAgentStream(): AgentStreamState {
         });
       });
 
-      es.addEventListener('done', () => {
+      es.addEventListener('done', (e: MessageEvent) => {
+        let payload: { no_agents?: boolean } = {};
+        try {
+          payload = JSON.parse(e.data || '{}');
+        } catch {
+          payload = {};
+        }
+        if (payload.no_agents) {
+          setNoAgents(true);
+          noAgentsRef.current = true;
+        }
         setIsDone(true);
+        isDoneRef.current = true;
+        setIsConnected(false);
         es?.close();
       });
 
@@ -191,9 +245,17 @@ export function useAgentStream(): AgentStreamState {
       es.addEventListener('ping', () => {});
     };
 
-    connect();
+    loadPersistedState().then((hasPersisted) => {
+      if (!hasPersisted) {
+        connect();
+      }
+    });
 
     return () => {
+      cancelled = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
       es?.close();
     };
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
@@ -227,5 +289,6 @@ export function useAgentStream(): AgentStreamState {
     setSelectedAgent,
     isConnected,
     isDone,
+    noAgents,
   };
 }

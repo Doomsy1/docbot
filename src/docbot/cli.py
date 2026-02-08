@@ -265,9 +265,6 @@ def generate(
         None, "--model", "-m", help="OpenRouter model ID."
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
-    use_agents: bool = typer.Option(
-        False, "--agents", help="Enable recursive agent exploration (more thorough but slower)."
-    ),
     agent_depth: Optional[int] = typer.Option(
         None, "--agent-depth", help="Agent recursion depth (1=file, 2=symbol). Default: 2."
     ),
@@ -299,46 +296,71 @@ def generate(
         timeout=timeout if timeout is not None else cfg.timeout,
         max_scopes=max_scopes if max_scopes is not None else cfg.max_scopes,
         no_llm=no_llm or cfg.no_llm,
-        use_agents=use_agents or cfg.use_agents,
+        use_agents=True,
         agent_depth=agent_depth if agent_depth is not None else cfg.agent_depth,
     )
 
     # --mock-viz: simulated pipeline for visualization development.
     if mock_viz:
-        from .viz.viz_server import start_viz_server
-
         tracker = PipelineTracker()
-        _server, url = start_viz_server(tracker)
-        console.print(f"[bold cyan]Mock visualization:[/bold cyan] {url}")
-        asyncio.run(
-            run_async(
-                repo_path=project_root,
-                concurrency=effective_cfg.concurrency,
-                tracker=tracker,
-                mock=True,
+        _ensure_webapp_built()
+
+        async def _run_mock_with_webapp():
+            from .web.server import (
+                app as webapp_app,
+                _set_live_event_queue,
+                _set_live_pipeline_tracker,
+                ensure_static_assets_mounted,
             )
-        )
+            import uvicorn
+            import threading
+            import webbrowser
+
+            # run_async(mock=True) creates a temp dir, so set run_dir later
+            uvi_config = uvicorn.Config(
+                webapp_app, host="127.0.0.1", port=port,
+                log_level="warning",
+            )
+            ensure_static_assets_mounted()
+            server = uvicorn.Server(uvi_config)
+            server_task = asyncio.create_task(server.serve())
+            console.print(f"[bold cyan]Mock visualization:[/bold cyan] http://127.0.0.1:{port}")
+            threading.Timer(1.5, webbrowser.open, args=(f"http://127.0.0.1:{port}",)).start()
+            _set_live_pipeline_tracker(tracker)
+
+            try:
+                await run_async(
+                    repo_path=project_root,
+                    concurrency=effective_cfg.concurrency,
+                    tracker=tracker,
+                    mock=True,
+                )
+            finally:
+                _set_live_pipeline_tracker(None)
+                server.should_exit = True
+                await server_task
+
+        asyncio.run(_run_mock_with_webapp())
         console.print("[dim]Simulation complete. Press Enter to exit.[/dim]")
         input()
         return
 
     llm_client = _build_llm_client(effective_cfg.model, effective_cfg.no_llm)
 
-    # Set up visualization tracker.
-    tracker: PipelineTracker | NoOpTracker
+    # --visualize implies --serve (use the webapp for live visualization).
     if visualize:
-        from .viz.viz_server import start_viz_server
+        serve = True
 
+    tracker: PipelineTracker | NoOpTracker
+    if serve:
         tracker = PipelineTracker()
-        _server, url = start_viz_server(tracker)
-        console.print(f"[bold cyan]Visualization:[/bold cyan] {url}")
     else:
         tracker = NoOpTracker()
 
     if llm_client is not None:
         console.print(f"[bold]LLM:[/bold] {effective_cfg.model} via OpenRouter")
 
-    # --serve: start webapp server in background for live agent visualization.
+    # --serve (or --viz): start webapp server in background for live visualization.
     event_queue: asyncio.Queue | None = None
     if serve and effective_cfg.use_agents:
         event_queue = asyncio.Queue(maxsize=10000)
@@ -346,18 +368,33 @@ def generate(
     async def _run_with_serve():
         if serve:
             _ensure_webapp_built()
-            from .web.server import app as webapp_app, _set_live_event_queue
+            import json
+            import threading
+            import webbrowser
+            from .web.server import (
+                app as webapp_app,
+                _set_live_event_queue,
+                _set_live_pipeline_tracker,
+                ensure_static_assets_mounted,
+            )
+            from .web import server as web_mod
             import uvicorn
 
+            web_mod._run_dir = docbot_dir.resolve()
+            web_mod._index_cache = None
+            web_mod._search_index_cache = None
             _set_live_event_queue(event_queue)
+            _set_live_pipeline_tracker(tracker)
 
             uvi_config = uvicorn.Config(
                 webapp_app, host="127.0.0.1", port=port,
                 log_level="warning",
             )
+            ensure_static_assets_mounted()
             server = uvicorn.Server(uvi_config)
             server_task = asyncio.create_task(server.serve())
             console.print(f"[bold cyan]Live webapp:[/bold cyan] http://127.0.0.1:{port}")
+            threading.Timer(1.5, webbrowser.open, args=(f"http://127.0.0.1:{port}",)).start()
 
             try:
                 await generate_async(
@@ -371,8 +408,13 @@ def generate(
                 # Signal completion to SSE consumers.
                 if event_queue:
                     await event_queue.put(None)
+                _set_live_pipeline_tracker(None)
                 server.should_exit = True
                 await server_task
+                if web_mod._agent_state_snapshot.get("agents"):
+                    (docbot_dir / "agent_state.json").write_text(
+                        json.dumps(web_mod._agent_state_snapshot, indent=2), encoding="utf-8"
+                    )
         else:
             await generate_async(
                 docbot_root=docbot_dir,
@@ -383,12 +425,6 @@ def generate(
             )
 
     asyncio.run(_run_with_serve())
-
-    if visualize:
-        console.print(
-            "[dim]Visualization server still running. Press Enter to exit.[/dim]"
-        )
-        input()
 
 
 @app.command()
@@ -772,7 +808,7 @@ def hook_uninstall(
 
 
 # ---------------------------------------------------------------------------
-# Legacy alias
+# Standalone run (hidden -- prefer init + generate)
 # ---------------------------------------------------------------------------
 
 
@@ -795,43 +831,65 @@ def run(
         DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID."
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
-    use_agents: bool = typer.Option(
-        False, "--agents", help="Enable recursive agent exploration (more thorough but slower)."
-    ),
     agent_depth: int = typer.Option(
-        2, "--agent-depth", help="Agent recursion depth (1=file, 2=symbol)."
+        2, "--agent-depth", help="Agent exploration max depth."
     ),
     visualize: bool = typer.Option(
-        True,
+        False,
         "--visualize/--no-visualize",
         "--viz/--no-viz",
-        help="Open live pipeline visualization (enabled by default).",
+        help="Open live webapp pipeline visualization.",
     ),
     mock_viz: bool = typer.Option(
-        False, "--mock-viz", help="Run mock pipeline simulation."
+        False, "--mock-viz", help="Run mock pipeline simulation with webapp."
     ),
+    port: int = typer.Option(8000, "-p", help="Webapp port (with --viz or --mock-viz)."),
 ) -> None:
-    """[Legacy] Scan, explore, and generate documentation for REPO.
+    """Scan, explore, and generate documentation for REPO.
 
-    This is the original standalone pipeline. Prefer 'docbot init' + 'docbot generate'.
+    Prefer 'docbot init' + 'docbot generate' for git-integrated workflows.
     """
     from .pipeline.orchestrator import run_async
     from .pipeline.tracker import NoOpTracker, PipelineTracker
 
     if mock_viz:
-        from .viz.viz_server import start_viz_server
-
         tracker = PipelineTracker()
-        _server, url = start_viz_server(tracker)
-        console.print(f"[bold cyan]Mock visualization:[/bold cyan] {url}")
-        asyncio.run(
-            run_async(
-                repo_path=repo,
-                concurrency=concurrency,
-                tracker=tracker,
-                mock=True,
+        _ensure_webapp_built()
+
+        async def _run_mock():
+            from .web.server import (
+                app as webapp_app,
+                _set_live_pipeline_tracker,
+                ensure_static_assets_mounted,
             )
-        )
+            import threading
+            import webbrowser
+            import uvicorn
+
+            uvi_config = uvicorn.Config(
+                webapp_app, host="127.0.0.1", port=port,
+                log_level="warning",
+            )
+            ensure_static_assets_mounted()
+            server = uvicorn.Server(uvi_config)
+            server_task = asyncio.create_task(server.serve())
+            console.print(f"[bold cyan]Mock visualization:[/bold cyan] http://127.0.0.1:{port}")
+            threading.Timer(1.5, webbrowser.open, args=(f"http://127.0.0.1:{port}",)).start()
+            _set_live_pipeline_tracker(tracker)
+
+            try:
+                await run_async(
+                    repo_path=repo,
+                    concurrency=concurrency,
+                    tracker=tracker,
+                    mock=True,
+                )
+            finally:
+                _set_live_pipeline_tracker(None)
+                server.should_exit = True
+                await server_task
+
+        asyncio.run(_run_mock())
         console.print("[dim]Simulation complete. Press Enter to exit.[/dim]")
         input()
         return
@@ -846,33 +904,92 @@ def run(
 
     tracker: PipelineTracker | NoOpTracker
     if visualize:
-        from .viz.viz_server import start_viz_server
-
         tracker = PipelineTracker()
-        _server, url = start_viz_server(tracker)
-        console.print(f"[bold cyan]Visualization:[/bold cyan] {url}")
     else:
         tracker = NoOpTracker()
 
-    asyncio.run(
-        run_async(
-            repo_path=repo,
-            output_base=output,
-            max_scopes=max_scopes,
-            concurrency=concurrency,
-            timeout=timeout,
-            llm_client=llm_client,
-            tracker=tracker,
-            use_agents=use_agents,
-            agent_depth=agent_depth,
-        )
-    )
+    event_queue: asyncio.Queue | None = None
+    if visualize:
+        event_queue = asyncio.Queue(maxsize=10000)
 
     if visualize:
-        console.print(
-            "[dim]Visualization server still running. Press Enter to exit.[/dim]"
+        # Live visualization: start webapp before the pipeline so progress
+        # streams in real-time, same as `generate --viz`.
+        _ensure_webapp_built()
+
+        async def _run_with_live_viz():
+            from .web.server import (
+                app as webapp_app,
+                _set_live_event_queue,
+                _set_live_pipeline_tracker,
+                ensure_static_assets_mounted,
+            )
+            from .web import server as web_mod
+            import json
+            import threading
+            import webbrowser
+            import uvicorn
+
+            uvi_config = uvicorn.Config(
+                webapp_app, host="127.0.0.1", port=port,
+                log_level="warning",
+            )
+            ensure_static_assets_mounted()
+            server = uvicorn.Server(uvi_config)
+            server_task = asyncio.create_task(server.serve())
+            console.print(f"[bold cyan]Live webapp:[/bold cyan] http://127.0.0.1:{port}")
+            threading.Timer(1.5, webbrowser.open, args=(f"http://127.0.0.1:{port}",)).start()
+            _set_live_pipeline_tracker(tracker)
+            _set_live_event_queue(event_queue)
+
+            try:
+                run_dir = await run_async(
+                    repo_path=repo,
+                    output_base=output,
+                    max_scopes=max_scopes,
+                    concurrency=concurrency,
+                    timeout=timeout,
+                    llm_client=llm_client,
+                    tracker=tracker,
+                    use_agents=True,
+                    agent_depth=agent_depth,
+                    event_queue=event_queue,
+                )
+                # Point the webapp at the completed run for browsing.
+                web_mod._run_dir = run_dir.resolve()
+                web_mod._index_cache = None
+                web_mod._search_index_cache = None
+
+                console.print("[dim]Pipeline complete. Webapp still running -- press Ctrl+C to exit.[/dim]")
+                # Keep serving until user kills it.
+                await server_task
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                server.should_exit = True
+            finally:
+                if event_queue:
+                    await event_queue.put(None)
+                _set_live_event_queue(None)
+                _set_live_pipeline_tracker(None)
+                if 'run_dir' in locals() and web_mod._agent_state_snapshot.get("agents"):
+                    (run_dir / "agent_state.json").write_text(
+                        json.dumps(web_mod._agent_state_snapshot, indent=2), encoding="utf-8"
+                    )
+
+        asyncio.run(_run_with_live_viz())
+    else:
+        asyncio.run(
+            run_async(
+                repo_path=repo,
+                output_base=output,
+                max_scopes=max_scopes,
+                concurrency=concurrency,
+                timeout=timeout,
+                llm_client=llm_client,
+                tracker=tracker,
+                use_agents=True,
+                agent_depth=agent_depth,
+            )
         )
-        input()
 
 
 # ---------------------------------------------------------------------------
@@ -888,12 +1005,11 @@ def replay(
     path: Optional[Path] = typer.Argument(
         None, help="Repository path (default: current directory)."
     ),
-    port: int = typer.Option(8001, help="Port for replay server."),
+    port: int = typer.Option(8001, "-p", help="Port for replay server."),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Don't auto-open browser."),
 ) -> None:
-    """Replay a past pipeline visualization."""
+    """Replay a past pipeline visualization via the webapp."""
     from .git.history import list_snapshots
-    from .viz.viz_server import start_replay_server
-    import webbrowser
 
     project_root, docbot_dir = _require_docbot(path)
 
@@ -919,20 +1035,27 @@ def replay(
         else:
             console.print("[yellow]No runs with pipeline events found.[/yellow]")
             console.print(
-                "  Hint: Run 'docbot generate --visualize' to create a visualization."
+                "  Hint: Run 'docbot generate --viz' to create a visualization."
             )
             raise typer.Exit(code=1)
 
     console.print(f"[green]Replaying run:[/green] {run_id}")
     console.print(f"  Events: {events_path}")
 
-    # Open browser
-    webbrowser.open(f"http://127.0.0.1:{port}")
+    # Serve via the main webapp (pipeline tab reads events from /api/pipeline).
+    _ensure_webapp_built()
+    from .web.server import start_server
 
-    # Start server (blocking)
-    start_replay_server(events_path, port=port)
+    llm_client = _build_llm_client(quiet=True)
+
+    if not no_browser:
+        import threading
+        import webbrowser
+        threading.Timer(1.0, webbrowser.open, args=(f"http://127.0.0.1:{port}",)).start()
+
+    console.print(f"[bold cyan]Webapp:[/bold cyan] http://127.0.0.1:{port}")
+    start_server(docbot_dir, host="127.0.0.1", port=port, llm_client=llm_client)
 
 
 if __name__ == "__main__":
     app()
-# Test comment

@@ -4,7 +4,8 @@
       "Bash(tasklist:*)",
       "Bash(taskkill:*)",
       "Bash(curl:*)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "Bash(python3:*)"
     ]
   }
 }

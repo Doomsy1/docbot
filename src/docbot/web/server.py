@@ -15,8 +15,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .llm import LLMClient
-from .models import Citation, DocsIndex
+from ..llm import LLMClient
+from ..models import Citation, DocsIndex
 from .search import SearchIndex
 
 logger = logging.getLogger(__name__)
@@ -2493,7 +2493,7 @@ def start_server(
     here = Path(__file__).parent.resolve()
     potential_dists = [
         here / "web_dist",  # Bundled package
-        here.parents[1] / "webapp" / "dist",  # Editable/source checkout
+        here.parents[2] / "webapp" / "dist",  # Editable/source checkout
     ]
 
     dist_dir = None

@@ -406,13 +406,13 @@ export default function DiffViewer() {
           {/* Chat Messages */}
           <div className="max-w-4xl mx-auto">
             {chatMessages.length > 0 && (
-              <div className="max-h-64 overflow-y-auto p-4 space-y-3 bg-gray-50 border-b border-gray-200">
+              <div className="max-h-64 overflow-y-auto p-4 space-y-3 bg-gray-50 border-b border-black">
                 {chatMessages.map((msg, i) => (
                   <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[80%] px-4 py-2 rounded-lg text-sm ${
+                    <div className={`max-w-[80%] px-4 py-2 text-sm border border-black ${
                       msg.role === 'user'
-                        ? 'bg-black text-white'
-                        : 'bg-white border border-gray-300 text-gray-800'
+                        ? 'bg-gray-100'
+                        : 'bg-white text-gray-800'
                     }`}>
                       {msg.role === 'assistant' ? (
                         <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: msg.content.replace(/\n/g, '<br/>') }} />
@@ -424,7 +424,7 @@ export default function DiffViewer() {
                 ))}
                 {chatLoading && (
                   <div className="flex justify-start">
-                    <div className="bg-white border border-gray-300 px-4 py-2 rounded-lg text-sm text-gray-500">
+                    <div className="bg-white border border-black px-4 py-2 text-sm text-gray-500">
                       <IconCpu className="inline animate-spin mr-2" size={14} />
                       Thinking...
                     </div>
@@ -443,15 +443,15 @@ export default function DiffViewer() {
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
                 placeholder="Ask about the changes..."
-                className="flex-1 border border-gray-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black"
+                className="flex-1 border border-black px-3 py-2 text-sm font-mono bg-white focus:ring-2 focus:ring-blue-500/10"
                 disabled={chatLoading}
               />
               <button
                 onClick={sendMessage}
                 disabled={chatLoading || !chatInput.trim()}
-                className="bg-black text-white p-2 rounded-lg hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                className="p-3 border border-black bg-white hover:bg-black hover:text-white transition-all disabled:opacity-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
               >
-                <IconSend size={18} />
+                {chatLoading ? <IconCpu className="animate-spin" size={18} /> : <IconSend size={18} />}
               </button>
             </div>
           </div>

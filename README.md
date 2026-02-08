@@ -46,6 +46,7 @@ and code navigation.
 | `docbot update [path]`        | Incremental update -- only re-process scopes with changed files |
 | `docbot status [path]`        | Show doc state: last run, changed files, affected scopes        |
 | `docbot serve [path]`         | Launch interactive webapp against `.docbot/`                    |
+| `docbot run [path]`           | Legacy standalone run; now opens unified webapp by default      |
 | `docbot config [key] [value]` | View or modify `.docbot/config.toml` settings                   |
 | `docbot hook install`         | Install post-commit git hook for automatic doc updates          |
 | `docbot hook uninstall`       | Remove the docbot git hook                                      |
@@ -61,7 +62,6 @@ Flags for `docbot generate` (override config.toml values for that invocation):
 | `--concurrency / -j`  | Parallel explorer workers (default: 4).               |
 | `--timeout / -t`      | Per-scope timeout in seconds (default: 120).          |
 | `--max-scopes`        | Maximum number of documentation scopes (default: 20). |
-| `--visualize / --viz` | Open live D3.js pipeline visualization.               |
 
 ## How It Works
 
@@ -117,8 +117,7 @@ src/docbot/
   project.py          # .docbot/ directory management
   git_utils.py        # Git CLI wrappers
   hooks.py            # Git hook install/uninstall
-  tracker.py          # Pipeline state tracking (for visualization)
-  viz_server.py       # Live D3.js visualization server
+  tracker.py          # Pipeline state/event tracking (webapp pipeline replay)
   extractors/         # Language-specific extraction (tree-sitter + LLM fallback)
 webapp/               # React SPA (Vite + ReactFlow + Tailwind)
 ```

@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
-from .models import DocsIndex, EnvVar, PublicSymbol, ScopeResult
+from ..models import DocsIndex, EnvVar, PublicSymbol, ScopeResult
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +336,7 @@ async def reduce_with_llm(
     llm_client: object,
 ) -> DocsIndex:
     """Merge scope results and use LLM for cross-scope analysis + Mermaid graph."""
-    from .llm import LLMClient
+    from ..llm import LLMClient
     assert isinstance(llm_client, LLMClient)
 
     # First do the mechanical merge.

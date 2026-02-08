@@ -11,8 +11,8 @@ import os
 import traceback
 from pathlib import Path
 
-from .extractors import get_extractor
-from .models import (
+from ..extractors import get_extractor
+from ..models import (
     Citation,
     EnvVar,
     FileExtraction,
@@ -183,7 +183,7 @@ async def enrich_scope_with_llm(
     llm_client: object,  # docbot.llm.LLMClient
 ) -> ScopeResult:
     """Call the LLM to produce a richer summary for an already-extracted scope."""
-    from .llm import LLMClient
+    from ..llm import LLMClient
     assert isinstance(llm_client, LLMClient)
 
     api_lines = []
@@ -246,7 +246,7 @@ async def explore_scope_with_agents(
     Returns:
         ScopeResult with agent-generated summary and findings
     """
-    from .llm import LLMClient
+    from ..llm import LLMClient
     from .agents import run_scope_agent
     
     assert isinstance(llm_client, LLMClient)

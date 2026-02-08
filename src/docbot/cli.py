@@ -62,7 +62,7 @@ def _require_docbot(path: Path | None = None) -> tuple[Path, Path]:
     Returns ``(project_root, docbot_dir)`` where *docbot_dir* is the
     ``.docbot/`` directory and *project_root* is its parent.
     """
-    from .project import find_docbot_root
+    from .git.project import find_docbot_root
 
     start = Path(path).resolve() if path else Path.cwd()
     project_root = find_docbot_root(start)
@@ -230,7 +230,7 @@ def init(
     ),
 ) -> None:
     """Initialise a .docbot/ directory in a git repository."""
-    from .project import init_project
+    from .git.project import init_project
 
     target = Path(path).resolve() if path else Path.cwd()
 
@@ -280,9 +280,9 @@ def generate(
 ) -> None:
     """Run the full documentation pipeline, output to .docbot/."""
     from .models import DocbotConfig
-    from .orchestrator import generate_async, run_async
-    from .project import load_config
-    from .tracker import NoOpTracker, PipelineTracker
+    from .pipeline.orchestrator import generate_async, run_async
+    from .git.project import load_config
+    from .pipeline.tracker import NoOpTracker, PipelineTracker
 
     project_root, docbot_dir = _require_docbot(path)
     _load_dotenv(project_root)
@@ -301,7 +301,7 @@ def generate(
 
     # --mock-viz: simulated pipeline for visualization development.
     if mock_viz:
-        from .viz_server import start_viz_server
+        from .viz.viz_server import start_viz_server
 
         tracker = PipelineTracker()
         _server, url = start_viz_server(tracker)
@@ -323,7 +323,7 @@ def generate(
     # Set up visualization tracker.
     tracker: PipelineTracker | NoOpTracker
     if visualize:
-        from .viz_server import start_viz_server
+        from .viz.viz_server import start_viz_server
 
         tracker = PipelineTracker()
         _server, url = start_viz_server(tracker)
@@ -369,9 +369,9 @@ def update(
 ) -> None:
     """Incrementally update docs for files changed since the last documented commit."""
     from .models import DocbotConfig
-    from .orchestrator import update_async
-    from .project import load_config
-    from .tracker import NoOpTracker
+    from .pipeline.orchestrator import update_async
+    from .git.project import load_config
+    from .pipeline.tracker import NoOpTracker
 
     project_root, docbot_dir = _require_docbot(path)
     _load_dotenv(project_root)
@@ -403,8 +403,8 @@ def status(
     ),
 ) -> None:
     """Show the current documentation state."""
-    from .git_utils import get_changed_files, get_current_commit
-    from .project import load_config, load_state
+    from .git.utils import get_changed_files, get_current_commit
+    from .git.project import load_config, load_state
 
     project_root, docbot_dir = _require_docbot(path)
     state = load_state(docbot_dir)
@@ -483,7 +483,7 @@ def serve(
         run_dir = _resolve_run_dir(resolved)
     else:
         # Default: try to find .docbot/ in the current project.
-        from .project import find_docbot_root
+        from .git.project import find_docbot_root
 
         project_root = find_docbot_root(Path.cwd())
         if project_root and (project_root / ".docbot" / "docs_index.json").exists():
@@ -496,7 +496,7 @@ def serve(
             console.print(
                 f"[bold]No docs found -- running analysis on[/bold] {resolved}"
             )
-            from .orchestrator import run_async
+            from .pipeline.orchestrator import run_async
 
             llm_client = _build_llm_client(model)
             run_dir = asyncio.run(run_async(repo_path=resolved, llm_client=llm_client))
@@ -514,7 +514,7 @@ def serve(
     # Ensure webapp is built before starting server
     _ensure_webapp_built()
 
-    from .server import start_server
+    from .web.server import start_server
 
     url = f"http://{host}:{port}"
     console.print(f"[bold cyan]Serving[/bold cyan] {run_dir}")
@@ -536,7 +536,7 @@ def config(
     path: Optional[Path] = typer.Option(None, "--path", help="Repository path."),
 ) -> None:
     """View or modify .docbot/config.toml settings."""
-    from .project import load_config, save_config
+    from .git.project import load_config, save_config
 
     _project_root, docbot_dir = _require_docbot(path)
 
@@ -582,6 +582,102 @@ def config(
     console.print(f"[green]Updated:[/green] {key} = {coerced!r}")
 
 
+@app.command()
+def diff(
+    from_snapshot: Optional[str] = typer.Option(
+        None, "--from", help="Source snapshot (run ID). Default: previous snapshot."
+    ),
+    to_snapshot: Optional[str] = typer.Option(
+        None, "--to", help="Target snapshot (run ID). Default: latest snapshot."
+    ),
+    path: Optional[Path] = typer.Argument(
+        None, help="Repository path (default: current directory)."
+    ),
+) -> None:
+    """Compare two documentation snapshots and show what changed."""
+    from .git.diff import compute_diff
+    from .git.history import list_snapshots, load_snapshot
+
+    project_root, docbot_dir = _require_docbot(path)
+
+    # List available snapshots
+    snapshots = list_snapshots(docbot_dir)
+    if len(snapshots) < 1:
+        console.print("[yellow]No snapshots found. Run 'docbot generate' first.[/yellow]")
+        raise typer.Exit(code=1)
+
+    # Determine source snapshot
+    if from_snapshot:
+        # User specified --from
+        from_snap = load_snapshot(docbot_dir, from_snapshot)
+        if not from_snap:
+            console.print(f"[red]Snapshot not found:[/red] {from_snapshot}")
+            raise typer.Exit(code=1)
+    else:
+        # Default: use second-to-last snapshot
+        if len(snapshots) < 2:
+            console.print("[yellow]Need at least 2 snapshots to compare.[/yellow]")
+            console.print(f"  Found {len(snapshots)} snapshot(s). Run 'docbot generate' again.")
+            raise typer.Exit(code=1)
+        from_snap = snapshots[-2]  # Second to last
+
+    # Determine target snapshot
+    if to_snapshot:
+        # User specified --to
+        to_snap = load_snapshot(docbot_dir, to_snapshot)
+        if not to_snap:
+            console.print(f"[red]Snapshot not found:[/red] {to_snapshot}")
+            raise typer.Exit(code=1)
+    else:
+        # Default: use latest snapshot
+        to_snap = snapshots[-1]
+
+    # Compute diff
+    diff_report = compute_diff(from_snap, to_snap)
+
+    # Print human-readable report
+    console.print(f"\n[bold]Comparing snapshots:[/bold]")
+    console.print(f"  From: {from_snap.run_id} ({from_snap.commit_hash[:8]})")
+    console.print(f"  To:   {to_snap.run_id} ({to_snap.commit_hash[:8]})")
+    console.print()
+
+    # Added scopes
+    if diff_report.added_scopes:
+        console.print(f"[green]+ Added scopes ({len(diff_report.added_scopes)}):[/green]")
+        for scope_id in diff_report.added_scopes:
+            console.print(f"  + {scope_id}")
+        console.print()
+
+    # Removed scopes
+    if diff_report.removed_scopes:
+        console.print(f"[red]- Removed scopes ({len(diff_report.removed_scopes)}):[/red]")
+        for scope_id in diff_report.removed_scopes:
+            console.print(f"  - {scope_id}")
+        console.print()
+
+    # Modified scopes
+    if diff_report.modified_scopes:
+        console.print(f"[yellow]~ Modified scopes ({len(diff_report.modified_scopes)}):[/yellow]")
+        for mod in diff_report.modified_scopes:
+            console.print(f"  ~ {mod.scope_id}")
+            if mod.summary_changed:
+                console.print(f"    - Summary changed")
+        console.print()
+
+    # Statistics delta
+    console.print("[bold]Statistics:[/bold]")
+    stats = diff_report.stats_delta
+    console.print(f"  Files:   {stats.total_files:+d}")
+    console.print(f"  Scopes:  {stats.total_scopes:+d}")
+    console.print(f"  Symbols: {stats.total_symbols:+d}")
+    console.print()
+
+    # Graph changes
+    if diff_report.graph_changes.changed_nodes:
+        console.print("[cyan]Graph structure changed[/cyan]")
+
+
+
 # ---------------------------------------------------------------------------
 # Hook subcommands
 # ---------------------------------------------------------------------------
@@ -592,15 +688,27 @@ def hook_install(
     path: Optional[Path] = typer.Argument(
         None, help="Repository path (default: current directory)."
     ),
+    commit_only: bool = typer.Option(
+        False, "--commit-only", help="Install only post-commit hook (skip post-merge)."
+    ),
 ) -> None:
-    """Install a post-commit git hook that runs 'docbot update'."""
-    from .hooks import install_hook
+    """Install git hooks that run 'docbot update' on commit/merge.
+    
+    By default, installs both post-commit and post-merge hooks.
+    Use --commit-only to install only the post-commit hook.
+    """
+    from .git.hooks import install_hook
 
     project_root, _docbot_dir = _require_docbot(path)
 
-    if install_hook(project_root):
-        console.print("[green]Post-commit hook installed.[/green]")
-        console.print("  Docs will auto-update on each commit.")
+    if install_hook(project_root, commit_only=commit_only):
+        if commit_only:
+            console.print("[green]Post-commit hook installed.[/green]")
+            console.print("  Docs will auto-update on each commit.")
+        else:
+            console.print("[green]Git hooks installed.[/green]")
+            console.print("  Post-commit: Docs will auto-update on each commit.")
+            console.print("  Post-merge:  Docs will auto-update after merges/pulls.")
     else:
         console.print("[red]Error:[/red] Could not install hook (is this a git repo?).")
         raise typer.Exit(code=1)
@@ -612,13 +720,13 @@ def hook_uninstall(
         None, help="Repository path (default: current directory)."
     ),
 ) -> None:
-    """Remove the docbot post-commit hook."""
-    from .hooks import uninstall_hook
+    """Remove docbot git hooks (post-commit and post-merge)."""
+    from .git.hooks import uninstall_hook
 
     project_root, _docbot_dir = _require_docbot(path)
 
     if uninstall_hook(project_root):
-        console.print("[green]Post-commit hook removed.[/green]")
+        console.print("[green]Git hooks removed.[/green]")
     else:
         console.print("[yellow]No docbot hook found to remove.[/yellow]")
 
@@ -664,8 +772,8 @@ def run(
 
     This is the original standalone pipeline. Prefer 'docbot init' + 'docbot generate'.
     """
-    from .orchestrator import run_async
-    from .tracker import NoOpTracker, PipelineTracker
+    from .pipeline.orchestrator import run_async
+    from .pipeline.tracker import NoOpTracker, PipelineTracker
 
     if mock_viz:
         from .viz_server import start_viz_server
@@ -724,5 +832,64 @@ def run(
         input()
 
 
+# ---------------------------------------------------------------------------
+# Replay command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def replay(
+    run_id: Optional[str] = typer.Argument(
+        None, help="Run ID to replay (default: most recent)."
+    ),
+    path: Optional[Path] = typer.Argument(
+        None, help="Repository path (default: current directory)."
+    ),
+    port: int = typer.Option(8001, help="Port for replay server."),
+) -> None:
+    """Replay a past pipeline visualization."""
+    from .git.history import list_snapshots
+    from .viz.viz_server import start_replay_server
+    import webbrowser
+
+    project_root, docbot_dir = _require_docbot(path)
+
+    # Determine which run to replay
+    if run_id:
+        events_path = docbot_dir / "history" / run_id / "pipeline_events.json"
+        if not events_path.exists():
+            console.print(f"[red]Events not found for run:[/red] {run_id}")
+            raise typer.Exit(code=1)
+    else:
+        # Use most recent run
+        snapshots = list_snapshots(docbot_dir)
+        if not snapshots:
+            console.print("[yellow]No snapshots found.[/yellow]")
+            raise typer.Exit(code=1)
+
+        # Find most recent run with events
+        for snap in reversed(snapshots):
+            events_path = docbot_dir / "history" / snap.run_id / "pipeline_events.json"
+            if events_path.exists():
+                run_id = snap.run_id
+                break
+        else:
+            console.print("[yellow]No runs with pipeline events found.[/yellow]")
+            console.print(
+                "  Hint: Run 'docbot generate --visualize' to create a visualization."
+            )
+            raise typer.Exit(code=1)
+
+    console.print(f"[green]Replaying run:[/green] {run_id}")
+    console.print(f"  Events: {events_path}")
+
+    # Open browser
+    webbrowser.open(f"http://127.0.0.1:{port}")
+
+    # Start server (blocking)
+    start_replay_server(events_path, port=port)
+
+
 if __name__ == "__main__":
     app()
+# Test comment

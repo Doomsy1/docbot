@@ -69,7 +69,7 @@ export default function Chat({ onSelectFile }: ChatProps) {
   };
 
   return (
-    <div className="flex flex-col h-full bg-white border border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+    <div className="flex flex-col h-full bg-white">
       {/* Message List */}
       <div 
         ref={scrollRef}
@@ -77,14 +77,14 @@ export default function Chat({ onSelectFile }: ChatProps) {
       >
         {messages.map(m => (
           <div key={m.id} className={`flex ${m.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[85%] space-y-2`}>
+            <div className="max-w-full space-y-2 min-w-0">
               <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-1">
                 <span className={m.sender === 'user' ? 'order-2' : ''}>{m.sender}</span>
                 <div className="h-[1px] flex-1 bg-gray-100"></div>
               </div>
               
-              <div className={`p-4 border border-black ${m.sender === 'user' ? 'bg-gray-50' : 'bg-white shadow-[4px_4px_0px_0px_rgba(30,58,138,0.1)]'}`}>
-                <div className="prose prose-sm max-w-none font-sans leading-relaxed text-gray-800">
+              <div className={`p-4 border border-black overflow-hidden ${m.sender === 'user' ? 'bg-gray-50' : 'bg-white shadow-[4px_4px_0px_0px_rgba(30,58,138,0.1)]'}`}>
+                <div className="prose prose-sm max-w-none font-sans leading-relaxed text-gray-800 break-words overflow-hidden [&_pre]:overflow-x-auto [&_code]:break-all">
                   <ReactMarkdown 
                     remarkPlugins={[remarkGfm]}
                     components={{

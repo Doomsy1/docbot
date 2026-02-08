@@ -18,22 +18,37 @@ logger = logging.getLogger(__name__)
 
 
 FILE_AGENT_SYSTEM = """\
-You are a code analysis agent focusing on a single source file.
+You are a documentation agent analyzing a single source file.
 
-Your goal is to understand this file deeply and document:
-1. The file's purpose and responsibilities
-2. Key functions/classes and their relationships
-3. Dependencies and how they're used
-4. Notable patterns or implementation details
-5. Any edge cases, gotchas, or important considerations
+## Workflow
+1. Read the file with `read_file`.
+2. For complex symbols (classes with 5+ methods, functions with intricate logic), \
+spawn a SymbolAgent. For straightforward symbols, document them directly.
+3. Write findings to the notepad under `files.<filename>`.
+4. Call `finish` with a structured summary.
 
-## Guidelines
+## Summary Structure
+Your finish summary MUST follow this format:
 
-- Read the file carefully before making observations
-- For complex functions/classes, spawn a SymbolAgent for detailed analysis
-- Write all findings to the notepad with appropriate keys
-- Be specific - reference line numbers and exact code when relevant
-- Call 'finish' with a summary when done
+**Purpose**: One sentence describing what this file does.
+
+**Public API**:
+- `function_or_class_name(params)` -- what it does, return type, side effects.
+  (Repeat for each exported symbol.)
+
+**Usage patterns**: How callers typically use this file's API. Include a brief \
+pseudo-code example if the usage is non-obvious.
+
+**Internal details**: Key implementation choices, concurrency, error handling, \
+or performance considerations worth documenting.
+
+**Dependencies**: What this file imports and why.
+
+## Rules
+- Reference line numbers when describing specific behavior.
+- Focus on what a *consumer* of this file needs to know, not every internal detail.
+- Spawn SymbolAgents only for symbols whose behavior is not obvious from their \
+signature and docstring.
 """
 
 
@@ -46,6 +61,8 @@ async def run_file_agent(
     scope_result: ScopeResult,
     max_depth: int,
     current_depth: int,
+    tracker: object | None = None,
+    parent_tracker_id: str | None = None,
 ) -> str:
     """Analyze a single file and write findings to notepad.
     
@@ -58,6 +75,8 @@ async def run_file_agent(
         scope_result: Scope extraction data
         max_depth: Maximum recursion depth
         current_depth: Current depth level
+        tracker: Optional pipeline tracker for visualization
+        parent_tracker_id: Parent node ID in tracker tree
     
     Returns:
         Summary of file analysis
@@ -74,6 +93,8 @@ async def run_file_agent(
         max_depth=max_depth,
         current_depth=current_depth,
         llm_client=llm_client,
+        tracker=tracker,
+        parent_tracker_id=parent_tracker_id,
     )
     
     # Build context for file analysis
@@ -87,6 +108,8 @@ async def run_file_agent(
             toolkit=toolkit,
             max_steps=10,
             agent_id=agent_id,
+            tracker=tracker,
+            tracker_node_id=parent_tracker_id or "",
         )
         
         # Record summary to notepad

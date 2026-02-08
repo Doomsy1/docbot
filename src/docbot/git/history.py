@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import (
+from ..models import (
     DocSnapshot,
     DocsIndex,
     ScopeResult,
@@ -22,14 +22,11 @@ from .models import (
 
 def _compute_graph_digest(docs_index: DocsIndex) -> str:
     """Compute a hash of the dependency graph edges for change detection."""
-    if not docs_index.architecture or not docs_index.architecture.graph:
+    if not docs_index.scope_edges:
         return ""
     
     # Sort edges for consistent hashing
-    edges = sorted(
-        (e.source, e.target, e.edge_type)
-        for e in docs_index.architecture.graph.edges
-    )
+    edges = sorted(docs_index.scope_edges)
     
     edge_str = json.dumps(edges, sort_keys=True)
     return hashlib.sha256(edge_str.encode()).hexdigest()[:16]
@@ -58,16 +55,19 @@ def _compute_scope_summaries(scope_results: list[ScopeResult]) -> dict[str, Scop
     summaries: dict[str, ScopeSummary] = {}
     
     for sr in scope_results:
-        # Count symbols across all files in the scope
-        total_symbols = sum(len(f.symbols) for f in sr.files)
+        # Count files from paths list
+        file_count = len(sr.paths)
+        
+        # Count symbols from public_api
+        symbol_count = len(sr.public_api)
         
         # Hash the summary text for change detection
         summary_text = sr.summary or ""
         summary_hash = hashlib.sha256(summary_text.encode()).hexdigest()[:16]
         
         summaries[sr.scope_id] = ScopeSummary(
-            file_count=len(sr.files),
-            symbol_count=total_symbols,
+            file_count=file_count,
+            symbol_count=symbol_count,
             summary_hash=summary_hash,
         )
     
@@ -76,17 +76,10 @@ def _compute_scope_summaries(scope_results: list[ScopeResult]) -> dict[str, Scop
 
 def _compute_stats(docs_index: DocsIndex, scope_results: list[ScopeResult]) -> SnapshotStats:
     """Compute aggregate statistics for the snapshot."""
-    total_files = sum(len(sr.files) for sr in scope_results)
+    total_files = sum(len(sr.paths) for sr in scope_results)
     total_scopes = len(scope_results)
-    total_symbols = sum(
-        sum(len(f.symbols) for f in sr.files)
-        for sr in scope_results
-    )
-    total_edges = (
-        len(docs_index.architecture.graph.edges)
-        if docs_index.architecture and docs_index.architecture.graph
-        else 0
-    )
+    total_symbols = sum(len(sr.public_api) for sr in scope_results)
+    total_edges = len(docs_index.scope_edges)
     
     return SnapshotStats(
         total_files=total_files,

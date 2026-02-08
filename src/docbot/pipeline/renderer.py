@@ -11,7 +11,7 @@ import html as html_mod
 import logging
 from pathlib import Path
 
-from .models import DocsIndex, ScopeResult
+from ..models import DocsIndex, ScopeResult
 
 logger = logging.getLogger(__name__)
 
@@ -441,7 +441,7 @@ def _build_scope_details(index: DocsIndex) -> str:
 
 async def _generate_scope_doc_llm(scope: ScopeResult, llm_client: object) -> str:
     """LLM-written per-scope module documentation."""
-    from .llm import LLMClient
+    from ..llm import LLMClient
     assert isinstance(llm_client, LLMClient)
 
     languages = _lang_label(scope)
@@ -477,7 +477,7 @@ async def _generate_scope_doc_llm(scope: ScopeResult, llm_client: object) -> str
 
 
 async def _generate_readme_llm(index: DocsIndex, llm_client: object) -> str:
-    from .llm import LLMClient
+    from ..llm import LLMClient
     assert isinstance(llm_client, LLMClient)
 
     languages = _lang_label(index)
@@ -498,7 +498,7 @@ async def _generate_readme_llm(index: DocsIndex, llm_client: object) -> str:
 
 
 async def _generate_architecture_llm(index: DocsIndex, llm_client: object) -> str:
-    from .llm import LLMClient
+    from ..llm import LLMClient
     assert isinstance(llm_client, LLMClient)
 
     languages = _lang_label(index)
@@ -525,37 +525,163 @@ async def _generate_architecture_llm(index: DocsIndex, llm_client: object) -> st
 # Public entry points
 # ---------------------------------------------------------------------------
 
+
+def render_scope_doc(
+    scope: ScopeResult,
+    index: DocsIndex,
+    out_dir: Path,
+    llm_client: object | None = None,
+) -> Path:
+    """Render documentation for a single scope.
+    
+    Args:
+        scope: The scope to render
+        index: Full DocsIndex (for context)
+        out_dir: Output directory
+        llm_client: Optional LLM client for generation
+        
+    Returns:
+        Path to the written file
+    """
+    docs_dir = out_dir / "docs"
+    modules_dir = docs_dir / "modules"
+    modules_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Determine content
+    if scope.error or llm_client is None:
+        content = _render_scope_md_template(scope)
+    else:
+        try:
+            # Run async function in sync context
+            import asyncio
+            content = asyncio.run(_generate_scope_doc_llm(scope, llm_client))
+        except Exception as exc:
+            logger.warning("LLM scope doc for %s failed, using template: %s", scope.scope_id, exc)
+            content = _render_scope_md_template(scope)
+    
+    # Write to disk
+    path = modules_dir / f"{scope.scope_id}.generated.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def render_readme(
+    index: DocsIndex,
+    out_dir: Path,
+    llm_client: object | None = None,
+) -> Path:
+    """Render README.generated.md.
+    
+    Args:
+        index: The documentation index
+        out_dir: Output directory
+        llm_client: Optional LLM client for generation
+        
+    Returns:
+        Path to the written file
+    """
+    if llm_client is None:
+        content = _render_readme_template(index)
+    else:
+        try:
+            import asyncio
+            content = asyncio.run(_generate_readme_llm(index, llm_client))
+        except Exception as exc:
+            logger.warning("LLM README failed, using template: %s", exc)
+            content = _render_readme_template(index)
+    
+    path = out_dir / "README.generated.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def render_architecture(
+    index: DocsIndex,
+    out_dir: Path,
+    llm_client: object | None = None,
+) -> Path:
+    """Render architecture.generated.md.
+    
+    Args:
+        index: The documentation index
+        out_dir: Output directory
+        llm_client: Optional LLM client for generation
+        
+    Returns:
+        Path to the written file
+    """
+    docs_dir = out_dir / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    
+    if llm_client is None:
+        content = _render_architecture_template(index)
+    else:
+        try:
+            import asyncio
+            content = asyncio.run(_generate_architecture_llm(index, llm_client))
+        except Exception as exc:
+            logger.warning("LLM architecture failed, using template: %s", exc)
+            content = _render_architecture_template(index)
+    
+    # Append Mermaid graph
+    mermaid_md = "\n\n## Dependency graph\n\n```mermaid\n" + _get_mermaid(index) + "\n```\n"
+    
+    path = docs_dir / "architecture.generated.md"
+    path.write_text(content + mermaid_md, encoding="utf-8")
+    return path
+
+
+def render_api_reference(index: DocsIndex, out_dir: Path) -> Path:
+    """Render api.generated.md (always template-based).
+    
+    Args:
+        index: The documentation index
+        out_dir: Output directory
+        
+    Returns:
+        Path to the written file
+    """
+    docs_dir = out_dir / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    
+    content = _render_api(index)
+    
+    path = docs_dir / "api.generated.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def render_html_report(index: DocsIndex, out_dir: Path) -> Path:
+    """Render index.html report (always template-based).
+    
+    Args:
+        index: The documentation index
+        out_dir: Output directory
+        
+    Returns:
+        Path to the written file
+    """
+    content = _render_index_html(index)
+    
+    path = out_dir / "index.html"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+
 def render(index: DocsIndex, out_dir: Path) -> list[Path]:
     """Write all docs using templates only (no LLM). Returns files written."""
     written: list[Path] = []
 
-    docs_dir = out_dir / "docs"
-    modules_dir = docs_dir / "modules"
-    modules_dir.mkdir(parents=True, exist_ok=True)
-
+    # Render all scopes
     for scope in index.scopes:
-        p = modules_dir / f"{scope.scope_id}.generated.md"
-        p.write_text(_render_scope_md_template(scope), encoding="utf-8")
-        written.append(p)
+        written.append(render_scope_doc(scope, index, out_dir))
 
-    p = out_dir / "README.generated.md"
-    p.write_text(_render_readme_template(index), encoding="utf-8")
-    written.append(p)
-
-    p = docs_dir / "architecture.generated.md"
-    arch = _render_architecture_template(index)
-    # Append mermaid to architecture doc
-    mermaid_md = "## Dependency graph\n\n```mermaid\n" + _get_mermaid(index) + "\n```\n"
-    p.write_text(arch + "\n" + mermaid_md, encoding="utf-8")
-    written.append(p)
-
-    p = docs_dir / "api.generated.md"
-    p.write_text(_render_api(index), encoding="utf-8")
-    written.append(p)
-
-    p = out_dir / "index.html"
-    p.write_text(_render_index_html(index), encoding="utf-8")
-    written.append(p)
+    # Render top-level docs
+    written.append(render_readme(index, out_dir))
+    written.append(render_architecture(index, out_dir))
+    written.append(render_api_reference(index, out_dir))
+    written.append(render_html_report(index, out_dir))
 
     return written
 
@@ -576,80 +702,48 @@ async def render_with_llm(
     """
     written: list[Path] = []
 
-    docs_dir = out_dir / "docs"
-    modules_dir = docs_dir / "modules"
-    modules_dir.mkdir(parents=True, exist_ok=True)
-
-    # Results storage
-    scope_contents: dict[str, tuple[ScopeResult, str]] = {}
-    readme_content: str = ""
-    arch_content: str = ""
-
-    async def _scope_task(scope: ScopeResult) -> None:
-        nonlocal scope_contents
-        if scope.error:
-            content = _render_scope_md_template(scope)
-        else:
-            try:
-                content = await _generate_scope_doc_llm(scope, llm_client)
-            except Exception as exc:
-                logger.warning("LLM scope doc for %s failed, using template: %s", scope.scope_id, exc)
-                content = _render_scope_md_template(scope)
-        scope_contents[scope.scope_id] = (scope, content)
+    # Async wrappers for individual render functions
+    async def _scope_task(scope: ScopeResult) -> Path:
+        # Run sync function in executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        path = await loop.run_in_executor(
+            None, render_scope_doc, scope, index, out_dir, llm_client
+        )
         if on_complete:
             on_complete(f"renderer.{scope.scope_id}")
+        return path
 
-    async def _readme_task() -> None:
-        nonlocal readme_content
-        try:
-            readme_content = await _generate_readme_llm(index, llm_client)
-        except Exception as exc:
-            logger.warning("LLM README failed, using template: %s", exc)
-            readme_content = _render_readme_template(index)
+    async def _readme_task() -> Path:
+        loop = asyncio.get_event_loop()
+        path = await loop.run_in_executor(
+            None, render_readme, index, out_dir, llm_client
+        )
         if on_complete:
             on_complete("renderer.readme")
+        return path
 
-    async def _arch_task() -> None:
-        nonlocal arch_content
-        try:
-            arch_content = await _generate_architecture_llm(index, llm_client)
-        except Exception as exc:
-            logger.warning("LLM architecture failed, using template: %s", exc)
-            arch_content = _render_architecture_template(index)
+    async def _arch_task() -> Path:
+        loop = asyncio.get_event_loop()
+        path = await loop.run_in_executor(
+            None, render_architecture, index, out_dir, llm_client
+        )
         if on_complete:
             on_complete("renderer.arch")
+        return path
 
-    # Run all tasks concurrently - each calls on_complete when done
+    # Run LLM tasks in parallel
     async with asyncio.TaskGroup() as tg:
-        for scope in index.scopes:
-            tg.create_task(_scope_task(scope))
-        tg.create_task(_readme_task())
-        tg.create_task(_arch_task())
+        scope_tasks = [tg.create_task(_scope_task(s)) for s in index.scopes]
+        readme_task = tg.create_task(_readme_task())
+        arch_task = tg.create_task(_arch_task())
 
-    # -- Write everything to disk -------------------------------------------
+    # Collect results
+    written.extend([t.result() for t in scope_tasks])
+    written.append(readme_task.result())
+    written.append(arch_task.result())
 
-    for scope_id, (scope, content) in scope_contents.items():
-        p = modules_dir / f"{scope.scope_id}.generated.md"
-        p.write_text(content, encoding="utf-8")
-        written.append(p)
-
-    p = out_dir / "README.generated.md"
-    p.write_text(readme_content, encoding="utf-8")
-    written.append(p)
-
-    mermaid_md = "\n\n## Dependency graph\n\n```mermaid\n" + _get_mermaid(index) + "\n```\n"
-    p = docs_dir / "architecture.generated.md"
-    p.write_text(arch_content + mermaid_md, encoding="utf-8")
-    written.append(p)
-
-    # API reference (always structured template -- it's a reference)
-    p = docs_dir / "api.generated.md"
-    p.write_text(_render_api(index), encoding="utf-8")
-    written.append(p)
-
-    # HTML index
-    p = out_dir / "index.html"
-    p.write_text(_render_index_html(index), encoding="utf-8")
-    written.append(p)
+    # Sync rendering for API and HTML (no LLM needed)
+    written.append(render_api_reference(index, out_dir))
+    written.append(render_html_report(index, out_dir))
 
     return written

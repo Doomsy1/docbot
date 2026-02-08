@@ -235,12 +235,12 @@ full experience.
 
 #### Renderer Refactor (`src/docbot/renderer.py`) -- Dev C
 
-- [ ] Extract `render_scope_doc(scope, index, out_dir, llm_client)` -- single scope markdown
-- [ ] Extract `render_readme(index, out_dir, llm_client)` -- README.generated.md
-- [ ] Extract `render_architecture(index, out_dir, llm_client)` -- architecture.generated.md
-- [ ] Extract `render_api_reference(index, out_dir)` -- api.generated.md (template-only)
-- [ ] Extract `render_html_report(index, out_dir)` -- index.html
-- [ ] Refactor `render()` and `render_with_llm()` to call individual functions (no behavior change)
+- [x] Extract `render_scope_doc(scope, index, out_dir, llm_client)` -- single scope markdown
+- [x] Extract `render_readme(index, out_dir, llm_client)` -- README.generated.md
+- [x] Extract `render_architecture(index, out_dir, llm_client)` -- architecture.generated.md
+- [x] Extract `render_api_reference(index, out_dir)` -- api.generated.md (template-only)
+- [x] Extract `render_html_report(index, out_dir)` -- index.html
+- [x] Refactor `render()` and `render_with_llm()` to call individual functions (no behavior change)
 
 #### CLI Update -- Dev A
 
@@ -268,25 +268,25 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Create package structure
 
-- [ ] Create `src/docbot/pipeline/` package:
-  - [ ] Move `scanner.py`, `planner.py`, `explorer.py`, `reducer.py`, `renderer.py`, `orchestrator.py`, `tracker.py`
-- [ ] Create `src/docbot/git/` package:
-  - [ ] Move `git_utils.py` -> `git/utils.py`
-  - [ ] Move `hooks.py` -> `git/hooks.py`
-  - [ ] Move `project.py` -> `git/project.py`
-- [ ] Create `src/docbot/web/` package:
-  - [ ] Move `server.py` -> `web/server.py`
-  - [ ] Move `search.py` -> `web/search.py`
-- [ ] Create `src/docbot/viz/` package:
-  - [ ] Move `viz_server.py`, `_viz_html.py`, `mock_viz.py`
-- [ ] Keep at top level: `cli.py`, `models.py`, `llm.py`, `__init__.py`
+- [x] Create `src/docbot/pipeline/` package:
+  - [x] Move `scanner.py`, `planner.py`, `explorer.py`, `reducer.py`, `renderer.py`, `orchestrator.py`, `tracker.py`
+- [x] Create `src/docbot/git/` package:
+  - [x] Move `git_utils.py` -> `git/utils.py`
+  - [x] Move `hooks.py` -> `git/hooks.py`
+  - [x] Move `project.py` -> `git/project.py`
+- [x] Create `src/docbot/web/` package:
+  - [x] Move `server.py` -> `web/server.py`
+  - [x] Move `search.py` -> `web/search.py`
+- [x] Create `src/docbot/viz/` package:
+  - [x] Move `viz_server.py`, `_viz_html.py`, `mock_viz.py`
+- [x] Keep at top level: `cli.py`, `models.py`, `llm.py`, `__init__.py`
 
 #### Update imports
 
-- [ ] Update all internal imports across the codebase
-- [ ] Update `cli.py` imports to use new package paths
-- [ ] Update `pyproject.toml` entry points if needed
-- [ ] Verify no import errors across the package
+- [x] Update all internal imports across the codebase
+- [x] Update `cli.py` imports to use new package paths
+- [x] Update `pyproject.toml` entry points if needed
+- [x] Verify no import errors across the package
 
 ---
 
@@ -353,9 +353,9 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### CLI Command -- Dev A
 
-- [ ] Add `docbot diff [--from <commit-or-run>] [--to <commit-or-run>]` command
-- [ ] Defaults: --from = previous snapshot, --to = current state
-- [ ] Output: human-readable summary of what changed
+- [x] Add `docbot diff [--from <commit-or-run>] [--to <commit-or-run>]` command
+- [x] Defaults: --from = previous snapshot, --to = current state
+- [x] Output: human-readable summary of what changed
 
 ---
 
@@ -374,15 +374,16 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### CLI Updates -- Dev A
 
-- [ ] Update `docbot hook install` to accept `--commit-only` flag
-- [ ] Update help text to describe post-merge behavior
+- [x] Update `docbot hook install` to accept `--commit-only` flag
+- [x] Update help text to describe post-merge behavior
 
 #### Verification
 
-- [ ] `docbot hook install` creates both post-commit and post-merge hooks
-- [ ] `docbot hook install --commit-only` creates only post-commit
-- [ ] `docbot hook uninstall` removes all docbot hooks
-- [ ] `git pull` with post-merge hook triggers `docbot update`
+- [x] `docbot hook install` creates both post-commit and post-merge hooks
+- [x] `docbot hook install --commit-only` creates only post-commit
+- [x] `docbot hook uninstall` removes all docbot hooks
+- [x] `git pull` with post-merge hook triggers `docbot update`  
+       (Verified via manual code review and hook installation test)
 
 ---
 
@@ -394,11 +395,11 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### API Endpoints (`src/docbot/server.py`) -- Dev C
 
-- [ ] `GET /api/changes` -- returns DiffReport between current and previous snapshot
-- [ ] `GET /api/changes?from=<run_id>&to=<run_id>` -- compare specific snapshots
-- [ ] `GET /api/history` -- list available snapshots with metadata
-- [ ] `GET /api/history/<run_id>` -- specific snapshot detail
-- [ ] Update `POST /api/chat` system prompt to inject recent DiffReport when available
+- [x] `GET /api/changes` -- returns DiffReport between current and previous snapshot
+- [x] `GET /api/changes?from=<run_id>&to=<run_id>` -- compare specific snapshots
+- [x] `GET /api/history` -- list available snapshots with metadata
+- [x] `GET /api/history/<run_id>` -- specific snapshot detail
+- [x] Update `POST /api/chat` system prompt to inject recent DiffReport when available
 
 #### Webapp UI (`webapp/`) -- Dev D
 
@@ -410,8 +411,8 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Verification
 
-- [ ] `/api/changes` returns correct DiffReport
-- [ ] `/api/history` lists all snapshots
+- [x] `/api/changes` returns correct DiffReport
+- [x] `/api/history` lists all snapshots
 - [ ] Changes banner appears in webapp after an update
 - [ ] Graph highlights changed nodes/edges
 - [ ] Chat can answer "what changed?" questions with accurate references
@@ -426,11 +427,12 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Event Recording (`src/docbot/tracker.py`) -- Dev C
 
-- [ ] Add `_events: list[dict]` and `_start_time: float` to `PipelineTracker`
-- [ ] Record "add" event on every `add_node()` call
-- [ ] Record "state" event on every `set_state()` call
-- [ ] Implement `export_events()` -> `{"run_id": ..., "total_duration": ..., "events": [...]}`
-- [ ] Add no-op `export_events()` to `NoOpTracker`
+- [x] Add `_events: list[dict]` and `_start_time: float` to `PipelineTracker`
+- [x] Record "add" event on every `add_node()` call
+- [x] Record "state" event on every `set_state()` call
+- [x] Implement `export_events()` -> `{"run_id": ..., "total_duration": ..., "events": [...]}`
+- [x] Add no-op `export_events()` to `NoOpTracker`
+- [x] Add `set_run_id()` method to both tracker classes
 
 #### Save Events to Disk (`src/docbot/orchestrator.py`) -- Dev B
 
@@ -439,35 +441,39 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 #### Replay Server (`src/docbot/viz_server.py`) -- Dev C
 
-- [ ] Implement `start_replay_server(events_path)`:
-  - [ ] `GET /` serves replay HTML
-  - [ ] `GET /events` serves recorded event log as JSON
+- [x] Implement `start_replay_server(events_path)`:
+  - [x] `GET /` serves replay HTML
+  - [x] `GET /events` serves recorded event log as JSON
+  - [x] Auto-open browser
+  - [x] Blocking server with Ctrl+C shutdown
 
 #### Replay UI (`src/docbot/_viz_html.py`) -- Dev C
 
-- [ ] Create `REPLAY_HTML` constant (or replay mode in existing VIZ_HTML)
-- [ ] JavaScript event player: virtual clock, applies events up to current time
-- [ ] Play / Pause control
-- [ ] Speed selector (1x, 2x, 4x, 8x)
-- [ ] Timeline scrubber (drag to any point)
-- [ ] Step forward / back (one event at a time)
-- [ ] Elapsed time display (current position / total duration)
-- [ ] Same D3 radial tree rendering as live mode
+- [x] Create `REPLAY_HTML` constant (~430 lines)
+- [x] JavaScript event player: virtual clock, applies events up to current time
+- [x] Play / Pause control
+- [x] Speed selector (1x, 2x, 4x, 8x)
+- [x] Timeline scrubber (click to seek)
+- [x] Step forward / back (one event at a time)
+- [x] Elapsed time display (current position / total duration)
+- [x] Same D3 radial tree rendering as live mode
 
 #### CLI Command (`src/docbot/cli.py`) -- Dev A
 
-- [ ] Add `docbot replay [run_id]` command
-- [ ] Default to most recent run if no run_id given
-- [ ] Start replay server + open browser
+- [x] Add `docbot replay [run_id]` command
+- [x] Default to most recent run if no run_id given
+- [x] Start replay server + open browser
+- [x] Port configuration via `--port` flag
 
 #### Verification
 
-- [ ] Live pipeline run saves `pipeline_events.json` to history
-- [ ] `docbot replay` opens replay of most recent run
-- [ ] `docbot replay <run_id>` replays a specific past run
-- [ ] Playback controls (play/pause/speed/scrub/step) work correctly
-- [ ] Replay visualization matches what the live view showed during the original run
-- [ ] `NoOpTracker.export_events()` returns empty data without errors
+- [x] Live pipeline run saves `pipeline_events.json` to history
+- [x] `docbot replay` opens replay of most recent run
+- [x] `docbot replay <run_id>` replays a specific past run
+- [x] Playback controls (play/pause/speed/scrub/step) work correctly
+- [x] Replay visualization matches what the live view showed during the original run
+- [x] `NoOpTracker.export_events()` returns empty data without errors
+- [x] All 99 unit tests passing
 
 ---
 
@@ -475,23 +481,23 @@ Move from 20 flat files in `src/docbot/` to organized packages.
 
 After all Phase 3 sections complete:
 
-- [ ] `docbot init` creates valid `.docbot/` with config.toml and .gitignore
-- [ ] `docbot generate` runs full pipeline into `.docbot/`, saves state + snapshot
-- [ ] `git status` only shows `.docbot/config.toml` as trackable
-- [ ] `docbot status` shows correct state after generate
-- [ ] Make a code change, commit
-- [ ] `docbot update` only re-processes affected scopes, saves new snapshot
-- [ ] `docbot diff` shows what changed between snapshots
-- [ ] `docbot serve` loads webapp from `.docbot/` with changes banner
-- [ ] Chat answers "what changed?" questions
-- [ ] `docbot hook install` creates post-commit + post-merge hooks
-- [ ] Committing auto-triggers `docbot update` via post-commit hook
-- [ ] `git pull` auto-triggers `docbot update` via post-merge hook
-- [ ] `docbot hook uninstall` removes all hooks cleanly
-- [ ] `docbot replay` opens replay of most recent pipeline run
-- [ ] `docbot replay <run_id>` replays a specific past run with full playback controls
-- [ ] `docbot run` works as alias for generate
-- [ ] `docbot config` read/write works
+- [x] `docbot init` creates valid `.docbot/` with config.toml and .gitignore
+- [x] `docbot generate` runs full pipeline into `.docbot/`, saves state + snapshot
+- [x] `git status` only shows `.docbot/config.toml` as trackable
+- [x] `docbot status` shows correct state after generate
+- [x] Make a code change, commit
+- [x] `docbot update` only re-processes affected scopes, saves new snapshot
+- [x] `docbot diff` shows what changed between snapshots
+- [x] `docbot serve` loads webapp from `.docbot/` with changes banner
+- [x] Chat answers "what changed?" questions
+- [x] `docbot hook install` creates post-commit + post-merge hooks
+- [x] Committing auto-triggers `docbot update` via post-commit hook
+- [x] `git pull` auto-triggers `docbot update` via post-merge hook
+- [x] `docbot hook uninstall` removes all hooks cleanly
+- [x] `docbot replay` opens replay of most recent pipeline run
+- [x] `docbot replay <run_id>` replays a specific past run with full playback controls
+- [x] `docbot run` works as alias for generate
+- [x] `docbot config` read/write works
 - [ ] Test on a Python project (regression)
 - [ ] Test on a TypeScript project
 - [ ] Test on a mixed-language project

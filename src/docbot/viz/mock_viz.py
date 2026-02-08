@@ -11,8 +11,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from .models import DocsIndex, ScopePlan, ScopeResult, SourceFile
-from .scanner import ScanResult
+from ..models import DocsIndex, ScopePlan, ScopeResult, SourceFile
+from ..pipeline.scanner import ScanResult
 
 # -- Mock scope definitions ---------------------------------------------------
 

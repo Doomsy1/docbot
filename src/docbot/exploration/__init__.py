@@ -16,6 +16,7 @@ Entry point:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -104,7 +105,6 @@ async def run_agent_exploration(
 
     child_seq = 0
     delegate_counts: dict[str, int] = {}
-    large_repo = len(scan_files) >= 80
 
     def _select_scope_files(target: str) -> list[str]:
         norm = target.strip().replace("\\", "/").strip("/")
@@ -112,6 +112,81 @@ async def run_agent_exploration(
             return scan_files[:200]
         matches = [p for p in scan_files if p == norm or p.startswith(f"{norm}/")]
         return matches[:200] if matches else scan_files[:50]
+
+    async def _plan_delegations(
+        *,
+        depth: int,
+        scope_files: list[str],
+        summary: str,
+        desired_count: int,
+    ) -> list[dict[str, str]]:
+        """Ask the model to choose delegation targets/purposes from scope files."""
+        if desired_count <= 0 or depth >= max_depth:
+            return []
+
+        # Build candidate directories from observed file structure.
+        counts: dict[str, int] = {}
+        for path in scope_files:
+            parts = path.replace("\\", "/").split("/")
+            if len(parts) >= 2:
+                key = "/".join(parts[:2])
+            elif parts:
+                key = parts[0]
+            else:
+                continue
+            if key and not key.startswith("."):
+                counts[key] = counts.get(key, 0) + 1
+        candidates = [k for k, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:25]]
+        if not candidates:
+            return []
+
+        prompt = (
+            "You are planning child exploration delegations for a codebase analysis agent.\n"
+            f"Current depth: {depth}. Max depth: {max_depth}.\n"
+            f"Choose up to {desired_count} child delegations from the candidate targets below.\n"
+            "Each item must include:\n"
+            '- "target": exact candidate path\n'
+            '- "name": short child label\n'
+            '- "purpose": concise mission for child\n'
+            '- "context": short context packet for child\n'
+            "Return ONLY valid JSON array. No markdown fences.\n\n"
+            f"Parent summary:\n{summary[:2000] or '(none)'}\n\n"
+            f"Candidates:\n{json.dumps(candidates, indent=2)}"
+        )
+        try:
+            resp = await llm.ainvoke([HumanMessage(content=prompt)])
+            content = getattr(resp, "content", "")
+            if isinstance(content, list):
+                content = "".join(
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in content
+                )
+            raw = str(content).strip()
+            if raw.startswith("```"):
+                raw = raw.strip("`")
+                raw = raw.replace("json", "", 1).strip()
+            parsed = json.loads(raw)
+            if not isinstance(parsed, list):
+                return []
+            out: list[dict[str, str]] = []
+            for item in parsed[:desired_count]:
+                if not isinstance(item, dict):
+                    continue
+                target = str(item.get("target", "")).strip()
+                if not target or target not in candidates:
+                    continue
+                out.append(
+                    {
+                        "target": target,
+                        "name": str(item.get("name", f"delegate:{target}")).strip() or f"delegate:{target}",
+                        "purpose": str(item.get("purpose", f"Explore {target}")).strip() or f"Explore {target}",
+                        "context": str(item.get("context", summary[:500])).strip(),
+                    }
+                )
+            return out
+        except Exception as exc:
+            logger.warning("Delegation planning failed at depth %s: %s", depth, exc)
+            return []
 
     async def _run_agent(
         *,
@@ -264,59 +339,48 @@ async def run_agent_exploration(
         scope_files=scan_files[:200],
     )
 
-    # Deterministic delegation plan: always run focused child agents over the
-    # largest top-level code regions so exploration remains reliable even when
-    # model tool-calling is inconsistent.
-    if max_depth > 0:
-        top_counts: dict[str, int] = {}
-        for path in scan_files:
-            parts = path.split("/", 1)
-            if not parts:
-                continue
-            top = parts[0]
-            if top.startswith("."):
-                continue
-            top_counts[top] = top_counts.get(top, 0) + 1
-        planned = [name for name, _ in sorted(top_counts.items(), key=lambda kv: kv[1], reverse=True)[:3]]
-        for idx, target in enumerate(planned, start=1):
-            child_id = f"{root_id}.plan{idx}"
-            child_scope_files = _select_scope_files(target)
+    # Model-driven delegation planning fallback:
+    # if root did not delegate enough, ask the model to pick child scopes.
+    large_repo = len(scan_files) >= 80
+    desired_root_children = 2 if large_repo else 1
+    root_existing_children = delegate_counts.get(root_id, 0)
+    if max_depth > 0 and root_existing_children < desired_root_children:
+        plans = await _plan_delegations(
+            depth=0,
+            scope_files=scan_files[:200],
+            summary=root_summary,
+            desired_count=desired_root_children - root_existing_children,
+        )
+        for plan in plans:
+            child_seq += 1
+            child_id = f"{root_id}.model{child_seq}"
+            child_scope_files = _select_scope_files(plan["target"])
             child_summary = await _run_agent(
                 agent_id=child_id,
                 parent_id=root_id,
-                agent_purpose=f"Deep-dive '{target}' and record architecture, data flow, and key implementation details.",
-                parent_context=(root_summary or "")[:2000],
+                agent_purpose=plan["purpose"],
+                parent_context=plan["context"][:2000],
                 depth=1,
                 scope_files=child_scope_files,
             )
 
-            # For large repositories, enforce a second delegation layer.
+            # For large repos, also ask model to create at least one depth-2 child.
             if max_depth > 1 and large_repo:
-                sub_counts: dict[str, int] = {}
-                for path in child_scope_files:
-                    parts = path.replace("\\", "/").split("/")
-                    if len(parts) >= 2 and parts[0] == target:
-                        sub = parts[1]
-                        if sub and not sub.startswith("."):
-                            sub_counts[sub] = sub_counts.get(sub, 0) + 1
-                sub_targets = [n for n, _ in sorted(sub_counts.items(), key=lambda kv: kv[1], reverse=True)[:2]]
-                if not sub_targets and child_scope_files:
-                    # Fallback to at least one depth-2 agent even if child files
-                    # are flat under the top-level directory.
-                    sub_targets = [child_scope_files[0].replace("\\", "/")]
-
-                for sub_idx, sub in enumerate(sub_targets, start=1):
-                    sub_path = sub if "/" in sub else f"{target}/{sub}"
+                sub_plans = await _plan_delegations(
+                    depth=1,
+                    scope_files=child_scope_files,
+                    summary=child_summary or root_summary,
+                    desired_count=1,
+                )
+                for sub in sub_plans:
+                    child_seq += 1
                     await _run_agent(
-                        agent_id=f"{child_id}.plan{sub_idx}",
+                        agent_id=f"{child_id}.model{child_seq}",
                         parent_id=child_id,
-                        agent_purpose=(
-                            f"Deep-dive '{sub_path}' and capture implementation details, "
-                            f"critical data flow, and notable concerns."
-                        ),
-                        parent_context=(child_summary or root_summary or "")[:2000],
+                        agent_purpose=sub["purpose"],
+                        parent_context=sub["context"][:2000],
                         depth=2,
-                        scope_files=_select_scope_files(sub_path),
+                        scope_files=_select_scope_files(sub["target"]),
                     )
 
     return store

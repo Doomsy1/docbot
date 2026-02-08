@@ -144,3 +144,19 @@ def test_set_live_event_queue_resets_stale_snapshot() -> None:
     server._set_live_event_queue(asyncio.Queue())
 
     assert server._agent_state_snapshot == {"agents": {}, "notepads": {}}
+
+
+def test_agent_spawned_snapshot_persists_scope_root() -> None:
+    server._agent_state_snapshot = {"agents": {}, "notepads": {}}
+    server._update_agent_state_snapshot(
+        {
+            "type": "agent_spawned",
+            "agent_id": "root.1",
+            "parent_id": "root",
+            "purpose": "Explore racing_sim",
+            "depth": 1,
+            "scope_root": "racing_sim",
+        }
+    )
+
+    assert server._agent_state_snapshot["agents"]["root.1"]["scope_root"] == "racing_sim"

@@ -29,12 +29,6 @@ export default function App() {
             Dashboard
           </button>
           <button
-            onClick={() => setActiveTab('graph')}
-            className={`hover:underline ${activeTab === 'graph' ? 'underline decoration-2' : ''}`}
-          >
-            Graph
-          </button>
-          <button
             onClick={() => setActiveTab('tours')}
             className={`hover:underline ${activeTab === 'tours' ? 'underline decoration-2' : ''}`}
           >
@@ -45,12 +39,6 @@ export default function App() {
             className={`hover:underline ${activeTab === 'files' ? 'underline decoration-2' : ''}`}
           >
             Files
-          </button>
-          <button
-            onClick={() => setActiveTab('dev-arch')}
-            className={`hover:underline ${activeTab === 'dev-arch' ? 'underline decoration-2' : ''}`}
-          >
-            Dev Arch
           </button>
           <button
             onClick={() => setActiveTab('explore')}

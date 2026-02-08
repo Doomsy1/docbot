@@ -2565,6 +2565,103 @@ async def get_tour_detail(tour_id: str) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# History / Diff
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/history")
+def get_history():
+    """Return list of documentation snapshots, newest first."""
+    from ..git.history import list_snapshots
+    
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+    
+    # Look for .docbot directory relative to repo root
+    index = _load_index()
+    docbot_dir = Path(index.repo_path) / ".docbot"
+    
+    if not docbot_dir.exists():
+        return []
+    
+    snapshots = list_snapshots(docbot_dir)
+    return [
+        {
+            "run_id": s.run_id,
+            "timestamp": s.timestamp,
+            "commit_sha": s.commit_hash,
+            "commit_msg": None,  # Not stored in snapshot; could lookup via git
+            "scope_count": s.stats.total_scopes,
+            "symbol_count": s.stats.total_symbols,
+            "entrypoint_count": 0,  # Not tracked in snapshot stats
+        }
+        for s in snapshots
+    ]
+
+
+@app.get("/api/changes")
+def get_changes(from_id: str | None = None, to_id: str | None = None):
+    """Compare two snapshots and return the diff report."""
+    from ..git.history import list_snapshots, load_snapshot
+    from ..git.diff import compute_diff
+    
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+    
+    index = _load_index()
+    docbot_dir = Path(index.repo_path) / ".docbot"
+    
+    if not docbot_dir.exists():
+        raise HTTPException(status_code=404, detail="No .docbot directory found.")
+    
+    snapshots = list_snapshots(docbot_dir)
+    if len(snapshots) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 snapshots to compare.")
+    
+    # Default: compare latest two
+    if from_id is None:
+        from_id = snapshots[1].run_id  # Second newest
+    if to_id is None:
+        to_id = snapshots[0].run_id  # Newest
+    
+    from_snap = load_snapshot(docbot_dir, from_id)
+    to_snap = load_snapshot(docbot_dir, to_id)
+    
+    if from_snap is None:
+        raise HTTPException(status_code=404, detail=f"Snapshot '{from_id}' not found.")
+    if to_snap is None:
+        raise HTTPException(status_code=404, detail=f"Snapshot '{to_id}' not found.")
+    
+    diff_report = compute_diff(from_snap, to_snap)
+    
+    return {
+        "from_id": from_id,
+        "to_id": to_id,
+        "from_timestamp": from_snap.timestamp,
+        "to_timestamp": to_snap.timestamp,
+        "added_scopes": diff_report.added_scopes,
+        "removed_scopes": diff_report.removed_scopes,
+        "modified_scopes": [
+            {
+                "scope_id": m.scope_id,
+                "added_files": m.added_files,
+                "removed_files": m.removed_files,
+                "added_symbols": m.added_symbols,
+                "removed_symbols": m.removed_symbols,
+                "summary_changed": m.summary_changed,
+            }
+            for m in diff_report.modified_scopes
+        ],
+        "graph_changed": bool(diff_report.graph_changes.changed_nodes),
+        "stats_delta": {
+            "total_files": diff_report.stats_delta.total_files,
+            "total_scopes": diff_report.stats_delta.total_scopes,
+            "total_symbols": diff_report.stats_delta.total_symbols,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Server launcher
 # ---------------------------------------------------------------------------
 

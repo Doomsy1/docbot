@@ -24,6 +24,15 @@ app.add_typer(hook_app, name="hook")
 console = Console()
 
 
+def _run_async(coro) -> None:
+    """Run an async coroutine, exiting cleanly on Ctrl+C."""
+    try:
+        asyncio.run(coro)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/yellow]")
+        raise typer.Exit(code=130)
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -306,7 +315,7 @@ def generate(
         tracker = PipelineTracker()
         _server, url = start_viz_server(tracker)
         console.print(f"[bold cyan]Mock visualization:[/bold cyan] {url}")
-        asyncio.run(
+        _run_async(
             run_async(
                 repo_path=project_root,
                 concurrency=effective_cfg.concurrency,
@@ -335,7 +344,7 @@ def generate(
         console.print(f"[bold]LLM:[/bold] {effective_cfg.model} via OpenRouter")
 
     # Run the git-aware pipeline, outputting to .docbot/.
-    asyncio.run(
+    _run_async(
         generate_async(
             docbot_root=docbot_dir,
             config=effective_cfg,
@@ -386,7 +395,7 @@ def update(
 
     llm_client = _build_llm_client(effective_cfg.model, effective_cfg.no_llm)
 
-    asyncio.run(
+    _run_async(
         update_async(
             docbot_root=docbot_dir,
             config=effective_cfg,
@@ -499,7 +508,11 @@ def serve(
             from .pipeline.orchestrator import run_async
 
             llm_client = _build_llm_client(model)
-            run_dir = asyncio.run(run_async(repo_path=resolved, llm_client=llm_client))
+            try:
+                run_dir = asyncio.run(run_async(repo_path=resolved, llm_client=llm_client))
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Interrupted.[/yellow]")
+                raise typer.Exit(code=130)
             console.print()
         else:
             console.print(
@@ -526,7 +539,11 @@ def serve(
 
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
 
-    start_server(run_dir, host=host, port=port, llm_client=llm_client)
+    try:
+        start_server(run_dir, host=host, port=port, llm_client=llm_client)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Server stopped.[/yellow]")
+        raise typer.Exit(code=130)
 
 
 @app.command()
@@ -781,7 +798,7 @@ def run(
         tracker = PipelineTracker()
         _server, url = start_viz_server(tracker)
         console.print(f"[bold cyan]Mock visualization:[/bold cyan] {url}")
-        asyncio.run(
+        _run_async(
             run_async(
                 repo_path=repo,
                 concurrency=concurrency,
@@ -811,7 +828,7 @@ def run(
     else:
         tracker = NoOpTracker()
 
-    asyncio.run(
+    _run_async(
         run_async(
             repo_path=repo,
             output_base=output,
@@ -887,7 +904,11 @@ def replay(
     webbrowser.open(f"http://127.0.0.1:{port}")
 
     # Start server (blocking)
-    start_replay_server(events_path, port=port)
+    try:
+        start_replay_server(events_path, port=port)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Replay stopped.[/yellow]")
+        raise typer.Exit(code=130)
 
 
 if __name__ == "__main__":

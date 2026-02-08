@@ -2875,14 +2875,216 @@ def _normalize_tours(raw_tours: list[dict], index: "DocsIndex | None" = None) ->
     return normalized
 
 
+def _is_llm_narrative(text: str | None) -> bool:
+    """Return True if *text* looks like an LLM-generated narrative rather than a
+    template-based stats summary (e.g. "Scope 'X' covers N file(s)…")."""
+    if not text:
+        return False
+    # Template summaries start with "Scope '" and are mostly stats
+    if text.startswith("Scope '"):
+        return False
+    # Very short strings are unlikely to be meaningful narratives
+    if len(text.split()) < 15:
+        return False
+    return True
+
+
+def _scope_key_symbols(scope: "ScopeResult", limit: int = 5) -> list[str]:
+    """Extract unique key symbol names across files in a scope."""
+    seen: list[str] = []
+    for fp in scope.paths[:8]:
+        ext = scope.file_extractions.get(fp)
+        if ext and ext.symbols:
+            for sym in ext.symbols[:3]:
+                if sym.name not in seen:
+                    seen.append(sym.name)
+                    if len(seen) >= limit:
+                        return seen
+    return seen
+
+
+def _build_scope_description(scope: "ScopeResult") -> str:
+    """Build a rich, human-friendly description for a scope."""
+    title = scope.title
+    file_count = len(scope.paths)
+    symbols = _scope_key_symbols(scope, limit=5)
+
+    # If we have an LLM narrative, use a concise excerpt
+    if _is_llm_narrative(scope.summary):
+        return _truncate_words(scope.summary, 50)
+
+    # Otherwise compose from structured data
+    parts: list[str] = []
+    if symbols:
+        sym_str = ", ".join(f"`{s}`" for s in symbols[:4])
+        parts.append(
+            f"The **{title}** module spans {file_count} file(s) and defines "
+            f"key symbols such as {sym_str}."
+        )
+    else:
+        parts.append(
+            f"The **{title}** module spans {file_count} file(s)."
+        )
+
+    # Add file highlights
+    filenames = [p.split("/")[-1] for p in scope.paths[:4]]
+    if filenames:
+        parts.append(f"Core files include {', '.join(filenames)}.")
+
+    return " ".join(parts)
+
+
+def _extract_json_array(raw: str) -> list[dict] | None:
+    """Parse a JSON array from raw LLM text, stripping markdown fences."""
+    cleaned = raw.strip()
+    if "```" in cleaned:
+        cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+        cleaned = cleaned.replace("```", "").strip()
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start != -1 and end != -1:
+        return json.loads(cleaned[start : end + 1])
+    return None
+
+
+async def _enrich_tour_descriptions(tours: list[dict], index: DocsIndex) -> list[dict]:
+    """Use LLM to generate detailed descriptions for tour cards and every step."""
+    if _llm_client is None:
+        return tours
+
+    # --- Build rich scope context for the LLM ---
+    scope_ctx_lines: list[str] = []
+    for s in index.scopes:
+        symbols = _scope_key_symbols(s, limit=8)
+        sym_str = ", ".join(symbols) if symbols else "n/a"
+        files_str = ", ".join(p.split("/")[-1] for p in s.paths[:6])
+        summary_str = ""
+        if _is_llm_narrative(s.summary):
+            summary_str = f"\n    summary: {_truncate_words(s.summary, 60)}"
+        scope_ctx_lines.append(
+            f"  - scope_id: {s.scope_id}\n"
+            f"    title: {s.title}\n"
+            f"    files: {files_str}\n"
+            f"    key_symbols: {sym_str}"
+            f"{summary_str}"
+        )
+    scope_context = "\n".join(scope_ctx_lines)
+
+    # --- 1. Enrich tour-level descriptions ---
+    tour_items = []
+    for t in tours:
+        step_titles = [s["title"] for s in t.get("steps", [])]
+        tour_items.append(
+            f"- tour_id: {t['tour_id']}\n"
+            f"  title: {t['title']}\n"
+            f"  steps: {', '.join(step_titles)}"
+        )
+
+    tour_prompt = (
+        "You are writing descriptions for guided code tours that help developers "
+        "onboard onto a codebase.\n\n"
+        f"Project scopes:\n{scope_context}\n\n"
+        "Tours:\n" + "\n".join(tour_items) + "\n\n"
+        "For EACH tour, write a single concise sentence (max 20 words) that:\n"
+        "- Summarizes what the tour covers at a glance\n"
+        "- Is inviting but brief — this is a card subtitle, not a paragraph\n\n"
+        "Return ONLY a JSON array of objects with keys \"tour_id\" and \"description\"."
+    )
+
+    try:
+        raw = await _llm_client.ask(tour_prompt)
+        parsed = _extract_json_array(raw)
+        if parsed:
+            desc_map = {
+                item["tour_id"]: item["description"]
+                for item in parsed
+                if "tour_id" in item and "description" in item
+            }
+            for t in tours:
+                if t["tour_id"] in desc_map:
+                    t["description"] = desc_map[t["tour_id"]]
+    except Exception:
+        logger.warning("LLM tour card enrichment failed, using fallbacks")
+
+    # --- 2. Enrich step-level descriptions ---
+    # Collect all unique steps across tours and enrich them in one call
+    step_items: list[str] = []
+    step_keys: list[tuple[int, int]] = []  # (tour_idx, step_idx)
+    for ti, t in enumerate(tours):
+        for si, step in enumerate(t.get("steps", [])):
+            citation = step.get("citation", {})
+            file_path = citation.get("file", "")
+            # Find scope for extra context
+            scope_id = step.get("scope_id", "")
+            scope_obj = None
+            for s in index.scopes:
+                if s.scope_id == scope_id:
+                    scope_obj = s
+                    break
+
+            # Get file-level details
+            file_symbols: list[str] = []
+            file_imports: list[str] = []
+            if scope_obj and file_path:
+                ext = scope_obj.file_extractions.get(file_path)
+                if ext:
+                    file_symbols = [sym.name for sym in ext.symbols[:8]]
+                    file_imports = sorted(ext.imports)[:6]
+
+            sym_info = f", symbols: {', '.join(file_symbols)}" if file_symbols else ""
+            imp_info = f", imports: {', '.join(file_imports)}" if file_imports else ""
+            scope_title = scope_obj.title if scope_obj else step.get("title", "")
+
+            step_items.append(
+                f"- step_key: \"{ti}-{si}\"\n"
+                f"  tour: {t['title']}\n"
+                f"  title: {step['title']}\n"
+                f"  scope: {scope_title}\n"
+                f"  file: {file_path}{sym_info}{imp_info}"
+            )
+            step_keys.append((ti, si))
+
+    step_prompt = (
+        "You are writing detailed explanations for steps within guided code tours "
+        "that help developers onboard onto a codebase. Each step description is shown "
+        "when a developer is on that step of the tour.\n\n"
+        f"Project scopes:\n{scope_context}\n\n"
+        "Steps to describe:\n" + "\n".join(step_items) + "\n\n"
+        "For EACH step, write a detailed 3-5 sentence explanation that:\n"
+        "- Explains what this module/file does and WHY it exists in the architecture\n"
+        "- Describes how it relates to other parts of the system\n"
+        "- Mentions key symbols/functions and what they do\n"
+        "- Helps the developer understand the design decisions\n\n"
+        "Return ONLY a JSON array of objects with keys \"step_key\" and \"description\". "
+        "Use markdown formatting (bold, code backticks) in descriptions."
+    )
+
+    try:
+        raw = await _llm_client.ask(step_prompt)
+        parsed = _extract_json_array(raw)
+        if parsed:
+            desc_map = {
+                item["step_key"]: item["description"]
+                for item in parsed
+                if "step_key" in item and "description" in item
+            }
+            for (ti, si) in step_keys:
+                key = f"{ti}-{si}"
+                if key in desc_map and desc_map[key]:
+                    tours[ti]["steps"][si]["description"] = desc_map[key]
+    except Exception:
+        logger.warning("LLM step enrichment failed, using fallback descriptions")
+
+    return tours
+
+
 async def _generate_tours(index: DocsIndex) -> list[dict]:
     """Generate tours from scope summaries - fast and reliable."""
     # Build tours directly from scope data for reliability and speed
     overview_steps = []
     for s in index.scopes[:8]:
         first_file = s.paths[0] if s.paths else ""
-        # Use the full summary - don't truncate
-        description = s.summary or f"This scope covers {len(s.paths)} file(s) related to {s.title}."
+        description = _build_scope_description(s)
         overview_steps.append(
             {
                 "title": s.title,
@@ -2890,7 +3092,7 @@ async def _generate_tours(index: DocsIndex) -> list[dict]:
                 "citation": {"file": first_file, "line_start": 1, "line_end": 50},
             }
         )
-    
+
     # Create a getting-started tour with the most important scopes
     getting_started_steps = []
     priority_keywords = ["entry", "cli", "main", "config", "model", "core"]
@@ -2899,10 +3101,10 @@ async def _generate_tours(index: DocsIndex) -> list[dict]:
         key=lambda s: sum(1 for kw in priority_keywords if kw in s.scope_id.lower()),
         reverse=True
     )[:5]
-    
+
     for s in prioritized:
         first_file = s.paths[0] if s.paths else ""
-        description = s.summary or f"The {s.title} scope contains {len(s.paths)} file(s)."
+        description = _build_scope_description(s)
         getting_started_steps.append(
             {
                 "title": s.title,
@@ -2910,37 +3112,38 @@ async def _generate_tours(index: DocsIndex) -> list[dict]:
                 "citation": {"file": first_file, "line_start": 1, "line_end": 50},
             }
         )
-    
+
     tours = [
         {
             "tour_id": "project-overview",
             "title": "Project Overview",
-            "description": "A walkthrough of all major components in the codebase.",
+            "description": _build_scope_description(index.scopes[0]) if index.scopes else "",
             "steps": overview_steps,
         },
         {
             "tour_id": "getting-started",
             "title": "Getting Started",
-            "description": "Key files and modules a new developer should read first.",
+            "description": "",
             "steps": getting_started_steps,
         },
     ]
-    
+
     # Add deep-dive tours for each scope
     for s in index.scopes[:5]:
         if not s.paths:
             continue
-        
+
         # Break down files in the scope into steps
         scope_steps = []
         # Limit to 6 key files to keep tour manageable
         for file_path in s.paths[:6]:
             # Get file-specific details if available
             extraction = s.file_extractions.get(file_path)
-            
+
             # Build a unique description for this file
-            desc_lines = [f"**{file_path.split('/')[-1]}** is part of the **{s.title}** scope."]
-            
+            filename = file_path.split("/")[-1]
+            desc_lines = [f"**{filename}** is part of the **{s.title}** scope."]
+
             if extraction and extraction.symbols:
                 # List top 5 symbols to give context on what's in the file
                 top_symbols = sorted(extraction.symbols, key=lambda x: len(x.name))[:5]
@@ -2951,27 +3154,29 @@ async def _generate_tours(index: DocsIndex) -> list[dict]:
                  top_imports = sorted(extraction.imports)[:5]
                  import_names = [f"`{imp}`" for imp in top_imports]
                  desc_lines.append(f"It imports modules such as: {', '.join(import_names)}.")
-            elif s.summary:
-                 # Fallback to scope summary if no extraction data, using smart truncation
+            elif _is_llm_narrative(s.summary):
                  summary_snippet = _truncate_words(s.summary, 40)
                  desc_lines.append(f"It contributes to the scope: {summary_snippet}")
             else:
                  desc_lines.append("It contains implementation details for this scope.")
 
             scope_steps.append({
-                "title": file_path.split("/")[-1],
+                "title": filename,
                 "description": " ".join(desc_lines),
                 "citation": {"file": file_path, "line_start": 1, "line_end": 50},
             })
-        
+
         if scope_steps:
             tours.append({
                 "tour_id": f"{s.scope_id}-deep-dive",
                 "title": f"{s.title} Deep Dive",
-                "description": f"Detailed walkthrough of {s.title} files.",
+                "description": _build_scope_description(s),
                 "steps": scope_steps,
             })
-    
+
+    # Enrich all tour descriptions with LLM
+    tours = await _enrich_tour_descriptions(tours, index)
+
     return _normalize_tours(tours, index)
 
 

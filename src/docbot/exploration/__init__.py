@@ -207,14 +207,23 @@ async def run_agent_exploration(
         if not candidates:
             return []
 
+        norm_scope = _normalize(scope_root)
         prompt = (
-            "Plan child exploration delegations.\n"
-            f"Current depth: {depth} of {max_depth}\n"
-            f"Current scope root: {_normalize(scope_root) or '(repo root)'}\n"
-            f"Choose up to {desired_count} targets from candidates.\n"
-            "Return JSON array only, each object with keys:\n"
-            '- "target"\n- "name"\n- "purpose"\n- "context"\n\n'
-            f"Parent summary:\n{summary[:2200] or '(none)'}\n\n"
+            "You are planning child exploration delegations for a codebase analysis agent.\n"
+            f"Current depth: {depth}. Max depth: {max_depth}.\n"
+            f"Current scope root: {norm_scope or '(repo root)'}\n"
+            f"Target delegation count: {desired_count}.\n"
+            "Default behavior: return exactly target count unless a strong reason prevents it.\n"
+            "Under-delegation requires a concrete reason tied to scope shape (tiny scope, cohesive module, depth cap).\n"
+            "Avoid vague reasons like 'good enough'.\n"
+            f"Choose child delegations from the candidate targets below.\n"
+            "Each item must include:\n"
+            '- "target": exact candidate path\n'
+            '- "name": short child label\n'
+            '- "purpose": concise mission for child\n'
+            '- "context": short context packet for child\n'
+            "Return ONLY valid JSON array. No markdown fences.\n\n"
+            f"Parent summary:\n{summary[:2000] or '(none)'}\n\n"
             f"Candidates:\n{json.dumps(candidates, indent=2)}"
         )
 

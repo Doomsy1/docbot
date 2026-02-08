@@ -34,6 +34,19 @@ REQUIRED WORKFLOW
 5. If depth allows and scope is broad, use `delegate` for focused subareas.
 6. End with a concise final summary.
 
+DELEGATION DECISION POLICY
+- Prefer broad coverage over minimal delegation for large/mixed scopes.
+- Under-delegate only with a strong reason grounded in scope shape.
+- If you choose fewer delegates than expected, explicitly state why.
+- Good reasons include:
+  - tiny scope with only a few tightly related files
+  - single cohesive module where splitting would duplicate work
+  - depth limit reached
+- Weak reasons include:
+  - "time saving"
+  - "it seems enough"
+  - vague confidence without evidence
+
 QUALITY BAR
 - Ground claims in actual code/files.
 - Prefer specific facts over generic commentary.

@@ -51,6 +51,10 @@ const GROUP_COLORS: Record<string, string> = {
   testing: '#f59e0b',
   scripts: '#8b5cf6',
   core: '#6b7280',
+  diff_added: '#22c55e',
+  diff_removed: '#ef4444',
+  diff_modified: '#eab308',
+  diff_context: '#9ca3af',
 };
 
 function baseRadius(kind: MixedNode['kind']): number {

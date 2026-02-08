@@ -4026,12 +4026,15 @@ async def get_diff_summary(from_id: str, to_id: str):
     prompt = (
         "You are a technical writer summarizing changes between two documentation snapshots of a codebase.\n\n"
         f"## Change Report\n{diff_text}\n\n"
-        "Write a concise 2-4 paragraph summary that:\n"
-        "1. Opens with a one-sentence overview of the most significant change\n"
-        "2. Explains what was added, removed, or restructured and why it matters\n"
-        "3. Notes any shifts in architecture or dependencies if relevant\n"
-        "4. Closes with the overall impact on the project\n\n"
-        "Use plain prose, no bullet lists. Reference specific scope names naturally."
+        "Write a well-structured summary in Markdown with these sections:\n\n"
+        "### Overview\nA 1-2 sentence high-level summary of the most significant change.\n\n"
+        "### What Changed\nDetail what was added, removed, or restructured. Use bullet points for clarity. "
+        "Reference specific scope names.\n\n"
+        "### Architecture Impact\nNote any shifts in dependencies, module boundaries, or overall architecture. "
+        "If nothing significant, say so briefly.\n\n"
+        "### Bottom Line\nOne sentence on the overall impact on the project.\n\n"
+        "Use the exact section headers above (### Overview, ### What Changed, ### Architecture Impact, ### Bottom Line). "
+        "Keep the total length concise but informative."
     )
 
     try:

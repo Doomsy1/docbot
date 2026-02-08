@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { IconGitCompare, IconPlus, IconMinus, IconEdit, IconChartBar, IconCpu, IconChevronDown, IconChevronRight, IconSend, IconMessageCircle, IconFileDescription } from '@tabler/icons-react';
+import { IconGitCompare, IconPlus, IconMinus, IconEdit, IconChartBar, IconCpu, IconChevronDown, IconChevronRight, IconSend, IconMessageCircle, IconFileDescription, IconTopologyRing } from '@tabler/icons-react';
+import DiffGraph from './DiffGraph';
 
 interface HistorySnapshot {
   run_id: string;
@@ -286,6 +287,15 @@ export default function DiffViewer() {
                   <div className="text-xs uppercase text-gray-500">Graph Changed</div>
                 </div>
               </div>
+            </div>
+
+            {/* Visual Graph */}
+            <div className="bg-white border border-black p-6 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+              <div className="flex items-center gap-2 mb-4 border-b border-gray-100 pb-2">
+                <IconTopologyRing className="text-purple-600" />
+                <h2 className="text-lg font-bold uppercase tracking-wide">Change Graph</h2>
+              </div>
+              <DiffGraph diff={diff} />
             </div>
 
             {/* Narrative Summary */}

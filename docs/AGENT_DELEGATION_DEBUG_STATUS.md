@@ -58,3 +58,10 @@ Observed behavior on `../fine-ill-do-it-myself`:
 2. Keep model delegation as optional enhancement, not required for correctness.
 3. Emit explicit delegation lifecycle events from backend so integration tests can validate deterministic child spawn count.
 4. Keep frontend out of loop until backend deterministic delegation passes consistently.
+
+## Post-Checkpoint Update (same day)
+- Implemented backend-driven child delegation planning after root summary to remove hard dependency on model-issued `delegate` tool calls.
+- Kept model/tool path available, but correctness now comes from deterministic backend orchestration.
+- Integration test result on `../fine-ill-do-it-myself`:
+  - `py -m pytest tests/test_agent_integration_cli.py::test_run_async_agents_emits_child_delegation_events -q`
+  - **PASS** (`1 passed`, ~2m26s).

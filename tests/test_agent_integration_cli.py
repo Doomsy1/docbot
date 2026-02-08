@@ -27,19 +27,19 @@ def _integration_repo() -> Path:
     return (Path(__file__).resolve().parents[1] / "../fine-ill-do-it-myself").resolve()
 
 
-def _has_openrouter_key() -> bool:
-    return bool(os.environ.get("OPENROUTER_KEY", "").strip())
+def _has_backboard_key() -> bool:
+    return bool(os.environ.get("BACKBOARD_API_KEY", "").strip())
 
 
 @pytest.mark.skipif(not _integration_repo().exists(), reason="integration repo not found")
 def test_run_async_agents_emits_child_delegation_events(tmp_path: Path) -> None:
     _load_dotenv(Path.cwd())
-    if not _has_openrouter_key():
-        pytest.skip("OPENROUTER_KEY not configured")
+    if not _has_backboard_key():
+        pytest.skip("BACKBOARD_API_KEY not configured")
     repo = _integration_repo()
     queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
     tracker = PipelineTracker()
-    llm = LLMClient(api_key=os.environ["OPENROUTER_KEY"], model="xiaomi/mimo-v2-flash")
+    llm = LLMClient(api_key=os.environ["BACKBOARD_API_KEY"], model="openai/gpt-4o-mini")
 
     run_dir = asyncio.run(
         run_async(

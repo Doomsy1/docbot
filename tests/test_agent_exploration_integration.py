@@ -1,6 +1,6 @@
 """Integration checks for bounded agent exploration on a real repository.
 
-These tests run only when both OPENROUTER_KEY and the local integration repo
+These tests run only when both BACKBOARD_API_KEY and the local integration repo
 are available. They validate agent behavior without requiring the web frontend.
 """
 
@@ -22,15 +22,15 @@ def _integration_repo() -> Path:
     return (Path(__file__).resolve().parents[1] / "../fine-ill-do-it-myself").resolve()
 
 
-def _has_openrouter_key() -> bool:
-    return bool(os.environ.get("OPENROUTER_KEY", "").strip())
+def _has_backboard_key() -> bool:
+    return bool(os.environ.get("BACKBOARD_API_KEY", "").strip())
 
 
 @pytest.mark.skipif(not _integration_repo().exists(), reason="integration repo not found")
 def test_mimo_exploration_spawns_multi_level_agents_without_errors() -> None:
     _load_dotenv(Path.cwd())
-    if not _has_openrouter_key():
-        pytest.skip("OPENROUTER_KEY not configured")
+    if not _has_backboard_key():
+        pytest.skip("BACKBOARD_API_KEY not configured")
 
     repo = _integration_repo()
     scan = scan_repo(repo)
@@ -69,8 +69,8 @@ def test_mimo_exploration_spawns_multi_level_agents_without_errors() -> None:
 @pytest.mark.skipif(not _integration_repo().exists(), reason="integration repo not found")
 def test_mimo_child_scopes_stay_within_parent_scope() -> None:
     _load_dotenv(Path.cwd())
-    if not _has_openrouter_key():
-        pytest.skip("OPENROUTER_KEY not configured")
+    if not _has_backboard_key():
+        pytest.skip("BACKBOARD_API_KEY not configured")
 
     repo = _integration_repo()
     scan = scan_repo(repo)

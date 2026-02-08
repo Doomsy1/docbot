@@ -6,9 +6,10 @@ import Dashboard from './components/Dashboard';
 import TourViewer from './components/TourViewer';
 import ArchitectureDev from './components/ArchitectureDev';
 import DynamicGraphChat from './components/DynamicGraphChat';
+import DiffViewer from './components/DiffViewer';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph' | 'files' | 'tours' | 'dev-arch' | 'explore'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph' | 'files' | 'tours' | 'dev-arch' | 'explore' | 'diff'>('dashboard');
   const [selectedFile, setSelectedFile] = useState<string | undefined>();
 
   const selectFile = (path: string) => {
@@ -57,6 +58,12 @@ export default function App() {
           >
             Explore
           </button>
+          <button
+            onClick={() => setActiveTab('diff')}
+            className={`hover:underline ${activeTab === 'diff' ? 'underline decoration-2' : ''}`}
+          >
+            Diff
+          </button>
         </div>
       </header>
 
@@ -79,10 +86,13 @@ export default function App() {
           )}
           {activeTab === 'dev-arch' && <ArchitectureDev />}
           {activeTab === 'explore' && <DynamicGraphChat />}
+          {activeTab === 'diff' && <DiffViewer />}
         </main>
-        <div className="w-[570px] shrink-0 border-l border-black h-full">
-          <Chat onSelectFile={selectFile} />
-        </div>
+        {activeTab !== 'explore' && activeTab !== 'diff' && (
+          <div className="w-[570px] shrink-0 border-l border-black h-full">
+            <Chat onSelectFile={selectFile} />
+          </div>
+        )}
       </div>
     </div>
   )

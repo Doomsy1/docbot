@@ -299,10 +299,9 @@ export default function DynamicGraphChat() {
             <button
               onClick={send}
               disabled={loading || !input.trim() || !scene}
-              className="px-4 py-2 border border-black bg-white hover:bg-black hover:text-white text-xs font-bold uppercase disabled:opacity-50 flex items-center gap-1"
+              className="p-3 border border-black bg-white hover:bg-black hover:text-white transition-all disabled:opacity-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
             >
-              {loading ? <IconLoader2 size={13} className="animate-spin" /> : <IconSend size={13} />}
-              Send
+              {loading ? <IconLoader2 className="animate-spin" size={18} /> : <IconSend size={18} />}
             </button>
           </div>
           {debugInfo && (

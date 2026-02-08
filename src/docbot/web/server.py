@@ -2266,6 +2266,90 @@ class ChatResponse(BaseModel):
     suggestions: list[str] = Field(default_factory=list)
 
 
+class DiffChatRequest(BaseModel):
+    question: str
+    diff_context: dict  # The current diff report from /api/changes
+
+
+def _build_diff_system_prompt() -> str:
+    """Build system prompt for diff-aware chat."""
+    return """You are a helpful assistant that explains code and documentation changes between two snapshots of a codebase.
+
+You will receive:
+1. A diff report showing what changed (added scopes, removed scopes, modified scopes, stats delta)
+2. A user question about those changes
+
+Your job is to:
+- Explain the changes clearly and concisely
+- Reference specific scope names when relevant
+- Summarize the impact of changes when asked
+- Help users understand what was added, removed, or modified
+
+Be concise and focus on the actual data provided. If you don't have enough information to answer, say so.
+Format your response using markdown with headers and bullets for readability."""
+
+
+@app.post("/api/diff-chat")
+async def diff_chat(req: DiffChatRequest):
+    """Answer questions about diff changes between snapshots."""
+    if not req.question.strip():
+        return {"answer": "Please provide a question."}
+
+    if _llm_client is None:
+        raise HTTPException(
+            status_code=503, detail="LLM not configured (missing OPENROUTER_KEY)."
+        )
+
+    # Format diff context for the LLM
+    ctx = req.diff_context
+    diff_summary = []
+
+    if ctx.get("added_scopes"):
+        diff_summary.append(f"**Added Scopes ({len(ctx['added_scopes'])}):** {', '.join(ctx['added_scopes'])}")
+    if ctx.get("removed_scopes"):
+        diff_summary.append(f"**Removed Scopes ({len(ctx['removed_scopes'])}):** {', '.join(ctx['removed_scopes'])}")
+    if ctx.get("modified_scopes"):
+        mods = []
+        for m in ctx["modified_scopes"]:
+            details = []
+            if m.get("added_files"):
+                details.append(f"+{len(m['added_files'])} files")
+            if m.get("removed_files"):
+                details.append(f"-{len(m['removed_files'])} files")
+            if m.get("summary_changed"):
+                details.append("summary changed")
+            mod_str = f"{m['scope_id']}"
+            if details:
+                mod_str += f" ({', '.join(details)})"
+            mods.append(mod_str)
+        diff_summary.append(f"**Modified Scopes ({len(ctx['modified_scopes'])}):** {'; '.join(mods)}")
+    
+    stats = ctx.get("stats_delta", {})
+    if any(stats.get(k, 0) != 0 for k in ["total_files", "total_scopes", "total_symbols"]):
+        stats_str = f"Files: {stats.get('total_files', 0):+d}, Scopes: {stats.get('total_scopes', 0):+d}, Symbols: {stats.get('total_symbols', 0):+d}"
+        diff_summary.append(f"**Stats Delta:** {stats_str}")
+
+    if ctx.get("graph_changed"):
+        diff_summary.append("**Graph:** Architecture dependencies changed")
+
+    context_text = "\n".join(diff_summary) if diff_summary else "No changes detected between these snapshots."
+
+    messages = [
+        {"role": "system", "content": _build_diff_system_prompt()},
+        {
+            "role": "user",
+            "content": f"## Diff Report\n{context_text}\n\n## Question\n{req.question}",
+        },
+    ]
+
+    try:
+        answer = await _llm_client.chat(messages)
+        return {"answer": answer}
+    except Exception as exc:
+        logger.error("Diff chat LLM error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"LLM Error: {exc}") from exc
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     """Answer questions about the codebase using index-aware RAG."""
@@ -2562,6 +2646,103 @@ async def get_tour_detail(tour_id: str) -> JSONResponse:
         if t.get("tour_id") == tour_id:
             return JSONResponse(t)
     raise HTTPException(status_code=404, detail=f"Tour '{tour_id}' not found.")
+
+
+# ---------------------------------------------------------------------------
+# History / Diff
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/history")
+def get_history():
+    """Return list of documentation snapshots, newest first."""
+    from ..git.history import list_snapshots
+    
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+    
+    # Look for .docbot directory relative to repo root
+    index = _load_index()
+    docbot_dir = Path(index.repo_path) / ".docbot"
+    
+    if not docbot_dir.exists():
+        return []
+    
+    snapshots = list_snapshots(docbot_dir)
+    return [
+        {
+            "run_id": s.run_id,
+            "timestamp": s.timestamp,
+            "commit_sha": s.commit_hash,
+            "commit_msg": None,  # Not stored in snapshot; could lookup via git
+            "scope_count": s.stats.total_scopes,
+            "symbol_count": s.stats.total_symbols,
+            "entrypoint_count": 0,  # Not tracked in snapshot stats
+        }
+        for s in snapshots
+    ]
+
+
+@app.get("/api/changes")
+def get_changes(from_id: str | None = None, to_id: str | None = None):
+    """Compare two snapshots and return the diff report."""
+    from ..git.history import list_snapshots, load_snapshot
+    from ..git.diff import compute_diff
+    
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+    
+    index = _load_index()
+    docbot_dir = Path(index.repo_path) / ".docbot"
+    
+    if not docbot_dir.exists():
+        raise HTTPException(status_code=404, detail="No .docbot directory found.")
+    
+    snapshots = list_snapshots(docbot_dir)
+    if len(snapshots) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 snapshots to compare.")
+    
+    # Default: compare latest two
+    if from_id is None:
+        from_id = snapshots[1].run_id  # Second newest
+    if to_id is None:
+        to_id = snapshots[0].run_id  # Newest
+    
+    from_snap = load_snapshot(docbot_dir, from_id)
+    to_snap = load_snapshot(docbot_dir, to_id)
+    
+    if from_snap is None:
+        raise HTTPException(status_code=404, detail=f"Snapshot '{from_id}' not found.")
+    if to_snap is None:
+        raise HTTPException(status_code=404, detail=f"Snapshot '{to_id}' not found.")
+    
+    diff_report = compute_diff(from_snap, to_snap)
+    
+    return {
+        "from_id": from_id,
+        "to_id": to_id,
+        "from_timestamp": from_snap.timestamp,
+        "to_timestamp": to_snap.timestamp,
+        "added_scopes": diff_report.added_scopes,
+        "removed_scopes": diff_report.removed_scopes,
+        "modified_scopes": [
+            {
+                "scope_id": m.scope_id,
+                "added_files": m.added_files,
+                "removed_files": m.removed_files,
+                "added_symbols": m.added_symbols,
+                "removed_symbols": m.removed_symbols,
+                "summary_changed": m.summary_changed,
+            }
+            for m in diff_report.modified_scopes
+        ],
+        "graph_changed": bool(diff_report.graph_changes.changed_nodes),
+        "stats_delta": {
+            "total_files": diff_report.stats_delta.total_files,
+            "total_scopes": diff_report.stats_delta.total_scopes,
+            "total_symbols": diff_report.stats_delta.total_symbols,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ export interface AgentNode {
   tools: ToolCall[];
   summary?: string;
   error?: string;
+  scope_root?: string;
 }
 
 export interface ToolCall {
@@ -30,6 +31,7 @@ export interface AgentEvent {
   parent_id?: string;
   purpose?: string;
   depth?: number;
+  scope_root?: string;
   token?: string;
   tool?: string;
   input?: string;
@@ -47,6 +49,7 @@ export interface GraphNode {
   status: 'running' | 'done' | 'error';
   depth: number;
   val: number;
+  scope_root?: string;
 }
 
 export interface GraphLink {

@@ -229,7 +229,7 @@ class DocbotConfig(BaseModel):
     use_agents: bool = True
     """Enable recursive agent exploration (default-on)."""
 
-    agent_depth: int = 2
+    agent_depth: int = 4
     """Maximum subagent recursion depth (1=file agents only, 2=file+symbol agents)."""
     agent_scope_max_parallel: int = 8
     """Maximum concurrent subagents for a single scope tree."""

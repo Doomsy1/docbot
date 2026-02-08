@@ -302,7 +302,7 @@ export default function DiffViewer() {
             <div className="bg-white border border-black p-6 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
               <div className="flex items-center gap-2 mb-4 border-b border-gray-100 pb-2">
                 <IconFileDescription className="text-blue-600" />
-                <h2 className="text-lg font-bold uppercase tracking-wide">What Changed</h2>
+                <h2 className="text-lg font-bold uppercase tracking-wide">Impact Analysis</h2>
               </div>
               {summaryLoading ? (
                 <div className="flex items-center gap-2 text-gray-400 font-mono text-sm py-4">

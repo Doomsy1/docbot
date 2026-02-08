@@ -11,31 +11,31 @@ and code navigation.
 
 1. **Install**
 
-    ```bash
-    git clone <repo-url> && cd docbot
-    uv pip install -e .
-    ```
+   ```bash
+   git clone <repo-url> && cd docbot
+   uv pip install -e .
+   ```
 
 2. **Configure**
    Create a `.env` file:
 
-    ```bash
-    OPENROUTER_KEY=sk-or-...
-    ```
+   ```bash
+   OPENROUTER_KEY=sk-or-...
+   ```
 
 3. **Initialize & Generate**
 
-    ```bash
-    cd /path/to/your/project
-    docbot init
-    docbot generate
-    ```
+   ```bash
+   cd /path/to/your/project
+   docbot init
+   docbot generate
+   ```
 
 4. **Explore**
-    ```bash
-    docbot serve
-    ```
-    Opens the interactive webapp in your browser.
+   ```bash
+   docbot serve
+   ```
+   Opens the interactive webapp in your browser.
 
 ## Commands
 
@@ -55,13 +55,13 @@ and code navigation.
 
 Flags for `docbot generate` (override config.toml values for that invocation):
 
-| Flag                  | Description                                           |
-| --------------------- | ----------------------------------------------------- |
-| `--no-llm`            | Skip LLM enrichment (extraction only).                |
-| `--model / -m`        | OpenRouter model ID (default: openai/gpt-oss-20b).    |
-| `--concurrency / -j`  | Parallel explorer workers (default: 4).               |
-| `--timeout / -t`      | Per-scope timeout in seconds (default: 120).          |
-| `--max-scopes`        | Maximum number of documentation scopes (default: 20). |
+| Flag                 | Description                                           |
+| -------------------- | ----------------------------------------------------- |
+| `--no-llm`           | Skip LLM enrichment (extraction only).                |
+| `--model / -m`       | OpenRouter model ID (default: openai/gpt-oss-20b).    |
+| `--concurrency / -j` | Parallel explorer workers (default: 4).               |
+| `--timeout / -t`     | Per-scope timeout in seconds (default: 120).          |
+| `--max-scopes`       | Maximum number of documentation scopes (default: 20). |
 
 ## How It Works
 
@@ -74,6 +74,10 @@ Five-stage async pipeline:
 5. **Render** -- generates per-scope Markdown docs, README, architecture overview, API reference, and HTML report.
 
 All narrative content is LLM-generated. The `--no-llm` flag falls back to template-based output.
+
+### Architecture
+
+![diagram](assets/docbot-diagram.png)
 
 ## Development
 
@@ -124,10 +128,10 @@ webapp/               # React SPA (Vite + ReactFlow + Tailwind)
 
 ## Stack
 
--   **Core**: Python 3.11+, Typer, Pydantic, AsyncIO
--   **AI**: OpenRouter API (any model)
--   **Extraction**: tree-sitter (10 languages) + LLM fallback (universal)
--   **Webapp**: React + Vite + ReactFlow + Tailwind (frontend), FastAPI + Uvicorn (backend)
+- **Core**: Python 3.11+, Typer, Pydantic, AsyncIO
+- **AI**: OpenRouter API (any model)
+- **Extraction**: tree-sitter (10 languages) + LLM fallback (universal)
+- **Webapp**: React + Vite + ReactFlow + Tailwind (frontend), FastAPI + Uvicorn (backend)
 
 ## Architecture
 

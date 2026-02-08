@@ -136,6 +136,8 @@ export default function Dashboard() {
   const [historyData, setHistoryData] = useState<HistorySnapshot[] | null>(null);
   const [serviceDetails, setServiceDetails] = useState<Record<string, Record<string, string>>>({});
   const [serviceDetailsLoading, setServiceDetailsLoading] = useState(false);
+  const [archAnalysis, setArchAnalysis] = useState<string | null>(null);
+  const [archAnalysisLoading, setArchAnalysisLoading] = useState(false);
 
   useEffect(() => {
     fetch('/api/index')
@@ -166,6 +168,21 @@ export default function Dashboard() {
       .then(d => { if (Array.isArray(d)) setHistoryData(d); })
       .catch(() => {});
   }, []);
+
+  // Fetch architecture analysis on-the-fly if missing from index
+  useEffect(() => {
+    if (!data) return;
+    if (data.cross_scope_analysis) {
+      setArchAnalysis(data.cross_scope_analysis);
+      return;
+    }
+    setArchAnalysisLoading(true);
+    fetch('/api/architecture-analysis')
+      .then(r => { if (r.ok) return r.json(); return null; })
+      .then(d => { if (d?.analysis) setArchAnalysis(d.analysis); })
+      .catch(() => {})
+      .finally(() => setArchAnalysisLoading(false));
+  }, [data]);
 
   // Fetch scope details for all scopes once we have the index
   useEffect(() => {
@@ -314,16 +331,20 @@ export default function Dashboard() {
                     <h2 className="text-lg font-bold uppercase tracking-wide">Architecture Analysis</h2>
                 </div>
 
-                {data.cross_scope_analysis ? (
+                {archAnalysis ? (
                     <div className="prose prose-sm max-w-none font-sans leading-relaxed">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                            {data.cross_scope_analysis}
+                            {archAnalysis}
                         </ReactMarkdown>
+                    </div>
+                ) : archAnalysisLoading ? (
+                    <div className="flex items-center gap-2 text-gray-400 font-mono text-sm py-8 justify-center">
+                        <IconCpu className="animate-spin" size={16} />
+                        Generating architecture analysis...
                     </div>
                 ) : (
                     <div className="text-gray-400 italic font-mono py-8 text-center border-2 border-dashed border-gray-200">
-                        No architecture analysis found.<br/>
-                        Run docbot with a BACKBOARD_API_KEY to generate one.
+                        No architecture analysis available.
                     </div>
                 )}
             </div>

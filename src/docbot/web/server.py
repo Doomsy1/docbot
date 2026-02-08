@@ -32,6 +32,7 @@ _tours_cache: list[dict] | None = None
 _service_details_cache: dict | None = None
 _explore_graph_cache: dict | None = None
 _explore_suggestions_cache: dict | None = None
+_architecture_analysis_cache: str | None = None
 
 
 def _load_index() -> DocsIndex:
@@ -1368,6 +1369,62 @@ async def get_index() -> JSONResponse:
             "entrypoint_groups": entrypoint_groups,
         }
     )
+
+
+@app.get("/api/architecture-analysis")
+async def get_architecture_analysis():
+    """Return or generate-on-the-fly the cross-scope architecture analysis."""
+    global _architecture_analysis_cache
+    index = _load_index()
+
+    # Return existing analysis if present
+    existing = _clean_llm_generated_text(index.cross_scope_analysis) or None
+    if existing:
+        return {"analysis": existing}
+
+    # Return cached on-the-fly analysis
+    if _architecture_analysis_cache is not None:
+        return {"analysis": _architecture_analysis_cache}
+
+    # Generate on-the-fly with LLM
+    if _llm_client is None:
+        raise HTTPException(status_code=503, detail="LLM not configured.")
+
+    scope_summaries = []
+    for s in index.scopes:
+        summary_text = s.summary or ""
+        symbols = [sym.name for sym in s.public_api[:10]]
+        scope_summaries.append(
+            f"- **{s.title}** ({len(s.paths)} files, {len(s.public_api)} symbols): "
+            f"{summary_text[:200]}{'...' if len(summary_text) > 200 else ''}"
+            f"{' | Key symbols: ' + ', '.join(symbols) if symbols else ''}"
+        )
+
+    edges_text = ""
+    if index.scope_edges:
+        edge_lines = [f"  {e[0]} -> {e[1]}" for e in index.scope_edges[:30]]
+        edges_text = f"\n\nScope dependency edges:\n" + "\n".join(edge_lines)
+
+    prompt = (
+        f"You are a senior software architect analyzing the codebase at '{index.repo_path}'.\n"
+        f"Languages: {', '.join(index.languages)}\n"
+        f"Entrypoints: {', '.join(index.entrypoints[:10])}\n\n"
+        f"Scopes:\n" + "\n".join(scope_summaries) + edges_text + "\n\n"
+        "Write a concise architecture analysis (3-5 paragraphs) covering:\n"
+        "1. Overall purpose and architecture pattern\n"
+        "2. How the major scopes relate to each other\n"
+        "3. Key design decisions and patterns observed\n"
+        "4. Data and control flow through the system\n\n"
+        "Use plain prose. Reference specific scope names naturally."
+    )
+
+    try:
+        analysis = await _llm_client.ask(prompt)
+        _architecture_analysis_cache = analysis
+        return {"analysis": analysis}
+    except Exception as exc:
+        logger.error("Architecture analysis LLM error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"LLM Error: {exc}") from exc
 
 
 @app.get("/api/scopes")
@@ -3086,6 +3143,85 @@ def get_changes(from_id: str | None = None, to_id: str | None = None):
     }
 
 
+@app.get("/api/diff-summary")
+async def get_diff_summary(from_id: str, to_id: str):
+    """Generate an LLM narrative summary explaining changes between two snapshots."""
+    if _llm_client is None:
+        raise HTTPException(status_code=503, detail="LLM not configured.")
+
+    from ..git.history import list_snapshots, load_snapshot
+    from ..git.diff import compute_diff
+
+    if _run_dir is None:
+        raise HTTPException(status_code=503, detail="No run directory configured.")
+
+    index = _load_index()
+    docbot_dir = Path(index.repo_path) / ".docbot"
+
+    if not docbot_dir.exists():
+        raise HTTPException(status_code=404, detail="No .docbot directory found.")
+
+    from_snap = load_snapshot(docbot_dir, from_id)
+    to_snap = load_snapshot(docbot_dir, to_id)
+
+    if from_snap is None or to_snap is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found.")
+
+    diff_report = compute_diff(from_snap, to_snap)
+
+    # Build a detailed textual description of the diff for the LLM
+    parts: list[str] = []
+    parts.append(f"Comparing snapshot from {from_snap.timestamp} to {to_snap.timestamp}.")
+
+    sd = diff_report.stats_delta
+    parts.append(f"Stats delta: {sd.total_scopes:+d} scopes, {sd.total_files:+d} files, {sd.total_symbols:+d} symbols.")
+
+    if diff_report.added_scopes:
+        parts.append(f"New scopes added: {', '.join(diff_report.added_scopes)}")
+    if diff_report.removed_scopes:
+        parts.append(f"Scopes removed: {', '.join(diff_report.removed_scopes)}")
+
+    if diff_report.modified_scopes:
+        mod_lines = []
+        for m in diff_report.modified_scopes:
+            details = []
+            if m.added_files:
+                details.append(f"added files: {', '.join(m.added_files[:8])}")
+            if m.removed_files:
+                details.append(f"removed files: {', '.join(m.removed_files[:8])}")
+            if m.added_symbols:
+                details.append(f"added symbols: {', '.join(m.added_symbols[:8])}")
+            if m.removed_symbols:
+                details.append(f"removed symbols: {', '.join(m.removed_symbols[:8])}")
+            if m.summary_changed:
+                details.append("documentation summary changed")
+            mod_lines.append(f"  - {m.scope_id}: {'; '.join(details)}")
+        parts.append("Modified scopes:\n" + "\n".join(mod_lines))
+
+    if diff_report.graph_changes.changed_nodes:
+        parts.append("Dependency graph changed.")
+
+    diff_text = "\n".join(parts)
+
+    prompt = (
+        "You are a technical writer summarizing changes between two documentation snapshots of a codebase.\n\n"
+        f"## Change Report\n{diff_text}\n\n"
+        "Write a concise 2-4 paragraph summary that:\n"
+        "1. Opens with a one-sentence overview of the most significant change\n"
+        "2. Explains what was added, removed, or restructured and why it matters\n"
+        "3. Notes any shifts in architecture or dependencies if relevant\n"
+        "4. Closes with the overall impact on the project\n\n"
+        "Use plain prose, no bullet lists. Reference specific scope names naturally."
+    )
+
+    try:
+        summary = await _llm_client.ask(prompt)
+        return {"summary": summary}
+    except Exception as exc:
+        logger.error("Diff summary LLM error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"LLM Error: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # Server launcher
 # ---------------------------------------------------------------------------
@@ -3109,6 +3245,7 @@ def start_server(
     _service_details_cache = None
     _explore_graph_cache = None
     _explore_suggestions_cache = None
+    _architecture_analysis_cache = None
     _llm_client = llm_client
 
     here = Path(__file__).parent.resolve()

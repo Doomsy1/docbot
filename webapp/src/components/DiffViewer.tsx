@@ -1,5 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
-import { IconGitCompare, IconPlus, IconMinus, IconEdit, IconChartBar, IconCpu, IconChevronDown, IconChevronRight, IconSend, IconMessageCircle } from '@tabler/icons-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { IconGitCompare, IconPlus, IconMinus, IconEdit, IconChartBar, IconCpu, IconChevronDown, IconChevronRight, IconSend, IconMessageCircle, IconFileDescription } from '@tabler/icons-react';
 
 interface HistorySnapshot {
   run_id: string;
@@ -48,6 +50,8 @@ export default function DiffViewer() {
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [expandedMods, setExpandedMods] = useState<Set<string>>(new Set());
+  const [summary, setSummary] = useState<string | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
 
   // Chat state
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -86,7 +90,17 @@ export default function DiffViewer() {
         if (!res.ok) throw new Error(`Failed to load diff: ${res.status}`);
         return res.json();
       })
-      .then(setDiff)
+      .then(d => {
+        setDiff(d);
+        // Fetch LLM summary for this diff
+        setSummary(null);
+        setSummaryLoading(true);
+        fetch(`/api/diff-summary?from_id=${encodeURIComponent(fromId)}&to_id=${encodeURIComponent(toId)}`)
+          .then(r => { if (r.ok) return r.json(); return null; })
+          .then(data => { if (data?.summary) setSummary(data.summary); })
+          .catch(() => {})
+          .finally(() => setSummaryLoading(false));
+      })
       .catch(err => setDiffError(err.message))
       .finally(() => setDiffLoading(false));
   }, [fromId, toId]);
@@ -271,6 +285,30 @@ export default function DiffViewer() {
                   <div className="text-xs uppercase text-gray-500">Graph Changed</div>
                 </div>
               </div>
+            </div>
+
+            {/* Narrative Summary */}
+            <div className="bg-white border border-black p-6 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+              <div className="flex items-center gap-2 mb-4 border-b border-gray-100 pb-2">
+                <IconFileDescription className="text-blue-600" />
+                <h2 className="text-lg font-bold uppercase tracking-wide">What Changed</h2>
+              </div>
+              {summaryLoading ? (
+                <div className="flex items-center gap-2 text-gray-400 font-mono text-sm py-4">
+                  <IconCpu className="animate-spin" size={16} />
+                  Generating summary...
+                </div>
+              ) : summary ? (
+                <div className="prose prose-sm max-w-none font-sans leading-relaxed text-gray-700">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {summary}
+                  </ReactMarkdown>
+                </div>
+              ) : (
+                <div className="text-gray-400 italic font-mono text-sm py-4">
+                  Summary unavailable — LLM may not be configured.
+                </div>
+              )}
             </div>
 
             {/* Added Scopes */}

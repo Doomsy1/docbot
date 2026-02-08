@@ -38,8 +38,9 @@ interface Props {
   edges: MixedEdge[];
   highlightedNodeId?: string | null;
   selectedNodeId?: string | null;
-  isolatedEntityId?: string | null;
+  isolatedNodeId?: string | null;
   onNodeClick?: (node: MixedNode) => void;
+  onNodeIsolateToggle?: (node: MixedNode) => void;
   onHoverNode?: (node: MixedNode | null) => void;
   onGraphInteract?: () => void;
   fitTargetId?: string | null;
@@ -54,15 +55,14 @@ const GROUP_COLORS: Record<string, string> = {
 };
 
 function baseRadius(kind: MixedNode['kind']): number {
-  if (kind === 'scope') return 58;
-  if (kind === 'module') return 46;
-  if (kind === 'file') return 34;
-  return 24;
+  if (kind === 'scope') return 84;
+  if (kind === 'module') return 60;
+  if (kind === 'file') return 40;
+  return 26;
 }
 
 function nodeRadius(n: MixedNode): number {
-  const mass = (n.file_count ?? 1) + (n.entity_count ?? 1) * 0.4 + (n.import_count ?? 0) * 0.2;
-  return Math.max(baseRadius(n.kind) * 0.68, Math.min(baseRadius(n.kind) * 1.35, baseRadius(n.kind) + Math.sqrt(Math.max(1, mass)) * 1.8));
+  return baseRadius(n.kind);
 }
 
 function edgeStyle(kind: string): { stroke: string; width: number; dashed: boolean } {
@@ -84,13 +84,48 @@ function cleanTooltipText(text: string): string {
     .trim();
 }
 
+function compressTooltipBody(title: string, raw: string, maxChars: number, maxLines: number): string {
+  const clean = cleanTooltipText(raw);
+  if (!clean) return '';
+
+  let text = clean;
+  const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const leadPatterns = [
+    new RegExp(`^the\\s+["']?${escapedTitle}["']?\\s+(module|scope|file|component)\\s+is\\s+(designed|responsible|used)\\s+to\\s+`, 'i'),
+    new RegExp(`^the\\s+["']?${escapedTitle}["']?\\s+(module|scope|file|component)\\s+`, 'i'),
+    /^this\s+(module|scope|file|component)\s+is\s+(designed|responsible|used)\s+to\s+/i,
+    /^this\s+(module|scope|file|component)\s+/i,
+  ];
+  for (const p of leadPatterns) {
+    text = text.replace(p, '');
+  }
+  text = text.replace(/^(facilitates?|handles?|manages?)\s+/i, '').replace(/^[,:;\-\s]+/, '').trim();
+
+  const charBudget = maxChars * maxLines;
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!sentences.length) return text.slice(0, charBudget).trim();
+
+  let out = '';
+  for (const s of sentences) {
+    const next = out ? `${out} ${s}` : s;
+    if (next.length > charBudget) break;
+    out = next;
+  }
+  if (!out) out = sentences[0].slice(0, charBudget).trim();
+  return out;
+}
+
 function AdaptiveMixedGraph({
   nodes,
   edges,
   highlightedNodeId,
   selectedNodeId,
-  isolatedEntityId,
+  isolatedNodeId,
   onNodeClick,
+  onNodeIsolateToggle,
   onHoverNode,
   onGraphInteract,
   fitTargetId,
@@ -108,15 +143,16 @@ function AdaptiveMixedGraph({
   const connectedToIsolatedRef = useRef<Set<string>>(new Set());
   const highlightedNodeIdRef = useRef<string | null>(highlightedNodeId ?? null);
   const selectedNodeIdRef = useRef<string | null>(selectedNodeId ?? null);
-  const isolatedEntityIdRef = useRef<string | null>(isolatedEntityId ?? null);
+  const isolatedNodeIdRef = useRef<string | null>(isolatedNodeId ?? null);
   const onNodeClickRef = useRef<Props['onNodeClick']>(onNodeClick);
+  const onNodeIsolateToggleRef = useRef<Props['onNodeIsolateToggle']>(onNodeIsolateToggle);
   const onHoverNodeRef = useRef<Props['onHoverNode']>(onHoverNode);
   const onGraphInteractRef = useRef<Props['onGraphInteract']>(onGraphInteract);
 
   useEffect(() => {
     edgeListRef.current = edges;
-    const isolated = isolatedEntityId ?? null;
-    isolatedEntityIdRef.current = isolated;
+    const isolated = isolatedNodeId ?? null;
+    isolatedNodeIdRef.current = isolated;
     const out = new Set<string>();
     if (isolated) {
       for (const e of edges) {
@@ -125,7 +161,7 @@ function AdaptiveMixedGraph({
       }
     }
     connectedToIsolatedRef.current = out;
-  }, [edges, isolatedEntityId]);
+  }, [edges, isolatedNodeId]);
 
   useEffect(() => {
     highlightedNodeIdRef.current = highlightedNodeId ?? null;
@@ -137,9 +173,10 @@ function AdaptiveMixedGraph({
 
   useEffect(() => {
     onNodeClickRef.current = onNodeClick;
+    onNodeIsolateToggleRef.current = onNodeIsolateToggle;
     onHoverNodeRef.current = onHoverNode;
     onGraphInteractRef.current = onGraphInteract;
-  }, [onNodeClick, onHoverNode, onGraphInteract]);
+  }, [onNodeClick, onNodeIsolateToggle, onHoverNode, onGraphInteract]);
 
   const toWorld = useCallback((sx: number, sy: number) => {
     const canvas = canvasRef.current;
@@ -178,31 +215,6 @@ function AdaptiveMixedGraph({
       });
     });
     nodesRef.current = next;
-
-    const targetId = fitTargetId || highlightedNodeId || selectedNodeId || null;
-    const targetNodes = targetId
-      ? next.filter((n) => n.id === targetId || n.scope_id === targetId || n.module_id === targetId || n.file_path === targetId)
-      : next;
-    const fitNodes = targetNodes.length > 0 ? targetNodes : next;
-    if (fitNodes.length > 0) {
-      const xs = fitNodes.map((n) => n.x);
-      const ys = fitNodes.map((n) => n.y);
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const minY = Math.min(...ys);
-      const maxY = Math.max(...ys);
-      const cx = (minX + maxX) / 2;
-      const cy = (minY + maxY) / 2;
-      panRef.current = { x: -cx, y: -cy };
-      const span = Math.max(220, maxX - minX, maxY - minY);
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const fit = Math.min(canvas.width, canvas.height) / (span * 1.32);
-        zoomRef.current = Math.max(0.58, Math.min(1.35, fit));
-      } else {
-        zoomRef.current = 0.95;
-      }
-    }
   }, [nodes, fitTargetId, highlightedNodeId, selectedNodeId]);
 
   useEffect(() => {
@@ -235,7 +247,7 @@ function AdaptiveMixedGraph({
           const dx = b.x - a.x;
           const dy = b.y - a.y;
           const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          const repulsion = 8400;
+          const repulsion = 10200;
           const f = (repulsion / (dist * dist)) * alpha;
           const fx = (dx / dist) * f;
           const fy = (dy / dist) * f;
@@ -254,7 +266,7 @@ function AdaptiveMixedGraph({
         const dx = b.x - a.x;
         const dy = b.y - a.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const target = a.kind === b.kind ? 220 : 260;
+        const target = a.kind === b.kind ? 250 : 290;
         const force = ((dist - target) / dist) * 0.038 * alpha * Math.min(2.2, 1 + (e.weight || 1) * 0.22);
         a.vx += dx * force;
         a.vy += dy * force;
@@ -269,7 +281,7 @@ function AdaptiveMixedGraph({
           const dx = b.x - a.x;
           const dy = b.y - a.y;
           const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          const minD = nodeRadius(a) + nodeRadius(b) + 36;
+        const minD = nodeRadius(a) + nodeRadius(b) + 44;
           if (dist >= minD) continue;
           const overlap = (minD - dist) / dist;
           const push = overlap * 0.5 * alpha;
@@ -304,12 +316,12 @@ function AdaptiveMixedGraph({
       ctx.translate(panRef.current.x, panRef.current.y);
 
       const map = new Map(nodesRef.current.map((x) => [x.id, x]));
-      const isolatedEntityId = isolatedEntityIdRef.current;
+      const isolatedNodeId = isolatedNodeIdRef.current;
       const connectedToIsolated = connectedToIsolatedRef.current;
       const selectedNodeId = selectedNodeIdRef.current;
       const highlightedNodeId = highlightedNodeIdRef.current;
       for (const e of edgeListRef.current) {
-        if (isolatedEntityId && e.from !== isolatedEntityId && e.to !== isolatedEntityId) {
+        if (isolatedNodeId && e.from !== isolatedNodeId && e.to !== isolatedNodeId) {
           continue;
         }
         const a = map.get(e.from);
@@ -361,19 +373,27 @@ function AdaptiveMixedGraph({
         const hovered = hoverNodeRef.current?.id === n.id;
         const selected = selectedNodeId === n.id;
         const highlighted = highlightedNodeId === n.id;
-        const isIsolated = isolatedEntityId && n.kind === 'entity' && n.id === isolatedEntityId;
-        const isConnectedEntity = !!isolatedEntityId && n.kind === 'entity' && connectedToIsolated.has(n.id);
+        const isIsolated = isolatedNodeId && n.id === isolatedNodeId;
+        const isConnected = !!isolatedNodeId && connectedToIsolated.has(n.id);
         let nodeAlpha = 0.9;
-        if (isolatedEntityId) {
+        if (isolatedNodeId) {
           if (isIsolated) {
             nodeAlpha = 1;
-          } else if (isConnectedEntity) {
+          } else if (isConnected) {
             nodeAlpha = hovered ? 1 : 0.55;
-          } else if (n.kind === 'entity') {
-            nodeAlpha = 0.14;
           } else {
-            nodeAlpha = 0.08;
+            nodeAlpha = 0.14;
           }
+        }
+
+        if (isIsolated) {
+          // Mild spotlight halo to make the isolated node immediately obvious.
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, r + 10, 0, Math.PI * 2);
+          ctx.fillStyle = '#f59e0b';
+          ctx.globalAlpha = 0.2;
+          ctx.fill();
+          ctx.globalAlpha = 1;
         }
 
         ctx.beginPath();
@@ -418,7 +438,7 @@ function AdaptiveMixedGraph({
 
         const label = n.label.length > 36 ? `${n.label.slice(0, 35)}...` : n.label;
         if (nodeAlpha >= 0.34) {
-          ctx.font = 'bold 16px ui-monospace, monospace';
+          ctx.font = 'bold 15px ui-monospace, monospace';
           const tw = ctx.measureText(label).width;
           const chipW = tw + 14;
           const chipH = 24;
@@ -444,7 +464,9 @@ function AdaptiveMixedGraph({
       const activeNode =
         hoverNodeRef.current ??
         (selectedNodeIdRef.current ? nodesRef.current.find((n) => n.id === selectedNodeIdRef.current) ?? null : null);
-      if (activeNode) {
+      const canShowActiveNode =
+        !!activeNode && (!isolatedNodeId || activeNode.id === isolatedNodeId || connectedToIsolated.has(activeNode.id));
+      if (activeNode && canShowActiveNode) {
         const wx = activeNode.x;
         const wy = activeNode.y;
         const sx = (wx + panRef.current.x) * zoomRef.current + w / 2;
@@ -456,7 +478,7 @@ function AdaptiveMixedGraph({
           activeNode.kind === 'entity'
             ? `${activeNode.entity_kind ?? 'entity'} ${activeNode.file_path ?? ''}${activeNode.line_start ? `:${activeNode.line_start}` : ''}`
             : `${activeNode.file_count ?? 0} files · ${activeNode.entity_count ?? 0} entities`;
-        const body = cleanTooltipText(activeNode.description || '');
+        const body = compressTooltipBody(activeNode.label, activeNode.description || '', 56, 4);
 
         const wrap = (text: string, maxChars: number): string[] => {
           const words = text.split(/\s+/).filter(Boolean);
@@ -477,10 +499,6 @@ function AdaptiveMixedGraph({
 
         const bodyWrapped = wrap(body, 56);
         const bodyLines = bodyWrapped.slice(0, 4);
-        if (bodyWrapped.length > 4 && bodyLines.length > 0) {
-          const last = bodyLines[bodyLines.length - 1];
-          bodyLines[bodyLines.length - 1] = last.length > 2 ? `${last.slice(0, Math.max(0, last.length - 2))}...` : `${last}...`;
-        }
         const lines = [title, subtitle, ...bodyLines].filter(Boolean);
 
         ctx.font = '13px ui-monospace, monospace';
@@ -524,7 +542,6 @@ function AdaptiveMixedGraph({
     animate();
 
     const onMouseDown = (ev: MouseEvent) => {
-      onGraphInteractRef.current?.();
       const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left;
       const y = ev.clientY - rect.top;
@@ -535,6 +552,7 @@ function AdaptiveMixedGraph({
         const dx = w.x - n.x;
         const dy = w.y - n.y;
         if (dx * dx + dy * dy <= r * r) {
+          onGraphInteractRef.current?.();
           dragRef.current = { node: n, offsetX: w.x - n.x, offsetY: w.y - n.y };
           downRef.current.id = n.id;
           return;
@@ -566,8 +584,13 @@ function AdaptiveMixedGraph({
       }
 
       let hovered: SimNode | null = null;
+      const isolatedNodeId = isolatedNodeIdRef.current;
+      const connectedToIsolated = connectedToIsolatedRef.current;
       for (let i = nodesRef.current.length - 1; i >= 0; i--) {
         const n = nodesRef.current[i];
+        if (isolatedNodeId && n.id !== isolatedNodeId && !connectedToIsolated.has(n.id)) {
+          continue;
+        }
         const r = nodeRadius(n);
         const dx = w.x - n.x;
         const dy = w.y - n.y;
@@ -589,7 +612,9 @@ function AdaptiveMixedGraph({
       const clickId = dragRef.current?.node.id ?? downRef.current.id;
       if (dragRef.current && moved < 6 && clickId) {
         const node = nodesRef.current.find((n) => n.id === clickId);
-        if (node && onNodeClickRef.current) {
+        if (node && ev.altKey && onNodeIsolateToggleRef.current) {
+          onNodeIsolateToggleRef.current(node);
+        } else if (node && onNodeClickRef.current) {
           const isNonExpandableFile = node.kind === 'file' && (node.entity_count ?? 0) <= 0;
           if (!isNonExpandableFile) onNodeClickRef.current(node);
         }
@@ -623,7 +648,7 @@ function AdaptiveMixedGraph({
   return (
     <div className="border border-gray-300 bg-gray-100 h-[74vh] relative">
       <canvas ref={canvasRef} className="w-full h-full" />
-      <div className="absolute top-2 right-3 text-[11px] text-gray-500">drag nodes / scroll zoom / drag background pan</div>
+      <div className="absolute top-2 right-3 text-[11px] text-gray-500">click drill-down / option+click isolate / drag nodes / scroll zoom / drag background pan</div>
     </div>
   );
 }

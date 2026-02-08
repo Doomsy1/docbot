@@ -25,6 +25,7 @@ interface GraphScene {
   nodes: MixedNode[];
   edges: MixedEdge[];
   highlighted_node_id?: string | null;
+  isolated_node_id?: string | null;
   metrics: {
     node_count: number;
     edge_count: number;
@@ -71,14 +72,13 @@ export default function DynamicGraphChat() {
   const [loading, setLoading] = useState(false);
   const [scene, setScene] = useState<GraphScene | null>(null);
   const [routing, setRouting] = useState<RoutingInfo | null>(null);
-  const [debugInfo, setDebugInfo] = useState<Record<string, unknown> | null>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     { id: 'intro', sender: 'bot', text: 'Ask a question and I will adapt the graph depth and scope automatically.' },
   ]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [isolatedEntityId, setIsolatedEntityId] = useState<string | null>(null);
+  const [isolatedNodeId, setIsolatedNodeId] = useState<string | null>(null);
 
   const [history, setHistory] = useState<GraphHistoryItem[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -97,7 +97,7 @@ export default function DynamicGraphChat() {
   const commitScene = (nextScene: GraphScene, nextRouting: RoutingInfo) => {
     setScene(nextScene);
     setRouting(nextRouting);
-    setIsolatedEntityId(null);
+    setIsolatedNodeId(nextScene.isolated_node_id ?? null);
     setHistory((prev) => {
       const idx = historyIndexRef.current;
       const head = idx >= 0 ? prev.slice(0, idx + 1) : prev;
@@ -124,6 +124,14 @@ export default function DynamicGraphChat() {
     loadInitial().catch((e) => {
       setMessages((prev) => [...prev, { id: `${Date.now()}-initerr`, sender: 'bot', text: `Failed to load graph: ${e}` }]);
     });
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') setIsolatedNodeId(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
   useEffect(() => {
@@ -165,7 +173,6 @@ export default function DynamicGraphChat() {
       }
       const data = (await res.json()) as ExploreResponse;
       commitScene(data.scene, data.routing);
-      setDebugInfo(data.debug ?? null);
       setSelectedNodeId(data.scene.highlighted_node_id ?? null);
       setMessages((prev) => [...prev, { id: `${Date.now()}-b`, sender: 'bot', text: data.answer_markdown }]);
     } catch (e) {
@@ -175,14 +182,32 @@ export default function DynamicGraphChat() {
     }
   };
 
+  const remapSpotlightNodeId = (nextScene: GraphScene, currentScene: GraphScene, spotlightId: string): string | null => {
+    if (nextScene.nodes.some((n) => n.id === spotlightId)) return spotlightId;
+
+    const prevNode = currentScene.nodes.find((n) => n.id === spotlightId);
+    if (!prevNode) return null;
+
+    if (prevNode.file_path) {
+      const sameFile = nextScene.nodes.find((n) => n.file_path === prevNode.file_path);
+      if (sameFile) return sameFile.id;
+    }
+    if (prevNode.module_id) {
+      const sameModule = nextScene.nodes.find((n) => n.id === prevNode.module_id);
+      if (sameModule) return sameModule.id;
+    }
+    if (prevNode.scope_id) {
+      const scopeNodeId = `scope:${prevNode.scope_id}`;
+      if (nextScene.nodes.some((n) => n.id === scopeNodeId)) return scopeNodeId;
+    }
+
+    return null;
+  };
+
   const transitionByClick = useCallback(async (node: MixedNode) => {
     if (!scene || loading) return;
     setSelectedNodeId(node.id);
-    if (node.kind === 'entity') {
-      setIsolatedEntityId((prev) => (prev === node.id ? null : node.id));
-      return;
-    }
-    setIsolatedEntityId(null);
+    const preservedSpotlight = isolatedNodeId;
     try {
       const res = await fetch('/api/graph/transition', {
         method: 'POST',
@@ -191,20 +216,27 @@ export default function DynamicGraphChat() {
       });
       if (!res.ok) throw new Error(`transition failed: ${res.status}`);
       const data = (await res.json()) as TransitionResponse;
-      commitScene(data.scene, data.routing);
+      let nextScene = data.scene;
+      if (preservedSpotlight) {
+        const remapped = remapSpotlightNodeId(nextScene, scene, preservedSpotlight);
+        nextScene = { ...nextScene, isolated_node_id: remapped };
+      }
+      commitScene(nextScene, data.routing);
       setMessages((prev) => [...prev, { id: `${Date.now()}-t`, sender: 'bot', text: data.routing.reason }]);
     } catch (e) {
       setMessages((prev) => [...prev, { id: `${Date.now()}-terr`, sender: 'bot', text: `Transition failed: ${e}` }]);
     }
-  }, [scene, loading]);
+  }, [scene, loading, isolatedNodeId]);
 
-  const handleGraphInteract = useCallback(() => {
-    if (isolatedEntityId) setIsolatedEntityId(null);
-  }, [isolatedEntityId]);
+  const toggleNodeIsolation = useCallback((node: MixedNode) => {
+    setSelectedNodeId(node.id);
+    setIsolatedNodeId((prev) => (prev === node.id ? null : node.id));
+  }, []);
+
+  const handleGraphInteract = useCallback(() => {}, []);
 
   const goBack = () => {
     if (historyIndex <= 0) return;
-    setIsolatedEntityId(null);
     const nextIndex = historyIndex - 1;
     const item = history[nextIndex];
     setHistoryIndex(nextIndex);
@@ -212,11 +244,11 @@ export default function DynamicGraphChat() {
     setScene(item.scene);
     setRouting(item.routing);
     setSelectedNodeId(item.scene.highlighted_node_id ?? null);
+    setIsolatedNodeId(item.scene.isolated_node_id ?? null);
   };
 
   const goForward = () => {
     if (historyIndex < 0 || historyIndex >= history.length - 1) return;
-    setIsolatedEntityId(null);
     const nextIndex = historyIndex + 1;
     const item = history[nextIndex];
     setHistoryIndex(nextIndex);
@@ -224,6 +256,7 @@ export default function DynamicGraphChat() {
     setScene(item.scene);
     setRouting(item.routing);
     setSelectedNodeId(item.scene.highlighted_node_id ?? null);
+    setIsolatedNodeId(item.scene.isolated_node_id ?? null);
   };
 
   return (
@@ -232,6 +265,15 @@ export default function DynamicGraphChat() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-bold uppercase tracking-wide">Adaptive Graph</h2>
           <div className="flex items-center gap-2">
+            {isolatedNodeId && (
+              <button
+                onClick={() => setIsolatedNodeId(null)}
+                className="inline-flex items-center justify-center h-7 px-3 border border-black bg-amber-100 text-black hover:bg-amber-200"
+                title="Exit spotlight (Esc)"
+              >
+                Exit Spotlight
+              </button>
+            )}
             <button
               onClick={goBack}
               disabled={historyIndex <= 0 || loading}
@@ -277,8 +319,9 @@ export default function DynamicGraphChat() {
               edges={scene.edges}
               highlightedNodeId={scene.highlighted_node_id ?? null}
               selectedNodeId={selectedNodeId}
-              isolatedEntityId={isolatedEntityId}
+              isolatedNodeId={isolatedNodeId}
               onNodeClick={transitionByClick}
+              onNodeIsolateToggle={toggleNodeIsolation}
               onGraphInteract={handleGraphInteract}
               fitTargetId={scene.highlighted_node_id ?? scene.state.focus_file_id ?? scene.state.focus_module_id ?? scene.state.focus_scope_id ?? null}
             />
@@ -355,11 +398,6 @@ export default function DynamicGraphChat() {
               {loading ? <IconLoader2 className="animate-spin" size={18} /> : <IconSend size={18} />}
             </button>
           </div>
-          {debugInfo && (
-            <div className="mt-2 text-[10px] text-gray-500 break-all">
-              debug: {Object.entries(debugInfo).slice(0, 4).map(([k, v]) => `${k}=${String(v)}`).join(' · ')}
-            </div>
-          )}
         </div>
       </div>
     </div>

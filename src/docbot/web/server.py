@@ -103,6 +103,71 @@ def _top_scope_symbols(scope, limit: int = 2) -> list[str]:
     return names
 
 
+def _top_import_roots(imports: list[str], limit: int = 3) -> list[str]:
+    roots: list[str] = []
+    seen: set[str] = set()
+    for imp in imports:
+        token = (imp or "").strip()
+        if not token:
+            continue
+        token = token.lstrip(".").replace("\\", "/")
+        if not token:
+            continue
+        root = token.split(".", 1)[0].split("/", 1)[0]
+        if not root or root in seen:
+            continue
+        seen.add(root)
+        roots.append(root)
+        if len(roots) >= limit:
+            break
+    return roots
+
+
+def _infer_file_role(path: str) -> str:
+    p = path.replace("\\", "/").lower()
+    base = os.path.basename(p)
+
+    if "/test" in p or base.startswith("test_") or base.endswith("_test.py"):
+        return "Test file validating behavior and regressions."
+    if base in {"config.py", "settings.py"} or "config" in base:
+        return "Configuration file defining runtime settings and integration parameters."
+    if base in {"main.py", "app.py", "server.py"}:
+        return "Main runtime entrypoint that wires services and request flow."
+    if "worker" in base or "/workers/" in p:
+        return "Background worker handling queued asynchronous jobs."
+    if "/routes/" in p or "route" in base:
+        return "Route/controller layer defining request handlers and API flow."
+    if "client" in base or "/clients/" in p:
+        return "Service client adapter for external APIs or providers."
+    if "model" in base or "schema" in base:
+        return "Data model/schema definitions shared across components."
+    if "__init__" in base:
+        return "Package initialization and module export surface."
+    return "Implementation file containing core logic for this module."
+
+
+def _describe_file_node(*, path: str, symbols: list, imports: list[str], scope_title: str) -> str:
+    role = _infer_file_role(path)
+    symbol_names: list[str] = []
+    for sym in symbols[:8]:
+        name = (getattr(sym, "name", "") or "").strip()
+        if name and name not in symbol_names:
+            symbol_names.append(name)
+        if len(symbol_names) >= 3:
+            break
+    import_roots = _top_import_roots(imports, limit=3)
+
+    details: list[str] = [role]
+    details.append(
+        f"In {scope_title}: {len(symbols)} entities and {len(imports)} imports."
+    )
+    if symbol_names:
+        details.append(f"Key entities: {', '.join(symbol_names)}.")
+    if import_roots:
+        details.append(f"Primary dependencies: {', '.join(import_roots)}.")
+    return " ".join(details)
+
+
 def _scope_capability_tags(scope) -> list[str]:
     corpus_parts: list[str] = [scope.title or "", scope.summary or ""]
     corpus_parts.extend(scope.imports[:120])
@@ -749,9 +814,11 @@ def _build_file_graph(index: DocsIndex, include_scopes: set[str] | None = None) 
                     "import_count": len(fe.imports) if fe else 0,
                     "language": language,
                     "group": group,
-                    "description": (
-                        f"File {p} in {s.title}. "
-                        f"Contains {len(fe.symbols) if fe else 0} entities and {len(fe.imports) if fe else 0} imports."
+                    "description": _describe_file_node(
+                        path=p,
+                        symbols=(fe.symbols if fe else []),
+                        imports=(fe.imports if fe else []),
+                        scope_title=s.title,
                     ),
                 }
             )
@@ -1251,7 +1318,12 @@ def _build_explore_catalog(index: DocsIndex) -> dict:
                 "file_count": 1,
                 "entity_count": len(symbols),
                 "import_count": len(imports),
-                "description": f"{p} with {len(symbols)} entities and {len(imports)} imports",
+                "description": _describe_file_node(
+                    path=p,
+                    symbols=symbols,
+                    imports=imports,
+                    scope_title=s.title,
+                ),
                 "preview": _excerpt_for_file(p, line_start=1, radius=6),
             }
 
@@ -1402,6 +1474,7 @@ def _build_explore_scene(
     focus_module_id: str | None,
     focus_file_id: str | None,
     highlighted_node_id: str | None = None,
+    isolated_node_id: str | None = None,
 ) -> dict:
     """Build a single-canvas mixed-depth graph scene."""
     catalog = _build_explore_catalog(index)
@@ -1513,6 +1586,7 @@ def _build_explore_scene(
         "nodes": node_list,
         "edges": edge_list,
         "highlighted_node_id": highlighted_node_id,
+        "isolated_node_id": isolated_node_id,
         "metrics": {
             "node_count": len(node_list),
             "edge_count": len(edge_list),
@@ -1831,6 +1905,7 @@ class ExploreState(BaseModel):
     focus_scope_id: str | None = None
     focus_module_id: str | None = None
     focus_file_id: str | None = None
+    isolate_node_id: str | None = None
 
 
 class ExploreRequest(BaseModel):
@@ -2130,6 +2205,7 @@ Return JSON ONLY:
     "focus_module_id": "module id or null",
     "focus_file_id": "file:<path> or null",
     "highlighted_node_id": "node id or null",
+    "spotlight_node_id": "node id/path/label to isolate (or null)",
     "reason": "brief routing explanation"
   }}
 }}
@@ -2141,11 +2217,36 @@ Rules:
 - Keep answer concise and skimmable.
 - Trust the user's requested focus area; keep scope tight.
 - Include concrete repo file references (e.g. `services/x/app/main.py`) in the answer.
+- Use `spotlight_node_id` when one node should be visually spotlighted (isolated while keeping context).
 - Preferred format:
   1) What it is (1-2 lines)
   2) Key systems (3-6 bullets)
   3) Where to inspect (2-4 file references)
 """
+
+
+def _match_scene_node_id(scene: dict, raw: str | None) -> str | None:
+    """Resolve a model-provided spotlight node reference to a visible scene node id."""
+    if not raw:
+        return None
+    key = raw.strip().lower()
+    if not key:
+        return None
+    nodes = scene.get("nodes") or []
+    for n in nodes:
+        nid = str(n.get("id") or "")
+        if nid.lower() == key:
+            return nid
+    for n in nodes:
+        nid = str(n.get("id") or "")
+        label = str(n.get("label") or "").lower()
+        file_path = str(n.get("file_path") or "").lower()
+        module_path = str(n.get("module_path") or "").lower()
+        if key and (key == label or key == file_path or key == os.path.basename(file_path)):
+            return nid
+        if key and (key in nid.lower() or key in label or (file_path and key in file_path) or (module_path and key in module_path)):
+            return nid
+    return None
 
 
 def _default_explore_suggestions(index: DocsIndex, *, max_items: int = 3) -> list[str]:
@@ -2381,6 +2482,10 @@ async def explore(req: ExploreRequest) -> JSONResponse:
             focus_file_id=focus_file_id,
             highlighted_node_id=highlighted_node_id,
         )
+        spotlight_raw = str(g.get("spotlight_node_id") or "").strip() or None
+        spotlight_node_id = _match_scene_node_id(scene, spotlight_raw) if spotlight_raw else None
+        if spotlight_node_id:
+            scene["isolated_node_id"] = spotlight_node_id
         elapsed = int((time.perf_counter() - t0) * 1000)
         return JSONResponse(
             jsonable_encoder(
@@ -2414,6 +2519,7 @@ async def explore(req: ExploreRequest) -> JSONResponse:
             focus_scope_id=focus_scope_id,
             focus_module_id=focus_module_id,
             focus_file_id=focus_file_id,
+            isolated_node_id=None,
         )
         ql = query.lower()
         raw_fallback = llm_raw.strip()
@@ -2487,6 +2593,7 @@ async def graph_transition(req: GraphTransitionRequest) -> JSONResponse:
         focus_module_id=focus_module_id,
         focus_file_id=focus_file_id,
         highlighted_node_id=node_id,
+        isolated_node_id=None,
     )
     return JSONResponse(
         jsonable_encoder(
@@ -2508,6 +2615,7 @@ async def graph_initial() -> JSONResponse:
         focus_scope_id=None,
         focus_module_id=None,
         focus_file_id=None,
+        isolated_node_id=None,
     )
     return JSONResponse(
         jsonable_encoder(

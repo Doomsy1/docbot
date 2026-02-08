@@ -95,15 +95,15 @@ def _build_llm_client(
 
     if no_llm:
         return None
-    api_key = os.environ.get("OPENROUTER_KEY", "").strip()
+    api_key = os.environ.get("BACKBOARD_API_KEY", "").strip()
     if api_key:
         return LLMClient(api_key=api_key, model=model)
     if not quiet:
         console.print(
-            "[yellow]OPENROUTER_KEY not set. Running in template-only mode.[/yellow]"
+            "[yellow]BACKBOARD_API_KEY not set. Running in template-only mode.[/yellow]"
         )
         console.print(
-            "[dim]Set OPENROUTER_KEY or pass --no-llm to suppress this warning.[/dim]"
+            "[dim]Set BACKBOARD_API_KEY or pass --no-llm to suppress this warning.[/dim]"
         )
     return None
 
@@ -271,7 +271,7 @@ def generate(
         None, "--timeout", "-t", help="Per-scope timeout in seconds."
     ),
     model: Optional[str] = typer.Option(
-        None, "--model", "-m", help="OpenRouter model ID."
+        None, "--model", "-m", help="Model ID (provider/model)."
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
     use_agents: bool = typer.Option(
@@ -341,7 +341,7 @@ def generate(
         tracker = NoOpTracker()
 
     if llm_client is not None:
-        console.print(f"[bold]LLM:[/bold] {effective_cfg.model} via OpenRouter")
+        console.print(f"[bold]LLM:[/bold] {effective_cfg.model} via Backboard")
 
     # Run the git-aware pipeline, outputting to .docbot/.
     _run_async(
@@ -372,7 +372,7 @@ def update(
         None, "--timeout", "-t", help="Per-scope timeout in seconds."
     ),
     model: Optional[str] = typer.Option(
-        None, "--model", "-m", help="OpenRouter model ID."
+        None, "--model", "-m", help="Model ID (provider/model)."
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
 ) -> None:
@@ -468,7 +468,7 @@ def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
     port: int = typer.Option(8000, "--port", "-p", help="Port number."),
     model: str = typer.Option(
-        DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID (for chat)."
+        DEFAULT_MODEL, "--model", "-m", help="Model ID (provider/model, for chat)."
     ),
     no_browser: bool = typer.Option(
         False, "--no-browser", help="Don't auto-open browser."
@@ -769,7 +769,7 @@ def run(
         120.0, "--timeout", "-t", help="Per-scope timeout in seconds."
     ),
     model: str = typer.Option(
-        DEFAULT_MODEL, "--model", "-m", help="OpenRouter model ID."
+        DEFAULT_MODEL, "--model", "-m", help="Model ID (provider/model)."
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM enrichment."),
     use_agents: bool = typer.Option(

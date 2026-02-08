@@ -196,8 +196,8 @@ class DocbotConfig(BaseModel):
     Precedence: CLI flag > config.toml > default.
     """
 
-    model: str = "openai/gpt-oss-20b"
-    """OpenRouter model ID for LLM calls."""
+    model: str = "openai/gpt-4o-mini"
+    """Model ID (provider/model_name) for Backboard API calls."""
 
     concurrency: int = 4
     """Maximum parallel explorer workers."""

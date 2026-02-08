@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from ..llm import LLMClient, StreamedToolCall
+    from ..llm import LLMClient
     from .tools import AgentToolkit
 
 logger = logging.getLogger(__name__)
@@ -260,8 +260,6 @@ async def run_agent_loop_streaming(
     on_tool_start:
         Called when a tool call is detected (name, parsed args).
     """
-    from ..llm import StreamedToolCall
-
     if tool_definitions is None:
         from .tools import TOOL_DEFINITIONS
         tool_definitions = TOOL_DEFINITIONS
@@ -278,7 +276,7 @@ async def run_agent_loop_streaming(
 
         # Accumulate full text and tool calls from stream
         full_text = ""
-        tool_calls: dict[int, StreamedToolCall] = {}  # index -> accumulator
+        tool_calls: list[ToolCall] = []
         queued_tool_results: list[tuple[str, dict]] = []  # (name, args) for non-spawn
         finish_called = False
         finish_summary = ""
@@ -296,44 +294,30 @@ async def run_agent_loop_streaming(
                         except Exception:
                             pass
 
-                # Tool call delta
-                if delta.tool_index is not None:
-                    idx = delta.tool_index
-                    if idx not in tool_calls:
-                        tool_calls[idx] = StreamedToolCall(index=idx)
-                    tc = tool_calls[idx]
-                    if delta.tool_name:
-                        tc.name = delta.tool_name
-                    if delta.tool_args_chunk:
-                        tc.arguments_json += delta.tool_args_chunk
-
-                    # Check if this tool call is now complete
-                    parsed = tc.try_parse()
-                    if parsed is not None and tc.name:
-                        if on_tool_start:
-                            on_tool_start(tc.name, parsed)
-
-                        if tc.name == "finish":
-                            finish_called = True
-                            finish_summary = parsed.get("summary", "")
-                        elif tc.name in _SPAWN_TOOLS:
-                            # Execute spawn tools immediately (they create async tasks)
-                            result = await toolkit.execute(tc.name, parsed)
-                            if tracker and tracker_node_id:
-                                try:
-                                    tracker.record_tool_call(tracker_node_id, tc.name, parsed, result[:200])  # type: ignore[union-attr]
-                                except Exception:
-                                    pass
-                        else:
-                            queued_tool_results.append((tc.name, parsed))
-
-                        # Reset so we don't re-process
-                        tc.arguments_json = ""
-                        tc.name = ""
-
         except Exception as e:
             logger.error("[%s] Stream failed: %s", agent_id, e)
             return f"(Agent error: stream failed - {e})"
+
+        # Backboard has no native tool call streaming — parse from text
+        if not tool_calls and full_text:
+            text_calls = parse_tool_calls(full_text)
+            for tc in text_calls:
+                if on_tool_start:
+                    on_tool_start(tc.name, tc.args)
+
+                if tc.name == "finish":
+                    finish_called = True
+                    finish_summary = tc.args.get("summary", "")
+                elif tc.name in _SPAWN_TOOLS:
+                    result = await toolkit.execute(tc.name, tc.args)
+                    if tracker and tracker_node_id:
+                        try:
+                            tracker.record_tool_call(tracker_node_id, tc.name, tc.args, result[:200])  # type: ignore[union-attr]
+                        except Exception:
+                            pass
+                else:
+                    queued_tool_results.append((tc.name, tc.args))
+                tool_calls.append(tc)
 
         # Execute queued non-spawn tools
         tool_result_msgs: list[str] = []
@@ -357,10 +341,9 @@ async def run_agent_loop_streaming(
         # Build assistant message for history
         # Construct a representation that includes both text and tool usage
         assistant_content = full_text
-        if tool_calls:
+        if queued_tool_results:
             completed_names = [f"{n}({json.dumps(a)[:80]})" for n, a in queued_tool_results]
-            if completed_names:
-                assistant_content += "\n\n[Tools called: " + ", ".join(completed_names) + "]"
+            assistant_content += "\n\n[Tools called: " + ", ".join(completed_names) + "]"
         messages.append({"role": "assistant", "content": assistant_content or "(tool calls only)"})
 
         # Add tool results

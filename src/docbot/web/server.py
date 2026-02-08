@@ -1760,7 +1760,7 @@ async def explore(req: ExploreRequest) -> JSONResponse:
     if not query:
         raise HTTPException(status_code=400, detail="Query is required.")
     if _llm_client is None:
-        raise HTTPException(status_code=503, detail="LLM not configured (missing OPENROUTER_KEY).")
+        raise HTTPException(status_code=503, detail="LLM not configured (missing BACKBOARD_API_KEY).")
 
     index = _load_index()
     prev_state = req.state or ExploreState()
@@ -2275,7 +2275,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     if _llm_client is None:
         raise HTTPException(
-            status_code=503, detail="LLM not configured (missing OPENROUTER_KEY)."
+            status_code=503, detail="LLM not configured (missing BACKBOARD_API_KEY)."
         )
 
     index = _load_index()

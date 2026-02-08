@@ -1,11 +1,24 @@
-# docbot
+<div align="center">
 
-**Auto-document any codebase.**
+<img src="assets/logo.png" width="100" height="100"/>
 
-Scans your repo, extracts structure via tree-sitter (or LLM fallback for unsupported languages), and generates
-a full documentation site: architecture diagrams, API references, and env var catalogs. Every generated line
-is traceable back to source code. Includes an interactive webapp with AI chat, system graph, guided tours,
-and code navigation.
+# DocBot
+
+**The technical GPS for _any_ codebase.**
+
+</div>
+
+---
+
+Documentation is almost always outdated or non-existent. **DocBot** solves this by autonomously mapping your system architecture in seconds, not days. It parallelizes codebase exploration using specialized agents to extract deep semantic understanding—from high-level components to individual symbols.
+
+## Features
+
+- **Interactive Architecture Maps**: Dynamically renders a whiteboard-style graph of your entire system that you can actually chat with.
+- **Git-Integrated Workflow**: Built-in git hooks (post-commit/merge) and CLI tools (`docbot status`, `docbot diff`) to keep docs in perfect sync with your code.
+- **Autonomous Explorer Agents**: Uses Tree-sitter and LLMs to investigate symbols, trace dependencies, and uncover the "heart" of your logic while you code.
+- **One-Click Generation**: Zero-config needed. Run `docbot init` on any repository and get a fully functional documentation site instantly.
+- **Live Pipeline Visualization**: Includes a built-in telemetry server to watch the agentic exploration process in real-time.
 
 ## Quick Start
 
@@ -17,118 +30,67 @@ and code navigation.
    ```
 
 2. **Configure**
-   Create a `.env` file:
-
-   ```bash
-   OPENROUTER_KEY=sk-or-...
-   ```
+   Create a `.env` file with your `OPENROUTER_KEY`.
 
 3. **Initialize & Generate**
 
    ```bash
-   cd /path/to/your/project
    docbot init
-   docbot generate
+   docbot generate --viz
    ```
 
 4. **Explore**
    ```bash
    docbot serve
    ```
-   Opens the interactive webapp in your browser.
 
 ## Commands
 
-| Command                       | Description                                                     |
-| ----------------------------- | --------------------------------------------------------------- |
-| `docbot init [path]`          | Create `.docbot/` directory with config and gitignore           |
-| `docbot generate [path]`      | Run the full documentation pipeline, output to `.docbot/`       |
-| `docbot update [path]`        | Incremental update -- only re-process scopes with changed files |
-| `docbot status [path]`        | Show doc state: last run, changed files, affected scopes        |
-| `docbot serve [path]`         | Launch interactive webapp against `.docbot/`                    |
-| `docbot run [path]`           | Legacy standalone run; now opens unified webapp by default      |
-| `docbot config [key] [value]` | View or modify `.docbot/config.toml` settings                   |
-| `docbot hook install`         | Install post-commit git hook for automatic doc updates          |
-| `docbot hook uninstall`       | Remove the docbot git hook                                      |
+| Command               | Description                                 |
+| --------------------- | ------------------------------------------- |
+| `docbot init`         | Initialize `.docbot/` directory and config. |
+| `docbot generate`     | Run the full documentation pipeline.        |
+| `docbot update`       | Incremental update for changed files.       |
+| `docbot status`       | Show documentation lag and affected scopes. |
+| `docbot diff`         | Compare two architecture snapshots.         |
+| `docbot serve`        | Launch the interactive explorer UI.         |
+| `docbot hook install` | Install git hooks for auto-documentation.   |
 
 ## Options
 
-Flags for `docbot generate` (override config.toml values for that invocation):
+Flags for `docbot generate`:
 
-| Flag                 | Description                                           |
-| -------------------- | ----------------------------------------------------- |
-| `--no-llm`           | Skip LLM enrichment (extraction only).                |
-| `--model / -m`       | OpenRouter model ID (default: openai/gpt-oss-20b).    |
-| `--concurrency / -j` | Parallel explorer workers (default: 4).               |
-| `--timeout / -t`     | Per-scope timeout in seconds (default: 120).          |
-| `--max-scopes`       | Maximum number of documentation scopes (default: 20). |
+| Flag            | Description                                       |
+| --------------- | ------------------------------------------------- |
+| `--viz`         | Launch live pipeline telemetry server.            |
+| `--agents`      | Enable recursive agentic exploration (deep-dive). |
+| `--no-llm`      | Skip AI enrichment (static extraction only).      |
+| `--concurrency` | Parallel worker count (default: 4).               |
+| `--model`       | Override default OpenRouter model ID.             |
 
 ## How It Works
 
-Five-stage async pipeline:
+DocBot uses a high-concurrency **Map-Reduce** pipeline:
 
-1. **Scan** -- finds source files across all languages, classifies entrypoints and packages.
-2. **Plan** -- groups files into logical documentation scopes (LLM-refined).
-3. **Explore** -- extracts symbols, imports, and references per scope (tree-sitter for Python/TS/JS/Go/Rust/Java/Kotlin/C#/Swift/Ruby, LLM fallback for everything else). Runs in parallel.
-4. **Reduce** -- merges scope results, builds a cross-file dependency graph, generates cross-scope analysis.
-5. **Render** -- generates per-scope Markdown docs, README, architecture overview, API reference, and HTML report.
-
-All narrative content is LLM-generated. The `--no-llm` flag falls back to template-based output.
+1. **Scan**: Multi-language discovery and entrypoint mapping.
+2. **Plan**: Dependency-aware grouping into logical "scopes".
+3. **Explore**: Parallel AST extraction (Tree-sitter) and LLM-agent reasoning.
+4. **Reduce**: Cross-scope graph construction and anomaly detection.
+5. **Render**: Generation of Markdown, Mermaid diagrams, and Search Index.
 
 ### Architecture
 
 ![diagram](assets/docbot-diagram.png)
 
-## Development
-
-```bash
-# 1. Install in editable mode
-uv venv && .venv\Scripts\activate    # Windows
-uv pip install -e .
-
-# 2. Initialize and generate docs
-docbot init .
-docbot generate
-
-# 3. Start the webapp (API + frontend)
-docbot serve
-```
-
-For frontend development, run the React dev server separately:
-
-```bash
-cd webapp
-npm install && npm run dev
-```
-
-The Vite dev server at http://localhost:5173 proxies API calls to the FastAPI backend.
-
 ## Project Structure
 
-```
-src/docbot/
-  cli.py              # Typer CLI entry point
-  models.py           # Pydantic data models
-  llm.py              # Async OpenRouter LLM client
-  orchestrator.py     # 5-stage pipeline coordinator
-  scanner.py          # Stage 1: file discovery
-  planner.py          # Stage 2: scope planning
-  explorer.py         # Stage 3: per-scope extraction + LLM enrichment
-  reducer.py          # Stage 4: cross-scope analysis + dependency graph
-  renderer.py         # Stage 5: doc generation
-  server.py           # FastAPI backend
-  search.py           # BM25 search index
-  project.py          # .docbot/ directory management
-  git_utils.py        # Git CLI wrappers
-  hooks.py            # Git hook install/uninstall
-  tracker.py          # Pipeline state/event tracking (webapp pipeline replay)
-  extractors/         # Language-specific extraction (tree-sitter + LLM fallback)
-webapp/               # React SPA (Vite + ReactFlow + Tailwind)
-```
+- `src/docbot/pipeline/`: Core Map-Reduce logic (Scanner, Planner, Explorer, etc.)
+- `src/docbot/git/`: Git-aware logic (Snapshotting, Diffing, Hooks)
+- `src/docbot/viz/`: Pipeline telemetry and replay server
+- `src/docbot/extractors/`: Language-specific AST analysis
+- `webapp/`: React + Vite + ReactFlow + Tailwind frontend
 
 ## Stack
 
-- **Core**: Python 3.11+, Typer, Pydantic, AsyncIO
-- **AI**: OpenRouter API (any model)
-- **Extraction**: tree-sitter (10 languages) + LLM fallback (universal)
-- **Webapp**: React + Vite + ReactFlow + Tailwind (frontend), FastAPI + Uvicorn (backend)
+- **Backend**: Python, FastAPI, Typer, Pydantic, Tree-sitter
+- **Frontend**: React, Vite, React Flow (interactive graphs), Tailwind

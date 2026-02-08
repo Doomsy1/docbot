@@ -1,6 +1,20 @@
-"""Agents module -- recursive exploration agents with tools and notepads."""
+"""Agents module -- recursive exploration agents with tools and notepads.
+
+.. deprecated::
+    This module is superseded by ``docbot.exploration``, which uses LangGraph
+    for agent orchestration.  This module is retained for backward compatibility
+    and reference only.
+"""
 
 from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "docbot.agents is deprecated. Use docbot.exploration instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from .notepad import Notepad, NoteEntry
 from .tools import AgentToolkit, TOOL_DEFINITIONS, ROOT_TOOL_DEFINITIONS

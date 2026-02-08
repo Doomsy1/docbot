@@ -277,6 +277,10 @@ def generate(
     mock_viz: bool = typer.Option(
         False, "--mock-viz", help="Run mock pipeline simulation."
     ),
+    serve: bool = typer.Option(
+        False, "--serve", help="Start webapp during generation for live visualization."
+    ),
+    port: int = typer.Option(8000, "-p", help="Webapp port (with --serve)."),
 ) -> None:
     """Run the full documentation pipeline, output to .docbot/."""
     from .models import DocbotConfig
@@ -334,15 +338,51 @@ def generate(
     if llm_client is not None:
         console.print(f"[bold]LLM:[/bold] {effective_cfg.model} via OpenRouter")
 
-    # Run the git-aware pipeline, outputting to .docbot/.
-    asyncio.run(
-        generate_async(
-            docbot_root=docbot_dir,
-            config=effective_cfg,
-            llm_client=llm_client,
-            tracker=tracker,
-        )
-    )
+    # --serve: start webapp server in background for live agent visualization.
+    event_queue: asyncio.Queue | None = None
+    if serve and effective_cfg.use_agents:
+        event_queue = asyncio.Queue(maxsize=10000)
+
+    async def _run_with_serve():
+        if serve:
+            _ensure_webapp_built()
+            from .web.server import app as webapp_app, _set_live_event_queue
+            import uvicorn
+
+            _set_live_event_queue(event_queue)
+
+            uvi_config = uvicorn.Config(
+                webapp_app, host="127.0.0.1", port=port,
+                log_level="warning",
+            )
+            server = uvicorn.Server(uvi_config)
+            server_task = asyncio.create_task(server.serve())
+            console.print(f"[bold cyan]Live webapp:[/bold cyan] http://127.0.0.1:{port}")
+
+            try:
+                await generate_async(
+                    docbot_root=docbot_dir,
+                    config=effective_cfg,
+                    llm_client=llm_client,
+                    tracker=tracker,
+                    event_queue=event_queue,
+                )
+            finally:
+                # Signal completion to SSE consumers.
+                if event_queue:
+                    await event_queue.put(None)
+                server.should_exit = True
+                await server_task
+        else:
+            await generate_async(
+                docbot_root=docbot_dir,
+                config=effective_cfg,
+                llm_client=llm_client,
+                tracker=tracker,
+                event_queue=event_queue,
+            )
+
+    asyncio.run(_run_with_serve())
 
     if visualize:
         console.print(
@@ -762,7 +802,10 @@ def run(
         2, "--agent-depth", help="Agent recursion depth (1=file, 2=symbol)."
     ),
     visualize: bool = typer.Option(
-        False, "--visualize", "--viz", help="Open live pipeline visualization."
+        True,
+        "--visualize/--no-visualize",
+        "--viz/--no-viz",
+        help="Open live pipeline visualization (enabled by default).",
     ),
     mock_viz: bool = typer.Option(
         False, "--mock-viz", help="Run mock pipeline simulation."
@@ -776,7 +819,7 @@ def run(
     from .pipeline.tracker import NoOpTracker, PipelineTracker
 
     if mock_viz:
-        from .viz_server import start_viz_server
+        from .viz.viz_server import start_viz_server
 
         tracker = PipelineTracker()
         _server, url = start_viz_server(tracker)
@@ -803,7 +846,7 @@ def run(
 
     tracker: PipelineTracker | NoOpTracker
     if visualize:
-        from .viz_server import start_viz_server
+        from .viz.viz_server import start_viz_server
 
         tracker = PipelineTracker()
         _server, url = start_viz_server(tracker)

@@ -230,6 +230,11 @@ class DocbotConfig(BaseModel):
     agent_scope_max_parallel: int = 8
     """Maximum concurrent subagents for a single scope tree."""
 
+    agent_max_depth: int = 8
+    """Maximum delegation depth for LangGraph exploration agents."""
+    agent_model: str | None = None
+    """Optional separate model for exploration agents (defaults to main model)."""
+
     llm_backoff_enabled: bool = True
     """Enable automatic retry/backoff for transient LLM failures."""
     llm_backoff_max_retries: int = 4

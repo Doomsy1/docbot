@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -25,6 +26,17 @@ _search_index_cache: SearchIndex | None = None
 _llm_client: LLMClient | None = None
 _tours_cache: list[dict] | None = None
 _service_details_cache: dict | None = None
+
+# Live agent event queue -- set when running with --serve --agents.
+_live_event_queue: asyncio.Queue | None = None
+# Snapshot of current agent states for late-joining clients.
+_agent_state_snapshot: dict = {"agents": {}, "notepads": {}}
+
+
+def _set_live_event_queue(queue: asyncio.Queue | None) -> None:
+    """Set the live event queue (called from CLI before starting server)."""
+    global _live_event_queue
+    _live_event_queue = queue
 
 
 def _load_index() -> DocsIndex:
@@ -79,6 +91,44 @@ def _get_docbot_dir() -> Path:
         )
 
     return docbot_dir
+
+
+def _load_pipeline_events(run_id: str | None = None) -> dict:
+    """Load saved pipeline events for a run (or the latest run)."""
+    from ..git.project import load_state
+
+    docbot_dir = _get_docbot_dir()
+    state = load_state(docbot_dir)
+    selected_run_id = run_id or state.last_run_id
+
+    if not selected_run_id:
+        raise HTTPException(status_code=404, detail="No run history available.")
+
+    events_path = docbot_dir / "history" / selected_run_id / "pipeline_events.json"
+    if not events_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Pipeline events not found for run '{selected_run_id}'.",
+        )
+
+    try:
+        payload = json.loads(events_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invalid pipeline_events.json for run '{selected_run_id}'.",
+        ) from exc
+
+    # Backward compatibility: older runs saved a plain snapshot shape.
+    if "events" not in payload and "nodes" in payload:
+        payload = {
+            "run_id": selected_run_id,
+            "events": [],
+            "snapshot": payload,
+        }
+    payload.setdefault("run_id", selected_run_id)
+    payload.setdefault("events", [])
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +656,27 @@ def _build_chat_system_prompt(index: DocsIndex, diff_report: dict | None = None)
                 "\n\nRecent changes (since last snapshot):\n" + "\n".join(changes_lines)
             )
 
+    # Load agent exploration notepad findings if available.
+    notepad_section = ""
+    if _run_dir:
+        notepad_path = _run_dir / "notepads" / "all_topics.json"
+        if notepad_path.exists():
+            try:
+                notepad_data = json.loads(notepad_path.read_text(encoding="utf-8"))
+                if notepad_data:
+                    lines = ["\n\nAgent exploration findings:"]
+                    for topic, entries in list(notepad_data.items())[:20]:
+                        lines.append(f"\n## {topic}")
+                        for entry in entries[:5]:
+                            author = entry.get("author", "agent")
+                            content = entry.get("content", "")
+                            if len(content) > 200:
+                                content = content[:200] + "..."
+                            lines.append(f"  - [{author}]: {content}")
+                    notepad_section = "\n".join(lines)
+            except (json.JSONDecodeError, OSError):
+                pass
+
     return (
         _CHAT_SYSTEM_TEMPLATE.format(
             repo_path=index.repo_path,
@@ -620,6 +691,7 @@ def _build_chat_system_prompt(index: DocsIndex, diff_report: dict | None = None)
             cross_scope_analysis=index.cross_scope_analysis or "(none)",
         )
         + changes_section
+        + notepad_section
     )
 
 
@@ -969,6 +1041,18 @@ async def get_snapshot_detail(run_id: str) -> JSONResponse:
     )
 
 
+@app.get("/api/pipeline")
+async def get_pipeline_events() -> JSONResponse:
+    """Return saved pipeline events for the latest run."""
+    return JSONResponse(_load_pipeline_events())
+
+
+@app.get("/api/pipeline/{run_id}")
+async def get_pipeline_events_for_run(run_id: str) -> JSONResponse:
+    """Return saved pipeline events for a specific run ID."""
+    return JSONResponse(_load_pipeline_events(run_id))
+
+
 @app.get("/api/changes")
 async def get_changes(
     from_snapshot: str | None = None,
@@ -1057,6 +1141,166 @@ async def get_changes(
             },
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Live Agent Streaming (SSE)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/agent-stream")
+async def agent_event_stream(request: Request):
+    """Server-Sent Events endpoint for live agent exploration updates.
+
+    Events include: agent_spawned, agent_finished, agent_error,
+    llm_token, tool_start, tool_end, notepad_created, notepad_write.
+    A final "done" event signals the run is complete.
+    """
+    from sse_starlette.sse import EventSourceResponse
+
+    if _live_event_queue is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No live agent run in progress. Start with --serve --agents.",
+        )
+
+    async def event_generator():
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                event = await asyncio.wait_for(
+                    _live_event_queue.get(), timeout=30
+                )
+                if event is None:
+                    # Sentinel: run complete.
+                    yield {"event": "done", "data": "{}"}
+                    break
+                event_type = event.get("type", "update")
+                # Track state for late-joining clients.
+                _update_agent_state_snapshot(event)
+                yield {"event": event_type, "data": json.dumps(event)}
+            except asyncio.TimeoutError:
+                # Keep-alive ping.
+                yield {"event": "ping", "data": "{}"}
+
+    return EventSourceResponse(event_generator())
+
+
+def _update_agent_state_snapshot(event: dict) -> None:
+    """Update the in-memory state snapshot from an event."""
+    global _agent_state_snapshot
+    etype = event.get("type", "")
+    agent_id = event.get("agent_id", "")
+
+    if etype == "agent_spawned":
+        _agent_state_snapshot["agents"][agent_id] = {
+            "agent_id": agent_id,
+            "parent_id": event.get("parent_id"),
+            "purpose": event.get("purpose", ""),
+            "depth": event.get("depth", 0),
+            "status": "running",
+            "text": "",
+            "tools": [],
+        }
+    elif etype == "agent_finished":
+        if agent_id in _agent_state_snapshot["agents"]:
+            _agent_state_snapshot["agents"][agent_id]["status"] = "done"
+            _agent_state_snapshot["agents"][agent_id]["summary"] = event.get("summary", "")
+    elif etype == "agent_error":
+        if agent_id in _agent_state_snapshot["agents"]:
+            _agent_state_snapshot["agents"][agent_id]["status"] = "error"
+            _agent_state_snapshot["agents"][agent_id]["error"] = event.get("error", "")
+    elif etype == "llm_token":
+        if agent_id in _agent_state_snapshot["agents"]:
+            _agent_state_snapshot["agents"][agent_id]["text"] += event.get("token", "")
+            # Keep only last 4000 chars to bound memory.
+            text = _agent_state_snapshot["agents"][agent_id]["text"]
+            if len(text) > 4000:
+                _agent_state_snapshot["agents"][agent_id]["text"] = text[-4000:]
+    elif etype == "tool_start":
+        if agent_id in _agent_state_snapshot["agents"]:
+            _agent_state_snapshot["agents"][agent_id]["tools"].append({
+                "tool": event.get("tool", ""),
+                "input": event.get("input", ""),
+                "status": "running",
+            })
+    elif etype == "tool_end":
+        if agent_id in _agent_state_snapshot["agents"]:
+            tools = _agent_state_snapshot["agents"][agent_id]["tools"]
+            if tools and tools[-1].get("status") == "running":
+                tools[-1]["status"] = "done"
+                tools[-1]["output"] = event.get("output", "")[:300]
+    elif etype in ("notepad_created", "notepad_write"):
+        topic = event.get("topic", "")
+        if topic not in _agent_state_snapshot["notepads"]:
+            _agent_state_snapshot["notepads"][topic] = []
+        if etype == "notepad_write":
+            _agent_state_snapshot["notepads"][topic].append({
+                "content": event.get("content", ""),
+                "author": event.get("author", ""),
+            })
+
+
+@app.get("/api/agent-state")
+async def agent_state():
+    """Return current agent tree state for late-joining clients."""
+    return JSONResponse(_agent_state_snapshot)
+
+
+@app.get("/api/notepad")
+async def list_notepad_topics():
+    """List all notepad topics (from live state or persisted data)."""
+    # Try live state first.
+    if _agent_state_snapshot["notepads"]:
+        topics = [
+            {"topic": topic, "entry_count": len(entries)}
+            for topic, entries in _agent_state_snapshot["notepads"].items()
+        ]
+        return JSONResponse({"topics": topics})
+
+    # Fall back to persisted data.
+    if _run_dir:
+        notepads_path = _run_dir / "notepads" / "all_topics.json"
+        if notepads_path.exists():
+            try:
+                data = json.loads(notepads_path.read_text(encoding="utf-8"))
+                topics = [
+                    {"topic": topic, "entry_count": len(entries)}
+                    for topic, entries in data.items()
+                ]
+                return JSONResponse({"topics": topics})
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    return JSONResponse({"topics": []})
+
+
+@app.get("/api/notepad/{topic}")
+async def get_notepad_topic(topic: str):
+    """Get entries for a specific notepad topic."""
+    # Try live state first.
+    if topic in _agent_state_snapshot["notepads"]:
+        return JSONResponse({
+            "topic": topic,
+            "entries": _agent_state_snapshot["notepads"][topic],
+        })
+
+    # Fall back to persisted data.
+    if _run_dir:
+        notepads_path = _run_dir / "notepads" / "all_topics.json"
+        if notepads_path.exists():
+            try:
+                data = json.loads(notepads_path.read_text(encoding="utf-8"))
+                if topic in data:
+                    return JSONResponse({
+                        "topic": topic,
+                        "entries": data[topic],
+                    })
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    raise HTTPException(status_code=404, detail=f"Topic '{topic}' not found.")
 
 
 # ---------------------------------------------------------------------------

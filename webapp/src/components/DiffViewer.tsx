@@ -457,7 +457,11 @@ export default function DiffViewer() {
                     : 'bg-white text-gray-800'
                 }`}>
                   {msg.role === 'assistant' ? (
-                    <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: msg.content.replace(/\n/g, '<br/>') }} />
+                    <div className="prose prose-sm max-w-none">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {msg.content}
+                      </ReactMarkdown>
+                    </div>
                   ) : (
                     msg.content
                   )}

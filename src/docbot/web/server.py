@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+from urllib.parse import urlparse
 from pathlib import Path, PurePosixPath
 
 from fastapi.encoders import jsonable_encoder
@@ -86,6 +87,234 @@ def _scope_group(scope) -> str:
         elif first.startswith("scripts/"):
             group = "scripts"
     return group
+
+
+def _top_scope_symbols(scope, limit: int = 2) -> list[str]:
+    names: list[str] = []
+    for sym in scope.public_api:
+        n = (sym.name or "").strip()
+        if not n:
+            continue
+        if n.lower() in {"main", "init", "__init__", "app"}:
+            continue
+        names.append(n)
+        if len(names) >= limit:
+            break
+    return names
+
+
+def _scope_capability_tags(scope) -> list[str]:
+    corpus_parts: list[str] = [scope.title or "", scope.summary or ""]
+    corpus_parts.extend(scope.imports[:120])
+    corpus_parts.extend(sym.signature for sym in scope.public_api[:60])
+    text = " ".join(corpus_parts).lower()
+
+    patterns: list[tuple[re.Pattern[str], str]] = [
+        (re.compile(r"\b(auth|jwt|token|login|register|oauth)\b"), "Authentication"),
+        (re.compile(r"\b(ffmpeg|hls|subtitle|video|transcript|tts)\b"), "Media Pipeline"),
+        (re.compile(r"\b(playwright|selenium|browser|headless|scrape)\b"), "Automation"),
+        (re.compile(r"\b(queue|worker|job|celery|rabbitmq|retry)\b"), "Async Jobs"),
+        (re.compile(r"\b(mongo|motor|pymongo|postgres|sqlalchemy|db|database)\b"), "Data Layer"),
+        (re.compile(r"\b(s3|spaces|boto3|bucket|storage)\b"), "Object Storage"),
+        (re.compile(r"\b(fetch|axios|requests|httpx|client)\b"), "Service Integration"),
+        (re.compile(r"\b(react|expo|tsx|component|hook|context)\b"), "UI Layer"),
+        (re.compile(r"\b(fastapi|apirouter|uvicorn|@app\.)\b"), "HTTP API"),
+        (re.compile(r"\b(test|pytest|spec|integration)\b"), "Testing"),
+    ]
+
+    tags: list[str] = []
+    for pat, label in patterns:
+        if pat.search(text):
+            tags.append(label)
+        if len(tags) >= 2:
+            break
+    return tags
+
+
+def _is_generic_scope_title(title: str) -> bool:
+    t = title.lower()
+    generic_tokens = {
+        "core",
+        "components",
+        "logic",
+        "setup",
+        "utilities",
+        "scripts",
+        "services",
+        "application",
+        "backend",
+        "frontend",
+        "management",
+    }
+    words = re.findall(r"[a-z]+", t)
+    generic_count = sum(1 for w in words if w in generic_tokens)
+    return generic_count >= 2 or len(words) <= 3
+
+
+def _scope_semantic_hint(scope) -> str | None:
+    """Derive a concise, concrete hint from symbols/imports in this scope."""
+    candidates = _scope_semantic_hint_candidates(scope)
+    return candidates[0] if candidates else None
+
+
+def _scope_semantic_hint_candidates(scope) -> list[str]:
+    """Rank semantic role hints for a scope (never raw symbol names)."""
+    title_l = (scope.title or "").lower()
+    sid_l = (scope.scope_id or "").lower()
+    symbol_names = " ".join((sym.name or "") for sym in scope.public_api[:80]).lower()
+    signals: list[str] = [scope.title or "", scope.summary or "", symbol_names]
+    signals.extend(scope.imports[:160])
+    text = " ".join(signals).lower()
+
+    ranked: list[tuple[int, str]] = []
+
+    # Strong title/ID priors first: these usually reflect intended module role.
+    title_patterns: list[tuple[str, str, int]] = [
+        (r"\bentrypoint", "runtime startup and command entrypoints", 98),
+        (r"\bauth", "authentication, session, and credential enforcement", 97),
+        (r"\btesting\b|\btest", "integration tests and service reliability checks", 96),
+        (r"\bheadless", "headless browser automation and application workflows", 95),
+        (r"\bfetch", "external data ingestion and retrieval pipelines", 94),
+        (r"\bprompt", "prompt construction and transformation logic", 94),
+        (r"\bclient", "provider client adapters and transport wrappers", 93),
+        (r"\bsetup|\bbootstrap|\binit", "startup wiring and dependency initialization", 93),
+        (r"\brouting|\broutes", "workflow orchestration and request routing", 92),
+        (r"\butility|\butilities", "shared utility helpers and transformations", 91),
+        (r"\bcore component", "shared infrastructure and runtime adapters", 90),
+        (r"\bfrontend|\bui", "UI state, screens, and interaction flows", 90),
+        (r"\bbackend|\bapi", "backend API handlers and request lifecycle", 90),
+        (r"\bvideo", "video pipeline orchestration and media processing", 89),
+    ]
+    title_corpus = f"{title_l} {sid_l}"
+    for pattern, label, weight in title_patterns:
+        if re.search(pattern, title_corpus):
+            ranked.append((weight, label))
+
+    def score(pattern: str) -> int:
+        return len(re.findall(pattern, text))
+
+    mongo_score = score(r"\b(mongo|motor|pymongo|mongodb)\b")
+    s3_score = score(r"\b(s3|spaces|boto3|bucket|storage)\b")
+    auth_score = score(r"\b(auth|jwt|token|login|register|oauth|password|verify_password|get_password_hash)\b")
+    http_score = score(r"\b(fastapi|apirouter|endpoint|route|request|response|http)\b")
+    media_score = score(r"\b(video|ffmpeg|hls|subtitle|tts|transcript|compose|render)\b")
+    queue_score = score(r"\b(queue|worker|job|retry|enqueue|dequeue)\b")
+    ui_score = score(r"\b(react|expo|tsx|component|hook|context|screen)\b")
+    fetch_score = score(r"\b(fetch|axios|requests|httpx|client|api_base_url)\b")
+    browser_score = score(r"\b(playwright|selenium|scrape|browser|captcha|otp|greenhouse)\b")
+    test_score = score(r"\b(test|pytest|spec|fixture|integration)\b")
+    embedding_score = score(r"\b(embedding|vector|semantic|gemini)\b")
+    prompt_score = score(r"\b(prompt|template|script_generator|storyboard)\b")
+    contract_score = score(r"\b(videorequest|videoresponse|requestmodel|responsemodel|pydantic|schema)\b")
+
+    # Content-derived role hints.
+    if auth_score >= 2:
+        ranked.append((88, "authentication, session, and credential enforcement"))
+    if http_score >= 2 and auth_score < 2:
+        ranked.append((86, "backend API handlers and request lifecycle"))
+    if contract_score >= 1:
+        ranked.append((85, "API contracts and payload model definitions"))
+    if browser_score >= 2:
+        ranked.append((85, "headless browser automation and application workflows"))
+    if media_score >= 2 and queue_score >= 1:
+        ranked.append((84, "video generation pipeline and job orchestration"))
+    if media_score >= 1 and prompt_score >= 1:
+        ranked.append((83, "prompt-driven media composition flow"))
+    if queue_score >= 2:
+        ranked.append((82, "background job orchestration and retry handling"))
+    if ui_score >= 2 and fetch_score >= 1:
+        ranked.append((81, "UI state and backend service integration"))
+    elif ui_score >= 2:
+        ranked.append((80, "UI state, screens, and interaction flows"))
+    if fetch_score >= 2 and embedding_score >= 1:
+        ranked.append((79, "semantic retrieval and external data ingestion"))
+    elif fetch_score >= 2:
+        ranked.append((78, "external data ingestion and retrieval pipelines"))
+    if mongo_score >= 2 and s3_score >= 1:
+        ranked.append((77, "persistent data and object storage access"))
+    elif mongo_score >= 2:
+        ranked.append((76, "database access and persistence workflows"))
+    elif s3_score >= 2:
+        ranked.append((76, "object storage access and media asset handling"))
+    if test_score >= 2:
+        ranked.append((75, "integration tests and service reliability checks"))
+
+    # Deduplicate while preserving score order.
+    out: list[str] = []
+    seen: set[str] = set()
+    for _score, label in sorted(ranked, key=lambda x: x[0], reverse=True):
+        if label in seen:
+            continue
+        seen.add(label)
+        out.append(label)
+    return out
+
+
+def _scope_display_label(scope) -> str:
+    """Human-readable, semantic scope label (no path suffix)."""
+    base = (scope.title or scope.scope_id).strip()
+    if not _is_generic_scope_title(base):
+        return base
+    hint = _scope_semantic_hint(scope)
+    if hint:
+        return f"{base} · {hint}"
+    tags = _scope_capability_tags(scope)
+    if tags and not any(t.lower() in base.lower() for t in tags):
+        return f"{base} — {tags[0]}"
+    return base
+
+
+def _scope_label_map(scopes: list) -> dict[str, str]:
+    """Generate semantic labels and disambiguate duplicates."""
+    label_by_id: dict[str, str] = {}
+    candidates_by_id: dict[str, list[str]] = {}
+    for s in scopes:
+        candidates_by_id[s.scope_id] = _scope_semantic_hint_candidates(s)
+        label_by_id[s.scope_id] = _scope_display_label(s)
+
+    # For generic titles, prefer unique semantic hints across the full scope set.
+    globally_used_hints: set[str] = set()
+    for s in scopes:
+        base = (s.title or s.scope_id).strip()
+        if not _is_generic_scope_title(base):
+            label_by_id[s.scope_id] = base
+            continue
+        chosen_hint = None
+        for cand in candidates_by_id.get(s.scope_id, []):
+            if cand not in globally_used_hints:
+                chosen_hint = cand
+                break
+        if chosen_hint:
+            globally_used_hints.add(chosen_hint)
+            label_by_id[s.scope_id] = f"{base} · {chosen_hint}"
+        else:
+            # Keep stable readable base label; avoid noisy symbol/path suffixes.
+            label_by_id[s.scope_id] = base
+    return label_by_id
+
+
+def _build_scope_mermaid(index: DocsIndex, include_scopes: set[str] | None = None) -> str:
+    """Deterministic, disambiguated Mermaid for scope dependency graph."""
+    lines = ["graph TD"]
+    scoped = [s for s in index.scopes if include_scopes is None or s.scope_id in include_scopes]
+    labels = _scope_label_map(scoped)
+    ids = {s.scope_id for s in scoped}
+    ep_scopes = {s.scope_id for s in scoped if s.entrypoints}
+    for s in scoped:
+        sid = s.scope_id
+        label = labels.get(sid, s.title).replace('"', "'")
+        if sid in ep_scopes:
+            lines.append(f'    {sid}(["{label}"]):::entrypoint')
+        elif sid == "crosscutting":
+            lines.append(f'    {sid}{{{{"{label}"}}}}:::crosscutting')
+        else:
+            lines.append(f'    {sid}["{label}"]')
+    for a, b in index.scope_edges:
+        if a in ids and b in ids:
+            lines.append(f"    {a} --> {b}")
+    lines.append("    classDef entrypoint fill:#2563eb,stroke:#1d4ed8,color:#fff")
+    lines.append("    classDef crosscutting fill:#f59e0b,stroke:#d97706,color:#fff")
+    return "\n".join(lines)
 
 
 def _normalize_query_tokens(text: str) -> set[str]:
@@ -421,14 +650,16 @@ Rules:
 
 def _build_scope_graph(index: DocsIndex, include_scopes: set[str] | None = None) -> dict:
     """Build scope-level graph payload."""
+    scoped = [s for s in index.scopes if include_scopes is None or s.scope_id in include_scopes]
+    labels = _scope_label_map(scoped)
     scopes_meta = []
-    for s in index.scopes:
-        if include_scopes is not None and s.scope_id not in include_scopes:
-            continue
+    for s in scoped:
+        display = labels.get(s.scope_id, s.title)
         scopes_meta.append(
             {
                 "scope_id": s.scope_id,
-                "title": s.title,
+                "title": display,
+                "raw_title": s.title,
                 "file_count": len(s.paths),
                 "symbol_count": len(s.public_api),
                 "languages": s.languages,
@@ -436,7 +667,7 @@ def _build_scope_graph(index: DocsIndex, include_scopes: set[str] | None = None)
                 "summary": s.summary,
                 "description": (
                     s.summary
-                    or f"{s.title} contains {len(s.paths)} files across {', '.join(s.languages) if s.languages else 'unknown languages'}."
+                    or f"{display} contains {len(s.paths)} files across {', '.join(s.languages) if s.languages else 'unknown languages'}."
                 ),
             }
         )
@@ -448,14 +679,12 @@ def _build_scope_graph(index: DocsIndex, include_scopes: set[str] | None = None)
     return {
         "scopes": scopes_meta,
         "scope_edges": edge_items,
-        "mermaid_graph": index.mermaid_graph or None,
+        "mermaid_graph": _build_scope_mermaid(index, include_scopes),
     }
 
 
 def _build_file_graph(index: DocsIndex, include_scopes: set[str] | None = None) -> dict:
     """Build file-level graph payload."""
-    path_to_file: dict[str, str] = {}
-    prefix_to_file: dict[str, str] = {}
     source_exts = frozenset(
         {
             ".py",
@@ -495,23 +724,13 @@ def _build_file_graph(index: DocsIndex, include_scopes: set[str] | None = None) 
         ".hpp": "cpp",
     }
 
-    for s in index.scopes:
-        if include_scopes is not None and s.scope_id not in include_scopes:
-            continue
-        for p in s.paths:
-            stem, _ext = os.path.splitext(p)
-            path_to_file[stem] = p
-            path_to_file[PurePosixPath(stem).name] = p
-            parts = PurePosixPath(p).parts
-            for i in range(1, len(parts) + 1):
-                segment = list(parts[:i])
-                base, ext2 = os.path.splitext(segment[-1])
-                if ext2 in source_exts:
-                    segment[-1] = base
-                prefix_to_file[".".join(segment)] = p
+    path_to_file, prefix_to_file = _build_import_lookup_maps(
+        index, include_scopes, source_exts
+    )
 
     file_nodes: list[dict] = []
     file_edges: list[dict] = []
+    edge_seen: set[tuple[str, str, str]] = set()
     for s in index.scopes:
         if include_scopes is not None and s.scope_id not in include_scopes:
             continue
@@ -538,9 +757,25 @@ def _build_file_graph(index: DocsIndex, include_scopes: set[str] | None = None) 
             )
             if fe:
                 for imp in fe.imports:
-                    target_file = _resolve_import_to_file(imp, path_to_file, prefix_to_file, source_exts)
+                    target_file = _resolve_import_to_file(
+                        imp, path_to_file, prefix_to_file, source_exts, source_file=p
+                    )
                     if target_file and target_file != p:
-                        file_edges.append({"from": p, "to": target_file})
+                        key = (p, target_file, "import")
+                        if key not in edge_seen:
+                            edge_seen.add(key)
+                            file_edges.append({"from": p, "to": target_file, "kind": "import"})
+
+    for src, dst, method, route in _build_http_runtime_edges(index, include_scopes):
+        if src == dst:
+            continue
+        key = (src, dst, "runtime_http")
+        if key in edge_seen:
+            continue
+        edge_seen.add(key)
+        file_edges.append(
+            {"from": src, "to": dst, "kind": "runtime_http", "method": method, "route": route}
+        )
 
     scope_groups = []
     for s in index.scopes:
@@ -570,8 +805,6 @@ def _build_file_graph(index: DocsIndex, include_scopes: set[str] | None = None) 
 
 def _build_module_graph(index: DocsIndex, include_scopes: set[str] | None = None) -> dict:
     """Build module-level graph payload (directory nodes + weighted edges)."""
-    path_to_file: dict[str, str] = {}
-    prefix_to_file: dict[str, str] = {}
     source_exts = frozenset(
         {
             ".py",
@@ -611,20 +844,9 @@ def _build_module_graph(index: DocsIndex, include_scopes: set[str] | None = None
         ".hpp": "cpp",
     }
 
-    for s in index.scopes:
-        if include_scopes is not None and s.scope_id not in include_scopes:
-            continue
-        for p in s.paths:
-            stem, _ext = os.path.splitext(p)
-            path_to_file[stem] = p
-            path_to_file[PurePosixPath(stem).name] = p
-            parts = PurePosixPath(p).parts
-            for i in range(1, len(parts) + 1):
-                segment = list(parts[:i])
-                base, ext2 = os.path.splitext(segment[-1])
-                if ext2 in source_exts:
-                    segment[-1] = base
-                prefix_to_file[".".join(segment)] = p
+    path_to_file, prefix_to_file = _build_import_lookup_maps(
+        index, include_scopes, source_exts
+    )
 
     file_to_module: dict[str, str] = {}
     module_stats: dict[str, dict] = {}
@@ -698,7 +920,9 @@ def _build_module_graph(index: DocsIndex, include_scopes: set[str] | None = None
             if not src_module:
                 continue
             for imp in fe.imports:
-                target_file = _resolve_import_to_file(imp, path_to_file, prefix_to_file, source_exts)
+                target_file = _resolve_import_to_file(
+                    imp, path_to_file, prefix_to_file, source_exts, source_file=p
+                )
                 if not target_file or target_file == p:
                     continue
                 dst_module = file_to_module.get(target_file)
@@ -706,6 +930,13 @@ def _build_module_graph(index: DocsIndex, include_scopes: set[str] | None = None
                     continue
                 key = (src_module, dst_module)
                 edge_counts[key] = edge_counts.get(key, 0) + 1
+    for src, dst, _method, _route in _build_http_runtime_edges(index, include_scopes):
+        src_module = file_to_module.get(src)
+        dst_module = file_to_module.get(dst)
+        if not src_module or not dst_module or dst_module == src_module:
+            continue
+        key = (src_module, dst_module)
+        edge_counts[key] = edge_counts.get(key, 0) + 1
     module_edges = [{"from": a, "to": b, "weight": w} for (a, b), w in edge_counts.items()]
 
     scope_groups = []
@@ -774,22 +1005,9 @@ def _build_entity_graph(
         ".hpp": "cpp",
     }
 
-    path_to_file: dict[str, str] = {}
-    prefix_to_file: dict[str, str] = {}
-    for s in index.scopes:
-        if include_scopes is not None and s.scope_id not in include_scopes:
-            continue
-        for p in s.paths:
-            stem, _ext = os.path.splitext(p)
-            path_to_file[stem] = p
-            path_to_file[PurePosixPath(stem).name] = p
-            parts = PurePosixPath(p).parts
-            for i in range(1, len(parts) + 1):
-                segment = list(parts[:i])
-                base, ext2 = os.path.splitext(segment[-1])
-                if ext2 in source_exts:
-                    segment[-1] = base
-                prefix_to_file[".".join(segment)] = p
+    path_to_file, prefix_to_file = _build_import_lookup_maps(
+        index, include_scopes, source_exts
+    )
 
     # Build entity nodes.
     entity_nodes: list[dict] = []
@@ -849,7 +1067,9 @@ def _build_entity_graph(
             if not src_entities:
                 continue
             for imp in fe.imports:
-                target_file = _resolve_import_to_file(imp, path_to_file, prefix_to_file, source_exts)
+                target_file = _resolve_import_to_file(
+                    imp, path_to_file, prefix_to_file, source_exts, source_file=p
+                )
                 if not target_file or target_file == p:
                     continue
                 dst_entities = file_entities.get(target_file, [])
@@ -974,33 +1194,22 @@ def _build_explore_catalog(index: DocsIndex) -> dict:
     file_to_scope: dict[str, str] = {}
     file_to_module: dict[str, str] = {}
     file_entities: dict[str, list[str]] = {}
+    labels = _scope_label_map(index.scopes)
 
-    path_to_file: dict[str, str] = {}
-    prefix_to_file: dict[str, str] = {}
+    path_to_file, prefix_to_file = _build_import_lookup_maps(index, None, source_exts)
     for s in index.scopes:
+        label = labels.get(s.scope_id, s.title)
         scopes[s.scope_id] = {
             "id": f"scope:{s.scope_id}",
             "scope_id": s.scope_id,
-            "label": s.title,
+            "label": label,
             "kind": "scope",
             "group": _scope_group(s),
             "file_count": len(s.paths),
             "entity_count": sum(len(s.file_extractions.get(p).symbols) if s.file_extractions.get(p) else 0 for p in s.paths),
-            "description": s.summary or f"{s.title} scope",
+            "description": s.summary or f"{label} scope",
             "preview": None,
         }
-        for p in s.paths:
-            stem, _ext = os.path.splitext(p)
-            path_to_file[stem] = p
-            path_to_file[PurePosixPath(stem).name] = p
-            parts = PurePosixPath(p).parts
-            for i in range(1, len(parts) + 1):
-                segment = list(parts[:i])
-                base, ext2 = os.path.splitext(segment[-1])
-                if ext2 in source_exts:
-                    segment[-1] = base
-                prefix_to_file[".".join(segment)] = p
-
     for s in index.scopes:
         group = _scope_group(s)
         for p in s.paths:
@@ -1024,7 +1233,7 @@ def _build_explore_catalog(index: DocsIndex) -> dict:
                     "file_count": 0,
                     "entity_count": 0,
                     "import_count": 0,
-                    "description": f"{module_path} module in {s.title}",
+                    "description": f"{module_path} module in {_scope_display_label(s)}",
                     "preview": None,
                 }
             modules[module_key]["file_count"] += 1
@@ -1083,7 +1292,9 @@ def _build_explore_catalog(index: DocsIndex) -> dict:
             src_file_key = f"file:{p}"
             src_module_key = file_to_module.get(p)
             for imp in fe.imports:
-                target_file = _resolve_import_to_file(imp, path_to_file, prefix_to_file, source_exts)
+                target_file = _resolve_import_to_file(
+                    imp, path_to_file, prefix_to_file, source_exts, source_file=p
+                )
                 if not target_file or target_file == p:
                     continue
                 dst_file_key = f"file:{target_file}"
@@ -1117,6 +1328,27 @@ def _build_explore_catalog(index: DocsIndex) -> dict:
                         "weight": 1,
                     }
                 )
+
+    for src, dst, method, route in _build_http_runtime_edges(index, None):
+        src_file_key = f"file:{src}"
+        dst_file_key = f"file:{dst}"
+        if src_file_key == dst_file_key:
+            continue
+        file_edges.append(
+            {
+                "from": src_file_key,
+                "to": dst_file_key,
+                "kind": "runtime_http",
+                "weight": 1,
+                "method": method,
+                "route": route,
+            }
+        )
+        src_module_key = file_to_module.get(src)
+        dst_module_key = file_to_module.get(dst)
+        if src_module_key and dst_module_key and src_module_key != dst_module_key:
+            k = (src_module_key, dst_module_key)
+            module_edge_counts[k] = module_edge_counts.get(k, 0) + 1
 
     module_edges = [{"from": a, "to": b, "kind": "module_dep", "weight": w} for (a, b), w in module_edge_counts.items()]
     entity_edges = (
@@ -1248,13 +1480,16 @@ def _build_explore_scene(
         b = rep_for_file(dst_fp)
         if not a or not b:
             continue
-        mapped_kind = "dep"
-        if a.startswith("scope:") and b.startswith("scope:"):
-            mapped_kind = "scope_dep"
-        elif a.startswith("module:") or b.startswith("module:"):
-            mapped_kind = "module_dep"
-        elif a.startswith("file:") or b.startswith("file:"):
-            mapped_kind = "file_dep"
+        if e.get("kind") == "runtime_http":
+            mapped_kind = "runtime_http"
+        else:
+            mapped_kind = "dep"
+            if a.startswith("scope:") and b.startswith("scope:"):
+                mapped_kind = "scope_dep"
+            elif a.startswith("module:") or b.startswith("module:"):
+                mapped_kind = "module_dep"
+            elif a.startswith("file:") or b.startswith("file:"):
+                mapped_kind = "file_dep"
         add_edge(a, b, mapped_kind, 1)
 
     # Focused entity edges.
@@ -2289,26 +2524,311 @@ def _resolve_import_to_file(
     path_to_file: dict[str, str],
     prefix_to_file: dict[str, str],
     source_exts: frozenset[str],
+    source_file: str | None = None,
 ) -> str | None:
     """Resolve an import string to a repo-relative file path, or None."""
-    # Strategy 1: path-based matching
-    normalised = imp.lstrip("./").replace("\\", "/")
-    stem, ext = os.path.splitext(normalised)
-    if ext in source_exts:
-        normalised = stem
-    target = path_to_file.get(normalised)
+    raw = imp.strip().replace("\\", "/")
+    if not raw:
+        return None
+
+    # Strip common URL/query suffix noise from JS/TS imports.
+    normalised = raw.split("?", 1)[0].split("#", 1)[0]
+    if not normalised:
+        return None
+
+    is_relative = normalised.startswith(".")
+
+    def _normalize_stem(path_like: str) -> str:
+        stem, ext = os.path.splitext(path_like)
+        return stem if ext in source_exts else path_like
+
+    def _path_candidates(path_like: str) -> list[str]:
+        path_like = _normalize_stem(path_like).strip("/")
+        if not path_like:
+            return []
+        dotted_like = path_like.replace("/", ".")
+        return [
+            path_like,
+            dotted_like,
+            f"{path_like}/__init__",
+            f"{path_like}/index",
+            f"{dotted_like}.__init__",
+            f"{dotted_like}.index",
+        ]
+
+    def _try_candidates(candidates: list[str]) -> str | None:
+        for cand in candidates:
+            target = path_to_file.get(cand)
+            if target:
+                return target
+        for cand in candidates:
+            target = prefix_to_file.get(cand)
+            if target:
+                return target
+        return None
+
+    # 1) Resolve relative imports against importing file location.
+    if is_relative and source_file:
+        source_dir = PurePosixPath(source_file).parent
+        rel_norm = _normalize_stem(normalised)
+        resolved = (source_dir / rel_norm).as_posix()
+        target = _try_candidates(_path_candidates(resolved))
+        if target:
+            return target
+
+    # 2) Resolve non-relative imports by anchoring to source directory ancestors.
+    if source_file and not is_relative:
+        source_dir_parts = list(PurePosixPath(source_file).parent.parts)
+        module_path = _normalize_stem(normalised.replace(".", "/"))
+        anchored: list[str] = []
+        for i in range(len(source_dir_parts), -1, -1):
+            prefix = "/".join(source_dir_parts[:i]).strip("/")
+            anchored_path = f"{prefix}/{module_path}".strip("/")
+            if anchored_path:
+                anchored.append(anchored_path)
+        target = _try_candidates([c for p in anchored for c in _path_candidates(p)])
+        if target:
+            return target
+
+    dotted = _normalize_stem(normalised.replace("/", "."))
+    target = _try_candidates(_path_candidates(dotted.replace(".", "/")))
     if target:
         return target
 
-    # Strategy 2: dotted-prefix matching
-    parts = imp.split(".")
+    parts = [p for p in dotted.split(".") if p]
     for i in range(len(parts), 0, -1):
         candidate = ".".join(parts[:i])
-        target = prefix_to_file.get(candidate)
+        target = _try_candidates(_path_candidates(candidate.replace(".", "/")))
         if target:
             return target
 
     return None
+
+
+def _build_import_lookup_maps(
+    index: DocsIndex,
+    include_scopes: set[str] | None,
+    source_exts: frozenset[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Build resilient import lookup maps for file/module graph resolution."""
+    path_to_file: dict[str, str] = {}
+    prefix_to_file: dict[str, str] = {}
+
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        for p in s.paths:
+            stem, _ext = os.path.splitext(p)
+            path_to_file[stem] = p
+            path_to_file[PurePosixPath(stem).name] = p
+
+            stem_parts = list(PurePosixPath(stem).parts)
+            for i in range(len(stem_parts)):
+                suffix = "/".join(stem_parts[i:])
+                if suffix:
+                    path_to_file.setdefault(suffix, p)
+                    path_to_file.setdefault(suffix.replace("/", "."), p)
+
+            parts = list(PurePosixPath(p).parts)
+            for i in range(1, len(parts) + 1):
+                segment = parts[:i]
+                base, ext2 = os.path.splitext(segment[-1])
+                if ext2 in source_exts:
+                    segment[-1] = base
+                dotted = ".".join(segment)
+                prefix_to_file[dotted] = p
+                seg_parts = dotted.split(".")
+                for j in range(1, len(seg_parts)):
+                    suffix = ".".join(seg_parts[j:])
+                    prefix_to_file.setdefault(suffix, p)
+
+            # Package imports often refer to directory, not __init__.py explicitly.
+            if PurePosixPath(p).name == "__init__.py":
+                pkg = os.path.dirname(stem).replace("\\", "/")
+                if pkg:
+                    path_to_file.setdefault(pkg, p)
+                    path_to_file.setdefault(pkg.replace("/", "."), p)
+                    pkg_parts = pkg.split("/")
+                    for i in range(len(pkg_parts)):
+                        suffix = ".".join(pkg_parts[i:])
+                        if suffix:
+                            prefix_to_file.setdefault(suffix, p)
+
+    return path_to_file, prefix_to_file
+
+
+_HTTP_METHODS = ("get", "post", "put", "patch", "delete", "options", "head")
+_FASTAPI_ROUTE_RE = re.compile(
+    r"@\s*(?:\w+\.)?(get|post|put|patch|delete|options|head)\s*\(\s*['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+_FASTAPI_API_ROUTE_RE = re.compile(
+    r"@\s*\w+\.api_route\s*\(\s*['\"]([^'\"]+)['\"].*?methods\s*=\s*\[([^\]]+)\]",
+    re.IGNORECASE | re.DOTALL,
+)
+_FETCH_CALL_RE = re.compile(r"\bfetch\s*\(\s*([`'\"])(.+?)\1", re.DOTALL)
+_FETCH_VAR_CALL_RE = re.compile(r"\bfetch\s*\(\s*([A-Za-z_]\w*)\s*(?:,|\))")
+_AXIOS_CALL_RE = re.compile(
+    r"\baxios\.(get|post|put|patch|delete|options|head)\s*\(\s*([`'\"])(.+?)\2",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTTP_CLIENT_CALL_RE = re.compile(
+    r"\b(?:requests|httpx)\.(get|post|put|patch|delete|options|head)\s*\(\s*([`'\"])(.+?)\2",
+    re.IGNORECASE | re.DOTALL,
+)
+_URL_VAR_ASSIGN_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_]\w*)\s*=\s*([`'\"])(.+?)\2",
+    re.DOTALL,
+)
+
+
+def _normalize_http_path(value: str) -> str | None:
+    raw = value.strip()
+    if not raw:
+        return None
+    # Collapse template placeholders like `${API_BASE_URL}` while preserving URL shape.
+    raw = re.sub(r"\$\{[^}]+\}", "{param}", raw)
+    if raw.startswith("{param}/"):
+        raw = "/" + raw[len("{param}/"):]
+    elif raw == "{param}":
+        return None
+    elif raw.startswith("{param}"):
+        raw = raw[len("{param}"):]
+    if "{" in raw and "}" not in raw:
+        return None
+    raw = raw.split("?", 1)[0].split("#", 1)[0].strip()
+    if not raw:
+        return None
+    if raw.startswith("http://") or raw.startswith("https://"):
+        raw = urlparse(raw).path
+    if raw.startswith("//"):
+        raw = urlparse(f"https:{raw}").path
+    if raw.startswith("api/"):
+        raw = "/" + raw
+    if not raw.startswith("/"):
+        return None
+    return raw if raw == "/" else raw.rstrip("/")
+
+
+def _extract_fastapi_routes(source: str) -> list[tuple[str, str]]:
+    routes: list[tuple[str, str]] = []
+    for m in _FASTAPI_ROUTE_RE.finditer(source):
+        method = m.group(1).lower()
+        path = _normalize_http_path(m.group(2))
+        if path:
+            routes.append((method, path))
+    for m in _FASTAPI_API_ROUTE_RE.finditer(source):
+        path = _normalize_http_path(m.group(1))
+        methods_block = m.group(2)
+        if not path:
+            continue
+        methods = re.findall(r"['\"]([A-Za-z]+)['\"]", methods_block or "")
+        if not methods:
+            routes.append(("get", path))
+            continue
+        for mm in methods:
+            mm_l = mm.lower()
+            if mm_l in _HTTP_METHODS:
+                routes.append((mm_l, path))
+    return routes
+
+
+def _extract_http_calls(source: str) -> list[tuple[str | None, str]]:
+    calls: list[tuple[str | None, str]] = []
+    var_paths: dict[str, str] = {}
+    for m in _URL_VAR_ASSIGN_RE.finditer(source):
+        var_name = m.group(1)
+        raw = m.group(3)
+        path = _normalize_http_path(raw)
+        if path:
+            var_paths[var_name] = path
+    for m in _FETCH_CALL_RE.finditer(source):
+        path = _normalize_http_path(m.group(2))
+        if path:
+            calls.append((None, path))
+    for m in _FETCH_VAR_CALL_RE.finditer(source):
+        var_name = m.group(1)
+        path = var_paths.get(var_name)
+        if path:
+            calls.append((None, path))
+    for rx in (_AXIOS_CALL_RE, _HTTP_CLIENT_CALL_RE):
+        for m in rx.finditer(source):
+            method = (m.group(1) or "").lower()
+            path = _normalize_http_path(m.group(3))
+            if path:
+                calls.append((method if method in _HTTP_METHODS else None, path))
+    return calls
+
+
+def _route_matches(call_path: str, route_path: str) -> bool:
+    if call_path == route_path:
+        return True
+    route_re = "^" + re.sub(r"\{[^/]+\}", r"[^/]+", route_path.rstrip("/")) + "/?$"
+    if re.match(route_re, call_path):
+        return True
+    # fallback: include_router prefixes may not be materialized in decorators
+    if route_path != "/" and call_path.endswith(route_path):
+        return True
+    return False
+
+
+def _build_http_runtime_edges(
+    index: DocsIndex,
+    include_scopes: set[str] | None = None,
+) -> list[tuple[str, str, str, str]]:
+    """Return (caller_file, route_owner_file, method, path) for runtime HTTP links."""
+    repo_root = Path(index.repo_path).resolve()
+    route_entries: list[tuple[str, str, str]] = []
+    source_text_cache: dict[str, str] = {}
+
+    scoped_paths: list[str] = []
+    for s in index.scopes:
+        if include_scopes is not None and s.scope_id not in include_scopes:
+            continue
+        scoped_paths.extend(s.paths)
+
+    for p in scoped_paths:
+        if not p.endswith(".py"):
+            continue
+        abs_path = (repo_root / p).resolve()
+        if not abs_path.is_file():
+            continue
+        try:
+            text = abs_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        source_text_cache[p] = text
+        for method, route in _extract_fastapi_routes(text):
+            route_entries.append((method, route, p))
+
+    if not route_entries:
+        return []
+
+    out: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for p in scoped_paths:
+        if not p.endswith((".ts", ".tsx", ".js", ".jsx", ".py")):
+            continue
+        text = source_text_cache.get(p)
+        if text is None:
+            abs_path = (repo_root / p).resolve()
+            if not abs_path.is_file():
+                continue
+            try:
+                text = abs_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+        for call_method, call_path in _extract_http_calls(text):
+            for route_method, route_path, route_file in route_entries:
+                if call_method and route_method and call_method != route_method:
+                    continue
+                if not _route_matches(call_path, route_path):
+                    continue
+                edge = (p, route_file, (call_method or route_method or "get").lower(), call_path)
+                if edge not in seen:
+                    seen.add(edge)
+                    out.append(edge)
+    return out
 
 
 @app.get("/api/service-details")

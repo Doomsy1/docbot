@@ -406,27 +406,15 @@ async def run_agent_exploration(
             if depth >= max_depth:
                 return 0
             file_count = len(scope_files)
-            if file_count < 8:
-                return 0
-            if depth >= 2 and file_count < 18:
-                return 0
             candidate_count = len(_candidate_target_counts(scope_root, scope_files))
             if candidate_count == 0:
                 return 0
 
             # Dynamic budget from repo shape; prefer broader delegation for
             # large/bushy scopes while tapering as depth increases.
-            base = max(1, round(file_count / 24))
-            depth_factor = {0: 1.0, 1: 0.7, 2: 0.4, 3: 0.2}.get(depth, 0.1)
-            desired = max(1, round(base * depth_factor))
+            base = max(1, round(file_count / 12))
+            desired = base
 
-            if depth <= 1 and candidate_count >= 4 and file_count >= 30:
-                desired = max(desired, 2)
-            if depth == 0 and candidate_count >= 6 and file_count >= 80:
-                desired = max(desired, 3)
-
-            max_children = min(candidate_count, 3 if depth <= 1 else 2 if depth == 2 else 1)
-            desired = min(desired, max_children)
             return desired
 
         if is_mimo_flash:

@@ -2266,6 +2266,90 @@ class ChatResponse(BaseModel):
     suggestions: list[str] = Field(default_factory=list)
 
 
+class DiffChatRequest(BaseModel):
+    question: str
+    diff_context: dict  # The current diff report from /api/changes
+
+
+def _build_diff_system_prompt() -> str:
+    """Build system prompt for diff-aware chat."""
+    return """You are a helpful assistant that explains code and documentation changes between two snapshots of a codebase.
+
+You will receive:
+1. A diff report showing what changed (added scopes, removed scopes, modified scopes, stats delta)
+2. A user question about those changes
+
+Your job is to:
+- Explain the changes clearly and concisely
+- Reference specific scope names when relevant
+- Summarize the impact of changes when asked
+- Help users understand what was added, removed, or modified
+
+Be concise and focus on the actual data provided. If you don't have enough information to answer, say so.
+Format your response using markdown with headers and bullets for readability."""
+
+
+@app.post("/api/diff-chat")
+async def diff_chat(req: DiffChatRequest):
+    """Answer questions about diff changes between snapshots."""
+    if not req.question.strip():
+        return {"answer": "Please provide a question."}
+
+    if _llm_client is None:
+        raise HTTPException(
+            status_code=503, detail="LLM not configured (missing OPENROUTER_KEY)."
+        )
+
+    # Format diff context for the LLM
+    ctx = req.diff_context
+    diff_summary = []
+
+    if ctx.get("added_scopes"):
+        diff_summary.append(f"**Added Scopes ({len(ctx['added_scopes'])}):** {', '.join(ctx['added_scopes'])}")
+    if ctx.get("removed_scopes"):
+        diff_summary.append(f"**Removed Scopes ({len(ctx['removed_scopes'])}):** {', '.join(ctx['removed_scopes'])}")
+    if ctx.get("modified_scopes"):
+        mods = []
+        for m in ctx["modified_scopes"]:
+            details = []
+            if m.get("added_files"):
+                details.append(f"+{len(m['added_files'])} files")
+            if m.get("removed_files"):
+                details.append(f"-{len(m['removed_files'])} files")
+            if m.get("summary_changed"):
+                details.append("summary changed")
+            mod_str = f"{m['scope_id']}"
+            if details:
+                mod_str += f" ({', '.join(details)})"
+            mods.append(mod_str)
+        diff_summary.append(f"**Modified Scopes ({len(ctx['modified_scopes'])}):** {'; '.join(mods)}")
+    
+    stats = ctx.get("stats_delta", {})
+    if any(stats.get(k, 0) != 0 for k in ["total_files", "total_scopes", "total_symbols"]):
+        stats_str = f"Files: {stats.get('total_files', 0):+d}, Scopes: {stats.get('total_scopes', 0):+d}, Symbols: {stats.get('total_symbols', 0):+d}"
+        diff_summary.append(f"**Stats Delta:** {stats_str}")
+
+    if ctx.get("graph_changed"):
+        diff_summary.append("**Graph:** Architecture dependencies changed")
+
+    context_text = "\n".join(diff_summary) if diff_summary else "No changes detected between these snapshots."
+
+    messages = [
+        {"role": "system", "content": _build_diff_system_prompt()},
+        {
+            "role": "user",
+            "content": f"## Diff Report\n{context_text}\n\n## Question\n{req.question}",
+        },
+    ]
+
+    try:
+        answer = await _llm_client.chat(messages)
+        return {"answer": answer}
+    except Exception as exc:
+        logger.error("Diff chat LLM error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"LLM Error: {exc}") from exc
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     """Answer questions about the codebase using index-aware RAG."""

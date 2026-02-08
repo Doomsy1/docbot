@@ -88,9 +88,11 @@ export default function App() {
           {activeTab === 'explore' && <DynamicGraphChat />}
           {activeTab === 'diff' && <DiffViewer />}
         </main>
-        <div className="w-[570px] shrink-0 border-l border-black h-full">
-          <Chat onSelectFile={selectFile} />
-        </div>
+        {activeTab !== 'explore' && activeTab !== 'diff' && (
+          <div className="w-[570px] shrink-0 border-l border-black h-full">
+            <Chat onSelectFile={selectFile} />
+          </div>
+        )}
       </div>
     </div>
   )

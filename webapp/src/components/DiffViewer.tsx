@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { IconGitCompare, IconPlus, IconMinus, IconEdit, IconChartBar, IconCpu, IconChevronDown, IconChevronRight } from '@tabler/icons-react';
+import { useEffect, useState, useRef } from 'react';
+import { IconGitCompare, IconPlus, IconMinus, IconEdit, IconChartBar, IconCpu, IconChevronDown, IconChevronRight, IconSend, IconMessageCircle } from '@tabler/icons-react';
 
 interface HistorySnapshot {
   run_id: string;
@@ -34,6 +34,11 @@ interface DiffReport {
   };
 }
 
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export default function DiffViewer() {
   const [snapshots, setSnapshots] = useState<HistorySnapshot[]>([]);
   const [loading, setLoading] = useState(true);
@@ -43,6 +48,12 @@ export default function DiffViewer() {
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [expandedMods, setExpandedMods] = useState<Set<string>>(new Set());
+
+  // Chat state
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetch('/api/history')
@@ -79,6 +90,38 @@ export default function DiffViewer() {
       .catch(err => setDiffError(err.message))
       .finally(() => setDiffLoading(false));
   }, [fromId, toId]);
+
+  // Scroll chat to bottom when new messages arrive
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
+
+  const sendMessage = async () => {
+    if (!chatInput.trim() || !diff || chatLoading) return;
+    
+    const userMsg: ChatMessage = { role: 'user', content: chatInput.trim() };
+    setChatMessages(prev => [...prev, userMsg]);
+    setChatInput('');
+    setChatLoading(true);
+
+    try {
+      const res = await fetch('/api/diff-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: userMsg.content,
+          diff_context: diff,
+        }),
+      });
+      if (!res.ok) throw new Error(`Error: ${res.status}`);
+      const data = await res.json();
+      setChatMessages(prev => [...prev, { role: 'assistant', content: data.answer }]);
+    } catch (err) {
+      setChatMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err instanceof Error ? err.message : 'Failed to get response'}` }]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
 
   const toggleMod = (id: string) => {
     setExpandedMods(prev => {
@@ -127,8 +170,9 @@ export default function DiffViewer() {
   }
 
   return (
-    <div className="h-full overflow-auto bg-gray-50">
-      <div className="max-w-4xl mx-auto p-8 space-y-6">
+    <div className="h-full flex flex-col bg-gray-50">
+      <div className="flex-1 overflow-auto">
+        <div className="max-w-4xl mx-auto p-8 space-y-6">
         {/* Header */}
         <div className="border-b border-black pb-4">
           <h1 className="text-2xl font-bold font-mono flex items-center gap-3">
@@ -353,7 +397,66 @@ export default function DiffViewer() {
             )}
           </>
         )}
+        </div>
       </div>
+
+      {/* Chat Panel - fixed at bottom */}
+      {diff && (
+        <div className="border-t border-black bg-white">
+          {/* Chat Messages */}
+          <div className="max-w-4xl mx-auto">
+            {chatMessages.length > 0 && (
+              <div className="max-h-64 overflow-y-auto p-4 space-y-3 bg-gray-50 border-b border-gray-200">
+                {chatMessages.map((msg, i) => (
+                  <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[80%] px-4 py-2 rounded-lg text-sm ${
+                      msg.role === 'user'
+                        ? 'bg-black text-white'
+                        : 'bg-white border border-gray-300 text-gray-800'
+                    }`}>
+                      {msg.role === 'assistant' ? (
+                        <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: msg.content.replace(/\n/g, '<br/>') }} />
+                      ) : (
+                        msg.content
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {chatLoading && (
+                  <div className="flex justify-start">
+                    <div className="bg-white border border-gray-300 px-4 py-2 rounded-lg text-sm text-gray-500">
+                      <IconCpu className="inline animate-spin mr-2" size={14} />
+                      Thinking...
+                    </div>
+                  </div>
+                )}
+                <div ref={chatEndRef} />
+              </div>
+            )}
+
+            {/* Chat Input */}
+            <div className="p-4 flex gap-3 items-center">
+              <IconMessageCircle className="text-gray-400 shrink-0" size={20} />
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
+                placeholder="Ask about the changes..."
+                className="flex-1 border border-gray-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black"
+                disabled={chatLoading}
+              />
+              <button
+                onClick={sendMessage}
+                disabled={chatLoading || !chatInput.trim()}
+                className="bg-black text-white p-2 rounded-lg hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+              >
+                <IconSend size={18} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

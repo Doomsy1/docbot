@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import AdaptiveMixedGraph from './AdaptiveMixedGraph';
 import type { MixedNode, MixedEdge } from './AdaptiveMixedGraph';
 import { IconCpu } from '@tabler/icons-react';
@@ -46,6 +46,8 @@ export default function DiffGraph({ diff }: Props) {
   const [nodes, setNodes] = useState<MixedNode[]>([]);
   const [edges, setEdges] = useState<MixedEdge[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [isolatedNodeId, setIsolatedNodeId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!diff) return;
@@ -143,6 +145,24 @@ export default function DiffGraph({ diff }: Props) {
       .finally(() => setLoading(false));
   }, [diff]);
 
+  // Escape key exits spotlight
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') setIsolatedNodeId(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const handleNodeClick = useCallback((node: MixedNode) => {
+    setSelectedNodeId(node.id);
+  }, []);
+
+  const toggleNodeIsolation = useCallback((node: MixedNode) => {
+    setSelectedNodeId(node.id);
+    setIsolatedNodeId((prev) => (prev === node.id ? null : node.id));
+  }, []);
+
   if (loading) {
     return (
       <div className="h-[50vh] flex items-center justify-center">
@@ -162,7 +182,25 @@ export default function DiffGraph({ diff }: Props) {
 
   return (
     <div className="relative">
-      <AdaptiveMixedGraph nodes={nodes} edges={edges} />
+      {isolatedNodeId && (
+        <div className="absolute top-2 left-3 z-10">
+          <button
+            onClick={() => setIsolatedNodeId(null)}
+            className="inline-flex items-center justify-center h-7 px-3 border border-black bg-amber-100 text-black hover:bg-amber-200 text-xs font-mono"
+            title="Exit spotlight (Esc)"
+          >
+            Exit Spotlight
+          </button>
+        </div>
+      )}
+      <AdaptiveMixedGraph
+        nodes={nodes}
+        edges={edges}
+        selectedNodeId={selectedNodeId}
+        isolatedNodeId={isolatedNodeId}
+        onNodeClick={handleNodeClick}
+        onNodeIsolateToggle={toggleNodeIsolation}
+      />
       {/* Legend */}
       <div className="absolute bottom-3 left-3 bg-white/90 border border-black px-3 py-2 text-xs font-mono flex gap-4">
         <span className="flex items-center gap-1.5">

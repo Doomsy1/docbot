@@ -60,13 +60,20 @@ Documentation is almost always outdated or non-existent. **DocBot** solves this 
 
 Flags for `docbot generate`:
 
-| Flag            | Description                                       |
-| --------------- | ------------------------------------------------- |
-| `--viz`         | Launch live pipeline telemetry server.            |
-| `--agents`      | Enable recursive agentic exploration (deep-dive). |
-| `--no-llm`      | Skip AI enrichment (static extraction only).      |
-| `--concurrency` | Parallel worker count (default: 4).               |
-| `--model`       | Override default model ID.                        |
+| Flag                  | Description                                           |
+| --------------------- | ----------------------------------------------------- |
+| `--no-llm`            | Skip LLM enrichment (extraction only).                |
+| `--model / -m`        | Model ID (default: openai/gpt-4o-mini).               |
+| `--concurrency / -j`  | Parallel explorer workers (default: 4).               |
+| `--timeout / -t`      | Per-scope timeout in seconds (default: 120).          |
+| `--max-scopes`        | Maximum number of documentation scopes (default: 20). |
+| `--agent-depth`       | Max recursion depth for agents (default: 4).          |
+| `--serve`             | Start live webapp during generation for visualization.|
+| `-p` / `--port`       | Webapp port when using --serve (default: 8000).       |
+
+Notes:
+- Agent exploration is default-on in current pipeline paths.
+- MIMO (`xiaomi/mimo-v2-flash`) uses a bounded delegation strategy tuned for stability and broader deep-search coverage.
 
 ## How It Works
 

@@ -465,7 +465,7 @@ New model (`DocbotConfig` in models.py):
 ```python
 class DocbotConfig(BaseModel):
     """User configuration stored in .docbot/config.toml."""
-    model: str = "openai/gpt-oss-20b"
+    model: str = "xiaomi/mimo-v2-flash"
     concurrency: int = 4
     timeout: float = 120.0
     max_scopes: int = 20
@@ -890,7 +890,7 @@ src/docbot/cli.py (replay command)
 -   `docbot hook uninstall` -- hook removed cleanly
 -   `docbot run` -- still works as alias for generate
 -   `docbot config model` -- prints current model
--   `docbot config model openai/gpt-oss-20b` -- updates config.toml
+-   `docbot config model xiaomi/mimo-v2-flash` -- updates config.toml
 -   `docbot diff` -- shows changes between last two snapshots
 -   `git pull` with post-merge hook -- triggers automatic doc update + snapshot
 -   `docbot serve` after pull -- webapp shows changes banner with scope diff
@@ -925,7 +925,7 @@ Given project priority (foundational features first, then vision features), exec
 **Cross-cutting -- LangGraph Agent Exploration** [COMPLETE]
 - Replaced custom `agents/` system with LangGraph-based `exploration/` package
 - Recursive generalized agent with shared notepad (NotepadStore)
-- Parallel standard + agent tracks in orchestrator (via `--agents` flag)
+- Parallel standard + agent tracks in orchestrator (agent mode is default-on in current paths)
 - SSE streaming (`/api/agent-stream`) + React Force Graph live visualization
 - `--serve` flag on `generate` for live webapp during pipeline
 - See `docs/AGENT_ARCHITECTURE.md` and `docs/MIGRATION_NOTES.md` for details

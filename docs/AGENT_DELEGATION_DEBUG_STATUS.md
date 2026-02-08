@@ -1,67 +1,107 @@
-﻿# Agent Delegation Debug Status (Checkpoint)
+# Agent Delegation Debug Status
 
-Date: 2026-02-08
+Date: 2026-02-08  
 Branch: `New-Agent-Architecture`
 
-## Summary
-This checkpoint captures current state after migrating to LangGraph + live webapp and debugging the `run --viz` / exploration flow.
+## Purpose
+This document captures what was changed to stabilize and tune agent delegation after the LangGraph migration, with emphasis on `xiaomi/mimo-v2-flash` behavior.
 
-## What Works
-- Root webapp route (`/`) now serves built frontend assets in all `--viz` code paths.
-- `/api/pipeline` no longer 404s during live runs; it falls back to in-memory tracker events when no persisted events exist yet.
-- SSE `/api/agent-stream` no longer returns 503 when no agents; it emits `done` with `{"no_agents": true}`.
-- `/api/agent-state` now loads persisted `agent_state.json` when in-memory state is empty.
-- Exploration hook no longer reconnect-spams due to stale closure.
-- Retry cap/no-agents handling added in frontend exploration SSE logic.
-- Browser auto-open added for viz entry points.
-- `run` CLI currently defaults to agent mode (flag removed in this checkpoint).
+## Commands Used for Validation
+- `docbot run ../fine-ill-do-it-myself --output docbot_data --viz`
+- `py -m pytest -q tests/test_agent_integration_cli.py -s`
+- `py -m pytest -q tests/test_agent_exploration_integration.py -s`
+- `py -m pytest -q tests/test_web_pipeline_api.py tests/test_renderer_llm_event_loop.py`
+- `py -m pytest -q tests/test_exploration_prompts.py`
 
-## Current Problem (Core)
-Agent delegation is still unreliable when driven purely by model tool-calling.
-Observed behavior on `../fine-ill-do-it-myself`:
-- Root agent consistently spawns and performs tool reads/listing.
-- Root often returns a textual summary without issuing `delegate` tool calls.
-- Result: no child `agent_spawned` events (`parent_id=root`) in affected runs.
+## Baseline Problems (Before Fixes)
+1. MIMO tool-loop recursion failures (`GRAPH_RECURSION_LIMIT`) caused unstable delegation.
+2. Exploration state was often empty after run completion unless SSE had been actively consumed.
+3. Renderer could fail with `Semaphore ... is bound to a different event loop`.
+4. Delegation was too conservative for deep search, often producing ~5-7 agents on the integration repo.
 
-## Evidence Collected
-- Live/event traces show:
-  - `agent_spawned(root)`
-  - many `tool_start/list_directory` and `tool_start/read_file`
-  - `agent_finished(root)` with empty or plain summary
-  - zero `tool_start(delegate)` events in failing runs
-- Strict prompt retries and tool-call policy prompts did not produce stable delegation.
-- Forced policy around `finish` tool caused false failures because model frequently ends with plain assistant text instead of calling `finish`.
+## Implemented Fixes
 
-## Changes Attempted (and kept)
-- Added recursive child-agent execution plumbing via async `delegate_fn` in tool factory.
-- Added better callback stability (`on_chat_model_start` no-op; ignore empty tokens).
-- Added backend integration tests for agent behavior and CLI defaults.
-- Removed fragile hard requirement for `finish` tool call (summary text accepted).
+### 1) Stabilized MIMO execution path and sandboxed delegation
+Commits:
+- `db01a23` Stabilize MIMO delegation flow and live agent state persistence
+- `5a61069` Tune MIMO delegation breadth/depth for deeper dynamic exploration
 
-## Changes Attempted (and reverted)
-- Auto-spawn fallback child agents when no delegation happened (reverted on request).
+Key changes:
+- Added bounded MIMO-first exploration path with model-driven planning + recursive delegation.
+- Enforced delegation sandbox constraints:
+  - no self-target
+  - no ancestor-target
+  - no out-of-scope target
+  - no duplicate sibling target
+  - must map to real scanned source files
+- Added fallback planner top-up when model under-delegates relative to desired count.
 
-## Open Risks
-- Delegation depends on model compliance with tool-calling; currently nondeterministic.
-- Integration test `test_run_async_agents_emits_child_delegation_events` still fails intermittently/consistently when root does not call `delegate`.
+### 2) Observability + persisted state
+Commits:
+- `dda7577` Persist scope_root in agent snapshot for exploration observability
+- `db01a23` Stabilize MIMO delegation flow and live agent state persistence
 
-## Test Status in this checkpoint
-- Passing:
-  - `tests/test_exploration_graph.py` (including new callback/delegate-tool unit tests)
-  - `tests/test_web_pipeline_api.py`
-  - `tests/test_agent_integration_cli.py::test_run_help_no_agents_flag`
-- Failing / unstable:
-  - `tests/test_agent_integration_cli.py::test_run_async_agents_emits_child_delegation_events`
+Key changes:
+- `agent_spawned` snapshot now stores `scope_root`.
+- Live event queue setup resets stale snapshot state at run start.
+- Agent/notepad events are mirrored into server snapshot even when no SSE client is connected.
+- `agent_state.json` persistence remains active for completed live runs.
 
-## Recommended Next Fix Direction
-1. Move delegation selection to backend planner/orchestrator (deterministic child scope plan), not model discretion.
-2. Keep model delegation as optional enhancement, not required for correctness.
-3. Emit explicit delegation lifecycle events from backend so integration tests can validate deterministic child spawn count.
-4. Keep frontend out of loop until backend deterministic delegation passes consistently.
+### 3) Prompt policy hardening
+Commit:
+- `ffe8772` Strengthen delegation prompt policy and under-delegation rationale
 
-## Post-Checkpoint Update (same day)
-- Implemented backend-driven child delegation planning after root summary to remove hard dependency on model-issued `delegate` tool calls.
-- Kept model/tool path available, but correctness now comes from deterministic backend orchestration.
-- Integration test result on `../fine-ill-do-it-myself`:
-  - `py -m pytest tests/test_agent_integration_cli.py::test_run_async_agents_emits_child_delegation_events -q`
-  - **PASS** (`1 passed`, ~2m26s).
+Key changes:
+- System prompt now explicitly says under-delegation must have strong concrete reasons.
+- Added good vs weak reason examples in prompt text.
+- Delegation planner prompt uses a target count framing with explicit under-delegation rationale requirement.
+
+### 4) Renderer event-loop reliability
+Commit:
+- `db01a23` Stabilize MIMO delegation flow and live agent state persistence
+
+Key changes:
+- `render_with_llm()` now keeps LLM generation on one event loop (no nested `asyncio.run` in executor threads).
+- Eliminated observed semaphore cross-loop failures in validated runs.
+
+## Current Behavior (Integration Repo)
+Repository view used by scanner:
+- `119` source files
+- main top-level buckets: `racing_sim` and `legacy`
+
+Observed agent counts:
+- Earlier baseline: ~`5-7`
+- After tuning: depth-4 default path typically `10+` in direct exploration runs
+  - calibration run showed `10` at depth 4
+  - an unconstrained sample showed `17` before final breadth calibration
+
+Current defaults:
+- `agent_depth` default is now `4` (run/orchestrator/config path).
+- `docbot run` still prints `max_depth=<value>` from orchestrator; this should match passed depth.
+
+## Tests Added/Updated
+- `tests/test_agent_exploration_integration.py`
+  - multi-level spawn + no-error assertions
+  - sandbox scope containment assertions
+  - deep-search test expecting double-digit agent count at depth 4
+- `tests/test_renderer_llm_event_loop.py`
+  - regression test for renderer LLM event-loop consistency
+- `tests/test_web_pipeline_api.py`
+  - scope_root snapshot persistence
+  - snapshot reset semantics
+  - notepad snapshot mirroring without SSE consumer
+- `tests/test_exploration_prompts.py`
+  - verifies prompt includes under-delegation policy and examples
+
+## Open Considerations
+1. Prompt-only delegation policy changes improve guidance but did not materially increase counts by themselves; count uplift came from planner/budget logic.
+2. There is still variance run-to-run due to model choices; tests assert minimum behavior, not exact tree shape.
+3. If desired target is specifically "usually 10-12", further tuning should focus on depth-3/4 child caps and file-count thresholds in `_desired_children_for_scope()`.
+
+## Quick Handoff for Future Agents
+1. Start with `tests/test_agent_exploration_integration.py`.
+2. Then run `docbot run ../fine-ill-do-it-myself --output docbot_data --viz`.
+3. Verify:
+   - `/api/agent-state` is non-empty after run (even without active SSE consumer),
+   - no renderer semaphore loop errors,
+   - depth reaches expected level for configured `agent_depth`.
